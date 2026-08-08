@@ -37,6 +37,7 @@ the idea before any architecture is committed.
 | **E4** | What does preemption cost, and what work-unit size amortizes it? | **PASSES** ✅ |
 | **E5** | Is ANE work less perceptible than GPU work? | **PASSES** ✅ |
 | **E6** | Can a large model be split across the pool? | **Interconnect-defined** ⚠️ |
+| **Cluster** | Admission control for the cluster tier | **Gate works** ✅ |
 | **Harvest** | Fleet dispatch + presence-driven yield, GPU and ANE | **Works** ✅ |
 
 E1 is the existential gate — if GPU access requires an active GUI session, the
@@ -120,6 +121,15 @@ instruments cover different contention paths:
   clean mid-unit yield on unlock. ANE throughput was identical present or absent
   (30.2 vs 31.1 items/s), because the politeness machinery costs nothing on a
   path that needs none.
+- **Model *depth* is the cluster tier's binding constraint, not size.** The
+  admission gate refused a 110B model that fits the pool (55 < 59 GB) because at
+  80 layers it projects 3.68 tok/s against an 8 tok/s floor — tensor parallelism
+  pays ~2 all-reduces per layer per token. Solving for the depth that clears
+  that floor: **~1 layer on WiFi, ~38 on gigabit, ~230 on Thunderbolt.** Since a
+  70B has 80 layers and anything shallower fits on one node anyway, **the set of
+  models that both need the cluster tier and pass admission at gigabit is
+  empty.** This corrects E6's conclusion that Thunderbolt was an optimisation —
+  that generalised from a 28-layer 7B. For this tier it is a requirement.
 - **A logged-in machine now contributes.** The worker runs two runtimes and
   advertises which *kinds* of work its current policy permits; the coordinator
   keeps typed queues and serves only those. In IDLE with a mixed corpus the GPU

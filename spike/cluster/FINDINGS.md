@@ -88,6 +88,55 @@ safety mechanism survived, the one without it died.
   ceiling. The raw ceiling predicted 31.72 tok/s where reality delivered 11.69;
   admitting on the ceiling would promise 2.7x what the pool serves.
 
+## Serving front-end
+
+`serve.py` puts an OpenAI-compatible endpoint on a cluster pool. Verified across
+both nodes over the gigabit link, Qwen2.5-7B-4bit:
+
+```
+loaded   nodes 2, load 1.38s, resident 2.28 GB/rank, peak 2.79 GB/rank
+request  43 prompt + 34 completion tokens
+result   4.3s, 7.91 tok/s
+```
+
+Against **77.5 tok/s on one machine**, which is the same story E6 told: over
+gigabit this serves a model that would not otherwise fit, and pays roughly a 10x
+throughput penalty to do it.
+
+Peak of 2.79 GB against a 3.99 GB model confirms `lazy=True` is doing its job.
+Eager loading peaks above the full model size on every rank, so a pool would OOM
+on precisely the model the extra machines were bought for.
+
+### The lockstep problem, and how the protocol avoids a second channel
+
+Tensor parallelism means every rank runs the same forward pass. HTTP arrives at
+one node, so the prompt has to reach the others before any of them can start,
+and every rank must select the same token or they diverge into different
+sequences.
+
+The protocol uses the only primitive guaranteed to exist: a collective.
+`all_sum` with zeros on non-root ranks is a broadcast, and it doubles as the
+barrier that keeps ranks aligned. Non-root ranks block inside it, so a rank
+waiting is exactly a rank ready to serve, with no polling loop and no second
+channel to keep alive.
+
+    control = all_sum([flag, prompt_len, max_tokens, seed])
+    tokens  = all_sum(padded prompt)
+
+The seed is broadcast rather than fixed. Logits are all-reduced so every rank
+sees the same distribution, but each draws from it locally; without a shared
+seed the ranks would diverge after the first sampled token.
+
+Requests serialise on rank 0. The pool is one model, so concurrency would mean
+interleaving two lockstep sequences across the same ranks.
+
+### Admission measures rather than projects
+
+With `--min-tok-s`, the server runs one real completion at startup and refuses
+to serve below the floor. It does not use the comm-only ceiling, which proved
+2.7x optimistic: 31.72 predicted against 11.69 delivered. A pool that cannot
+clear the bar should say so before it is advertised, not after.
+
 ## Next
 
 Re-run over Thunderbolt. The prediction to test is that an 80-layer model moves

@@ -11,6 +11,7 @@ harvested Macs lose to both cloud APIs and rented GPUs. The winning arguments
 are that the marginal cost is electricity and that the data stays on premises.
 
 Full design: [`docs/PLAN.md`](docs/PLAN.md).
+Control plane spec: [`docs/CONTROL_PLANE.md`](docs/CONTROL_PLANE.md).
 
 ## Where the analogy breaks
 
@@ -198,6 +199,7 @@ spike/
   presence/            user-presence detection: the agent's primary control
 docs/
   PLAN.md              full design: tiers, use cases, architecture, verification
+  CONTROL_PLANE.md     control plane spec: data model, RBAC, APIs, testing
 ```
 
 ## Running the spike

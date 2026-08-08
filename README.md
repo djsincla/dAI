@@ -36,6 +36,7 @@ the idea before any architecture is committed.
 | **E4** | What does preemption cost, and what work-unit size amortizes it? | **PASSES** ✅ |
 | **E5** | Is ANE work less perceptible than GPU work? | **PASSES** ✅ |
 | **E6** | Can a large model be split across the pool? | **Interconnect-defined** ⚠️ |
+| **Harvest** | Fleet dispatch + presence-driven yield together | **Works** ✅ |
 
 E1 is the existential gate — if GPU access requires an active GUI session, the
 fleet is limited to logged-in-but-idle machines and the product is materially
@@ -107,6 +108,18 @@ instruments cover different contention paths:
   it.** The all-reduce ceiling said 31.72 tok/s; reality delivered 11.69, so the
   ceiling was 2.7x optimistic. Tight loops enjoy warm connections and no
   synchronisation stalls; real forward passes pay both.
+- **The harvest worker works end to end.** Detect presence → yield mid-unit →
+  return unfinished items → coordinator requeues → unload → resume, driven by a
+  real `PreventUserIdleDisplaySleep` assertion with the worker told nothing.
+  Yield granularity is between *items*, not between work units, so a preemption
+  costs at most the item in flight.
+- **Background QoS costs ~26x on bursty work, not the ~2.4x E1 measured.** Per
+  item, 0.5B / 24 tokens: 0.136 s standard vs 3.528 s background. E1's figure
+  came from a sustained matmul loop; a worker interleaving CPU and GPU gets
+  descheduled between submissions. **QoS penalties from sustained benchmarks do
+  not transfer to bursty workloads.** Consequence: IDLE is now ANE-only, so GPU
+  harvesting runs only in LOCKED and ABSENT — and ANE becomes the only permitted
+  work across three of five states.
 - **No GPU setting is safe while a user is present.** E2 swept QoS x duty cycle
   against a Blender viewport: the gentlest configuration tested (background QoS,
   25% duty) still cost **+46% of p95**, rising to +190% at standard QoS and full

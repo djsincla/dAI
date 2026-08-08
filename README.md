@@ -31,7 +31,7 @@ the idea before any architecture is committed.
 | Experiment | Question | Status |
 |---|---|---|
 | **E1** | Can MLX reach Metal from a `launchd` daemon with no user session? | Agent ✅ · Daemon ⏳ |
-| **E2** | At what memory ceiling and QoS does the interactive user notice? | Not started |
+| **E2** | At what memory ceiling and QoS does the interactive user notice? | Harness built ✅ · Sweep ⏳ |
 | **E3** | What is aggregate throughput vs. an API call or a rented GPU hour? | Not started |
 | **E4** | What does preemption cost, and what work-unit size amortizes it? | Not started |
 | **E5** | Is ANE work less perceptible than GPU work? | Not started |
@@ -39,6 +39,23 @@ the idea before any architecture is committed.
 E1 is the existential gate — if GPU access requires an active GUI session, the
 fleet is limited to logged-in-but-idle machines and the product is materially
 weaker. See [`spike/e1_metal_access/FINDINGS.md`](spike/e1_metal_access/FINDINGS.md).
+
+### A note on the E2 workloads
+
+`spike/e2_contention/` drives an Xcode build and a Blender viewport. **Neither is
+part of the product.** dAI is distributed AI compute; nothing about rendering or
+graphics ships.
+
+They are *victim workloads* — instruments standing in for "whatever the human at
+this machine is doing that must not be disturbed." The central claim is that
+idle Macs can be harvested without their owner noticing, and that claim is
+untestable without measuring something a human actually looks at. The two
+instruments cover different contention paths:
+
+- **Xcode build** — CPU-side, contends for *memory bandwidth*
+- **Blender viewport** — contends for the *GPU directly*, and sets the stricter
+  threshold, because people perceive frame stutter far more acutely than a
+  batch job finishing slightly late
 
 ### Confirmed so far
 
@@ -49,6 +66,11 @@ weaker. See [`spike/e1_metal_access/FINDINGS.md`](spike/e1_metal_access/FINDINGS
   to Standard once the machine is confirmed idle.
 - Metal self-caps at `max_recommended_working_set_size` = 51.8 GiB on a 64 GB
   machine (~81%). Agent memory ceilings sit under *that*, not under installed RAM.
+- **Contention shows up in the tail, not the median.** One unreplicated run at a
+  25 GB ceiling under background QoS: p50 frame time moved +3% while p95 moved
+  +65% and p99 +82% (mean fps 68.7 → 53.4). Reporting medians or mean fps would
+  have read as "negligible impact"; the tail is where the user sees stutter.
+  This is why the harness reports percentiles and hitch counts.
 
 ## Runtime
 

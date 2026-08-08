@@ -30,6 +30,38 @@ Two regimes are visible in the GbE column:
 
 They respond to different upgrades, which matters when choosing an interconnect.
 
+## End-to-end: sharding is a memory technique, not a speed technique
+
+The ceiling above counts only network time. Measured for real, Qwen2.5-7B-4bit,
+128 tokens, greedy, median of 3:
+
+| | Single (rotorua) | Sharded (2 nodes, GbE) |
+|---|---|---|
+| Steady throughput | **77.46 tok/s** | **11.69 tok/s** |
+| Resident per node | 3.99 GB | **2.28 GB** |
+| Time to first token | 0.19 s | 0.62 s |
+| Load | 0.65 s | 0.83 s |
+
+**Sharding costs 6.6x throughput to save 43% of per-node memory.** That is the
+whole trade, and it means splitting is never worth doing for speed — only to fit
+a model that otherwise would not.
+
+### The 31.72 tok/s ceiling was 2.7x optimistic
+
+Only 11.69 of the predicted 31.72 tok/s materialised — 37%. The microbenchmark
+overestimated because a tight all-reduce loop enjoys warm connections and no
+synchronisation stalls, while a real forward pass pays both.
+
+Accounting per token: 85.5 ms actual, against ~31.5 ms of raw all-reduce latency
+(56 x 0.563 ms) plus roughly 6.5 ms of split compute. Some 47 ms is unaccounted
+for — synchronisation and per-op overhead that the microbenchmark's steady-state
+loop never exposes.
+
+**Lesson: a latency microbenchmark bounds a distributed system, it does not
+predict it.** Treat any such ceiling as optimistic by a factor of two or more
+until an end-to-end run confirms it. This is the same failure mode as the E2/E5
+measurement traps — the error runs in the flattering direction.
+
 ### The verdict changed with the wire
 
 On WiFi, splitting ran at **1.4%** of single-machine speed — never worth doing.
@@ -110,6 +142,16 @@ So the cluster tier's real question is not "can we split" but "**is there a mode
 we need that does not fit on the biggest single box**". If not, the correct
 architecture is one large machine, not several linked ones — which is exactly
 the check the plan flagged before committing to Phase 2.
+
+The measured trade sharpens this. Sharding a 7B across two nodes yields 11.69
+tok/s where one node alone yields 77.46. Nobody should accept a 6.6x slowdown
+for a model that fits. The only defensible use is a model that does not, and even
+then the comparison is against buying one larger machine — an M3 Ultra with
+512 GB holds anything this fleet could assemble, at full single-node speed.
+
+Note also that `shard()` does **not** reduce peak load-time memory: every rank
+loads full weights before keeping its slice. A fleet cannot use sharding to hold
+a model no single node can load, which is the most tempting reason to want it.
 
 ## Measurement notes
 

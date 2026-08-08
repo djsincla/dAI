@@ -94,6 +94,16 @@ instruments cover different contention paths:
   ping); prefill is bandwidth-bound and saturates the gigabit link at 928 Mbps.
   By contrast the harvest tier is interconnect-insensitive — 0.95 efficiency over
   the same WiFi (E3).
+- **Sharding is a memory technique, not a speed technique.** End-to-end on GbE:
+  **11.69 tok/s sharded across two nodes vs 77.46 tok/s on one** — a 6.6x
+  slowdown to save 43% of per-node memory (2.28 GB vs 3.99 GB). Never split for
+  speed; only to fit a model that otherwise would not. And `shard()` does not
+  reduce *peak load* memory — every rank loads full weights before keeping its
+  slice — so a fleet cannot use it to hold a model no single node can load.
+- **A latency microbenchmark bounds a distributed system, it does not predict
+  it.** The all-reduce ceiling said 31.72 tok/s; reality delivered 11.69, so the
+  ceiling was 2.7x optimistic. Tight loops enjoy warm connections and no
+  synchronisation stalls; real forward passes pay both.
 - **Capability is workload-dependent, not a machine property.** Across an
   M2 Max/64 GB and an M4 Pro/48 GB, the M2 Max led by 7.5% on a 1.5B model and
   26.3% on a 7B — relative capability moved 3.5x from model size alone, and

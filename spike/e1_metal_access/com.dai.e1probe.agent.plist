@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Control condition: LaunchAgent in the user's GUI (Aqua) session.
+
+  This is the weaker deployment shape - it needs a logged-in user, so it can
+  only harvest logged-in-but-idle machines. If the daemon fails and this
+  passes, this is the fallback the product falls back to, and the harvest
+  tier's addressable capacity shrinks accordingly.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.dai.e1probe.agent</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/dwayne/Developer/dAI/spike/.venv/bin/python</string>
+        <string>/Users/dwayne/Developer/dAI/spike/e1_metal_access/probe.py</string>
+        <string>/tmp/dai_e1_agent.jsonl</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>E1_CONTEXT</key>
+        <string>agent</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>20</integer>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/dai_e1_agent.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/dai_e1_agent.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

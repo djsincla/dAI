@@ -1,0 +1,27 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Spike artifacts — probe output is machine-specific and regenerable
+*.jsonl
+*.out.log
+*.err.log
+/spike/**/results/
+
+# Models are large and fetched on demand, never committed
+models/
+*.safetensors
+*.gguf
+*.mlx
+
+# Swift / Xcode
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# macOS
+.DS_Store

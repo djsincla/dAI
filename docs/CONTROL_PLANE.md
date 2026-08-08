@@ -19,6 +19,36 @@ placement verification, `HIDIdleTime`, `pmset` assertions, and `ProcessType` QoS
 | Identity | client certificate | user session |
 | Depends on | Metal, ANE, IOKit, launchd | Postgres, object store |
 
+### Why the agent is Swift and not Node
+
+Asked and answered with data, so it does not get relitigated.
+
+MLX from Node is genuinely viable: `node-mlx` 2.3.0 and `@mlx-node/core` are
+maintained community bindings. That part of the objection to Node is wrong.
+
+**Core ML from Node is not.** The only published binding is `coreml` 0.0.1,
+untouched since June 2024, and the agent does not merely need inference: it
+needs `MLComputePlan` to verify that work actually landed on the ANE. No binding
+covers that.
+
+That decides it, because E2 and E5 together make the ANE the only work three of
+five presence states permit. During working hours it is the entire contribution
+a logged-in machine makes. An agent that cannot drive Core ML cannot do daytime
+work at all, and the alternatives are writing an N-API addon from scratch or
+shelling out to a Swift helper, which puts two runtimes on every Mac.
+
+| | Node | Swift |
+|---|---|---|
+| MLX | community bindings | `mlx-swift`, Apple's own |
+| Core ML and `MLComputePlan` | nothing usable | native |
+| IOKit and `pmset` presence | shell out | native |
+| QoS `setpriority` | FFI | native |
+| `launchd` daemon | needs SEA bundling | native, signed, notarizable |
+| Types shared with the control plane | direct | generated from OpenAPI |
+
+The shared-types argument for Node is real but smaller than it appears: the
+OpenAPI document generates clients for both, which is why it was written first.
+
 TypeScript for the control plane because the UI is the dominant surface - fleet
 views, pool management, RBAC screens, activity logs - and shared types across the
 API boundary is a real saving. The scheduler is I/O-bound (lease units, collect

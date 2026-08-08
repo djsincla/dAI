@@ -35,3 +35,6 @@ spike/e5_ane/results*/
 control-plane/node_modules/
 control-plane/dist/
 control-plane/certs/
+
+# Swift
+agent/.build/

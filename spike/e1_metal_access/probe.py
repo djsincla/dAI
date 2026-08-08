@@ -151,6 +151,29 @@ def main():
         "process": process_context(),
     }
 
+    # Metal access alone does not make a daemon viable. The agent also has to
+    # see whether a human is at the machine, and those signals may not survive
+    # session 0 either. Collect them in the same run rather than discovering a
+    # second existential problem after E1 "passes".
+    try:
+        import pathlib
+        sys.path.insert(
+            0, str(pathlib.Path(__file__).resolve().parent.parent / "presence"))
+        import presence
+        signals = presence.read_signals()
+        record["presence"] = {
+            "state": presence.classify(signals),
+            "signals": signals,
+            # The whole point of the daemon check: a signal that reads None here
+            # but works interactively is unavailable in session 0.
+            "unavailable_signals": [
+                k for k in ("hid_idle_s", "screen_locked", "console_user")
+                if signals.get(k) is None
+            ],
+        }
+    except Exception as exc:
+        record["presence"] = {"error": repr(exc)}
+
     try:
         record["gpu"] = gpu_probe()
         record["gpu_reachable"] = bool(

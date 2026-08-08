@@ -372,6 +372,13 @@ Order of work:
 
 ## 11. Open questions
 
+- **Cluster nodes must not sleep or run on battery.** A gang-scheduled job dies
+  when any member vanishes, and during this work `orca` did exactly that — twice,
+  once asleep and once from a flat battery. The harvest tier already handles this
+  through the on-battery policy gate, and the node that drained was running the
+  older worker with no presence logic at all. Cluster membership needs an
+  explicit AC-power and no-sleep requirement enforced at admission, plus health
+  checks that fail a pool before a job is scheduled onto it rather than after.
 - **Model distribution.** Every node needs weights before it can work. Not
   designed. On a large fleet this is the dominant network cost and probably wants
   peer-to-peer distribution rather than N pulls from a store.

@@ -270,25 +270,56 @@ There is a pleasing symmetry in it. Blender was E2's *instrument*, the victim
 workload standing in for the artist whose machine must not be disturbed. It
 becomes the payload.
 
-### The one thing that genuinely conflicts
+### Render units are disposable, which makes them easier, not harder
 
-**Render units are long, and the harvest tier assumes they are short.**
+A render unit is **idempotent**: tile T, samples 0-63 of frame F produces the
+same pixels on any node. A failed or preempted unit is therefore thrown away and
+rescheduled, with no partial work to preserve and no merge semantics required for
+correctness. Lease expiry (§2) already provides exactly this, and it matches how
+Deadline and OpenCue have always treated render tasks.
 
-The worker yields *between items*, so a preemption costs at most one item. That
-works because an item is ~27 ms of ANE work or ~1 s of generation. A rendered
-frame is minutes. Yielding mid-frame would either discard minutes of work or
-delay the yield until the frame finished, and E4's economics assumed neither.
+This removes a complication rather than adding one. Earlier drafts of this
+section called for progressive sample accumulation so that partial work could be
+salvaged. That is unnecessary.
 
-The fix is unit granularity, not a new mechanism. Cycles renders in tiles and
-accumulates samples progressively, so a unit becomes **"tile T, samples 0-63"**
-rather than "frame F". Partial samples are a valid, mergeable result: the
-coordinator composites tiles and accumulates sample batches, which is the same
-partial-result-and-requeue path the harvest worker already implements.
+**Why long units are acceptable here.** Render is GPU work, so E2 confines it to
+LOCKED and ABSENT, and those are precisely the states where preemption is rare:
+the machine is locked and nobody is using it. The yield-frequency problem belongs
+to states where a user is present, and render never runs in them.
 
-Sizing follows E4's rule directly. Load cost for a render unit is scene
-parse plus BVH build, which is far more expensive than a model load, so units
-must be correspondingly longer to amortise it, and the scene should stay resident
-across units from the same job rather than being reloaded per unit.
+Roughly, with preemptions arriving at mean interval `T`, a unit of duration `D`
+completes with probability `e^(-D/T)`. A 5-minute frame against a 30-minute mean
+idle window completes 85% of the time; the wasted 15% costs less than the
+machinery to avoid it.
+
+**So the sizing rule is efficiency, not correctness.** Units should still be
+short enough that a wasted one is cheap, and long enough to amortise scene parse
+and BVH build, which are far more expensive than a model load. The scene stays
+resident across units from the same job rather than being reloaded per unit.
+
+Two things this does require:
+
+- **Retry limits and poison detection.** A unit that fails on every node is a
+  broken scene, not an unlucky one, and must fail the job with that reason rather
+  than cycling forever.
+- **Atomic output.** Units write to temporary storage and rename on completion,
+  so a killed render never leaves a half-written frame that looks finished.
+
+### Partial results matter for ANE work, not GPU work
+
+Worth stating plainly, because it clarifies where the existing machinery earns
+its keep. The harvest worker returns unfinished items for every kind, and that
+generality is fine, but the *need* differs sharply:
+
+| | Runs in | Preemption frequency | Partial results |
+|---|---|---|---|
+| `embed` | all five states | frequent, user present | **valuable** |
+| `generate` | LOCKED, ABSENT | rare | nice to have |
+| `render` | LOCKED, ABSENT | rare | unnecessary |
+
+The partial-result path was built for the case where a user returns mid-unit.
+That case is the ANE path, which is the only one permitted while someone is at
+the machine.
 
 ### What rendering makes urgent
 

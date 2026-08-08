@@ -1,0 +1,12 @@
+{
+  "label": "std-mem32",
+  "frames_measured": 109,
+  "mean_ms": 20.89,
+  "p50_ms": 17.17,
+  "p95_ms": 33.17,
+  "p99_ms": 35.66,
+  "max_ms": 46.25,
+  "mean_fps": 47.9,
+  "hitches": 2,
+  "hitch_pct": 1.83
+}

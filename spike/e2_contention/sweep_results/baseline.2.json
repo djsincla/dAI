@@ -1,0 +1,12 @@
+{
+  "label": "baseline.2",
+  "frames_measured": 109,
+  "mean_ms": 15.56,
+  "p50_ms": 16.64,
+  "p95_ms": 17.45,
+  "p99_ms": 25.09,
+  "max_ms": 25.58,
+  "mean_fps": 64.3,
+  "hitches": 0,
+  "hitch_pct": 0.0
+}

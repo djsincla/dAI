@@ -341,12 +341,34 @@ extending it, and it should be designed before the render kind ships.
 - Capability profiles. Render throughput is another workload class in the same
   map, and E3's finding holds: it must be measured, not inferred from the chip.
 
-### Prior art to respect
+### Prior art, and the gap in it
 
-Deadline, OpenCue and Tractor already do distributed rendering well, and studios
-run them. Competing on scheduling is not the opening. The wedge is that this
-fleet already exists for AI work, already respects the artist, and rendering is
-an additional kind on the same agent rather than a second system to deploy.
+Deadline, OpenCue and Tractor do distributed rendering well and studios run
+them, so competing on scheduling is not the opening. But none of them treat
+Apple Silicon as a real worker:
+
+| System | Mac as submitter | Mac as worker |
+|---|---|---|
+| AWS Deadline Cloud | Yes, official installer | **No.** "The `install-deadline-worker` command does not support MacOS at this time." |
+| Thinkbox Deadline 10 | Yes | Yes, but **x86 under Rosetta 2**, no arm64 binaries. Users report workers crashing after 10-15 minutes on M1 |
+| OpenCue | Yes | No Apple Silicon support found; RQD targets Linux |
+| Tractor | Yes | No evidence of Apple Silicon workers |
+
+The pattern is consistent and the reason is structural: these systems were built
+for the **farm**, which is Linux and x86 rack hardware. Macs are where artists
+sit, so Macs got submitters. Nobody built a native arm64 worker because nobody
+was harvesting workstations.
+
+That leaves two gaps this project already occupies: **native Apple Silicon
+execution** (Metal, no emulation, none of the Rosetta stability problems) and
+**presence-aware harvesting** of machines someone is actively using.
+
+**The counter-argument to hold onto:** it may be unserved because demand is thin.
+Studios buy Linux farm nodes because they are cheaper per FLOP and that will not
+change. The claim is not "better than Deadline at rendering" - it is the same
+sunk-cost argument as the AI side, that these Macs are already bought and idle
+sixteen hours a day. Positioned that way the gap is real. Positioned as farm
+replacement it is not.
 
 ## 6. Scheduling
 

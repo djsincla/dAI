@@ -49,11 +49,23 @@ IDLE_PROMOTE_SECONDS = 300
 # immediate.
 STATES = ["ACTIVE", "PASSIVE", "IDLE", "LOCKED", "ABSENT"]
 
-# What the agent may do in each state. The GPU/ANE split matters because the
-# ANE is separate silicon from the GPU, so ANE work does not compete with an
-# artist's viewport (pending E5).
+# What the agent may do in each state.
+#
+# The GPU/ANE split is the most important column here. E5 measured a saturating
+# ANE workload as statistically indistinguishable from no load at all (p95
+# -16%, inside a 36% baseline noise floor) while equivalent GPU work cost
+# +59-100%. The ANE is separate silicon and an artist's viewport does not touch
+# it, so ANE work stays permitted in states where GPU work is forbidden.
+#
+# mem_frac is NOT a politeness dial and must not be treated as one: E5 saw a
+# 4 GB load — a small fraction of a 64 GB machine — degrade viewport p95 by
+# 100%. Footprint governs what fits, not how much a user is disturbed.
+# Throttling disturbance requires limiting compute rate, which this table does
+# not yet express. See e5_ane/FINDINGS.md.
 POLICY = {
     "ACTIVE":  {"gpu": False, "ane": False, "qos": None,         "mem_frac": 0.00},
+    # ANE stays on through PASSIVE and even ACTIVE-adjacent states on the E5
+    # result; GPU does not.
     "PASSIVE": {"gpu": False, "ane": True,  "qos": "background", "mem_frac": 0.15},
     "IDLE":    {"gpu": True,  "ane": True,  "qos": "background", "mem_frac": 0.35},
     "LOCKED":  {"gpu": True,  "ane": True,  "qos": "standard",   "mem_frac": 0.70},

@@ -34,7 +34,7 @@ the idea before any architecture is committed.
 | **E2** | At what memory ceiling and QoS does the interactive user notice? | Harness built ✅ · Sweep ⏳ |
 | **E3** | What is aggregate throughput vs. an API call or a rented GPU hour? | Not started |
 | **E4** | What does preemption cost, and what work-unit size amortizes it? | **PASSES** ✅ |
-| **E5** | Is ANE work less perceptible than GPU work? | Not started |
+| **E5** | Is ANE work less perceptible than GPU work? | **PASSES** ✅ |
 
 E1 is the existential gate — if GPU access requires an active GUI session, the
 fleet is limited to logged-in-but-idle machines and the product is materially
@@ -82,6 +82,18 @@ instruments cover different contention paths:
 - **Yield latency is now dominated by presence polling, not memory release.**
   Release is ~20 ms; polling at 2 s means up to 2 s of work continues after a
   user returns. Tune the polling interval, not the release path.
+- **ANE load is indistinguishable from no load.** Sustaining 169 inferences/s of
+  verified Neural Engine work, viewport p95 moved −16% — inside a 36% baseline
+  noise floor — against +59% to +100% for equivalent GPU work. Placement proven
+  with `MLComputePlan` (100% of ops on `MLNeuralEngineComputeDevice`), not
+  assumed. **This makes daytime harvesting viable**, roughly doubling usable
+  fleet hours. E5 says ANE work is *invisible*, not that it is *fast*.
+- **Memory fraction is not a politeness dial.** A 4 GB load on a 64 GB machine
+  degraded p95 by 100%. Footprint governs what fits, not how much a user is
+  disturbed; throttling disturbance needs a compute-rate limit.
+- **Baselines must be interleaved.** Viewport p95 moved 36% between runs with
+  nothing loaded. A single leading baseline silently attributes that drift to
+  whichever condition ran next — it manufactured, then unmanufactured, a finding.
 - **Contention shows up in the tail, not the median.** One unreplicated run at a
   25 GB ceiling under background QoS: p50 frame time moved +3% while p95 moved
   +65% and p99 +82% (mean fps 68.7 → 53.4). Reporting medians or mean fps would
@@ -103,6 +115,7 @@ spike/
   e1_metal_access/     Metal + presence access from a session-0 daemon (E1)
   e2_contention/       victim workloads + MLX load generator (E2)
   e4_preemption/       model load/release cost and work-unit sizing (E4)
+  e5_ane/              ANE vs GPU contention, with placement verification (E5)
   presence/            user-presence detection: the agent's primary control
 docs/
   PLAN.md              full design: tiers, use cases, architecture, verification

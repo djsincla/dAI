@@ -32,7 +32,7 @@ the idea before any architecture is committed.
 |---|---|---|
 | **E1** | Can MLX reach Metal from a `launchd` daemon with no user session? | **PASSES** ✅ |
 | **E2** | At what memory ceiling and QoS does the interactive user notice? | Harness built ✅ · Sweep ⏳ |
-| **E3** | What is aggregate throughput vs. an API call or a rented GPU hour? | Not started |
+| **E3** | What is aggregate throughput vs. an API call or a rented GPU hour? | **Scheduling ✅ · cost ⏳** |
 | **E4** | What does preemption cost, and what work-unit size amortizes it? | **PASSES** ✅ |
 | **E5** | Is ANE work less perceptible than GPU work? | **PASSES** ✅ |
 
@@ -82,6 +82,18 @@ instruments cover different contention paths:
 - **Yield latency is now dominated by presence polling, not memory release.**
   Release is ~20 ms; polling at 2 s means up to 2 s of work continues after a
   user returns. Tune the polling interval, not the release path.
+- **Capability is workload-dependent, not a machine property.** Across an
+  M2 Max/64 GB and an M4 Pro/48 GB, the M2 Max led by 7.5% on a 1.5B model and
+  26.3% on a 7B — relative capability moved 3.5x from model size alone, and
+  neither figure matches the 47% their memory-bandwidth ratio predicts. A stored
+  per-node capability scalar would misallocate by 20-40% depending on workload.
+  **The Phase 1 probe must profile per workload class, not per machine.** Note
+  the newer chip is the slower one, so generation and core count rank nodes
+  backwards here.
+- **Fleet coordination is not the bottleneck.** Scaling efficiency 0.952 (1.5B)
+  and 0.963 (7B) over WiFi at 27 ms RTT; pull-based batching amortises
+  round-trips across ~1.5 s units. Residual loss is a 7-8% straggler tail from
+  fixed batch sizing, not network overhead. Says nothing about n=20.
 - **ANE load is indistinguishable from no load.** Sustaining 169 inferences/s of
   verified Neural Engine work, viewport p95 moved −16% — inside a 36% baseline
   noise floor — against +59% to +100% for equivalent GPU work. Placement proven
@@ -116,6 +128,7 @@ spike/
   e2_contention/       victim workloads + MLX load generator (E2)
   e4_preemption/       model load/release cost and work-unit sizing (E4)
   e5_ane/              ANE vs GPU contention, with placement verification (E5)
+  e3_fleet/            coordinator + worker; heterogeneous scheduling (E3)
   presence/            user-presence detection: the agent's primary control
 docs/
   PLAN.md              full design: tiers, use cases, architecture, verification

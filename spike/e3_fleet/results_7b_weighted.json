@@ -1,0 +1,30 @@
+{
+  "policy": "weighted",
+  "workers_seen": [
+    "orca",
+    "rotorua"
+  ],
+  "min_workers": 2,
+  "elapsed_s": 87.39,
+  "items_done": 300,
+  "items_remaining": 0,
+  "aggregate_items_s": 3.433,
+  "sum_of_solo_rates": 3.565,
+  "scaling_efficiency": 0.963,
+  "nodes": {
+    "rotorua": {
+      "machine": "Apple M2 Max / 64 GB",
+      "units": 20,
+      "items": 173,
+      "busy_s": 86.94,
+      "throughput_items_s": 1.99
+    },
+    "orca": {
+      "machine": "Apple M4 Pro / 48 GB",
+      "units": 18,
+      "items": 127,
+      "busy_s": 80.61,
+      "throughput_items_s": 1.576
+    }
+  }
+}

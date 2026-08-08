@@ -341,6 +341,73 @@ extending it, and it should be designed before the render kind ships.
 - Capability profiles. Render throughput is another workload class in the same
   map, and E3's finding holds: it must be measured, not inferred from the chip.
 
+### There is a standard, and it conflicts with the security model
+
+**Open Job Description (OpenJD)**, published by the Thinkbox Deadline team in
+January 2024 with Python libraries (`openjd-model`, `openjd-sessions`,
+`openjd-cli`), is an open specification for portable render jobs, explicitly
+positioned as an interoperability layer between job authoring tools and farm
+managers.
+
+It models things dAI needs and does not yet have:
+
+| OpenJD concept | What it gives us |
+|---|---|
+| `parameterSpace.taskParameterDefinitions` with `range` | Work-unit fan-out, already standardised. `Frame range 1-100` expands to 100 tasks |
+| `PATH` parameters with `dataFlow: IN/OUT` | Asset in/out tracking, which rendering makes urgent |
+| `dependencies.dependsOn` between steps | A step DAG (render then encode). dAI has no job dependency concept at all |
+| `userInterface` controls on parameters | Submitters generate their own UI, which is why DCC plugins can be generic |
+| `hostRequirements` | Capability matching, adjacent to the per-workload profiles in §2 |
+
+**But an OpenJD step carries an executable script:**
+
+```yaml
+script:
+  actions:
+    onRun:
+      command: bash
+      args: ['{{Task.File.run}}']
+  embeddedFiles:
+    - name: run
+      data: |
+        blender --background '{{Param.BlenderFile}}' ...
+```
+
+That is precisely what §4a forbids. A unit that names an interpreter and carries
+a shell script means a compromised control plane executes arbitrary code as the
+logged-in user on every Mac in the fleet.
+
+**The distinction is the fleet, not the format.** A conventional farm node is a
+dedicated rack box with no user data; if it is compromised you rebuild it. A
+harvested workstation holds the artist's actual work, and the entire programme
+rests on a promise that the agent is safe to have running. OpenJD was designed
+for the first case.
+
+### Resolution: adopt the shape, constrain the actions, split by tier
+
+1. **Accept OpenJD templates as the submission format.** This is the
+   interoperability win: existing Maya, Blender, Houdini and Nuke submitters
+   already emit it, so dAI gains their integrations without writing any.
+2. **Adopt `parameterSpace`, `dataFlow` and `dependsOn` directly into the data
+   model.** These are well-designed and solve open problems here. There is no
+   reason to invent alternatives.
+3. **Do not execute `script.actions` verbatim on the harvest tier.** Instead
+   resolve each step against a **signed adapter catalogue** installed on the
+   node: an adapter declares an executable it owns (`blender`, `ffmpeg`,
+   `mlx-lm`) and a typed parameter schema. Template parameters bind to adapter
+   arguments; the step's embedded shell is refused rather than run. A submitted
+   template that does not map to an installed adapter fails at admission with
+   that reason, on the control plane, before any node sees it.
+4. **The cluster tier may relax this.** Its nodes are dedicated and pinned, with
+   no user data and no artist to disturb, so full OpenJD execution is defensible
+   there in a way it is not on someone's laptop.
+
+The cost is real and worth stating: an OpenJD template written for Deadline may
+run there and be refused here, because dAI will not run arbitrary bash on a
+machine someone is using. That is a deliberate incompatibility, and the
+alternative is giving up the security property that makes harvesting employee
+machines acceptable at all.
+
 ### Prior art, and the gap in it
 
 Deadline, OpenCue and Tractor do distributed rendering well and studios run

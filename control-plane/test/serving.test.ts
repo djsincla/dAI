@@ -1,0 +1,217 @@
+import type { Server } from 'node:http'
+import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest'
+import type { Db } from '../src/lib/db.js'
+import { broker } from '../src/server.js'
+import { selectNode, isRefusal, type Candidate } from '../src/lib/router.js'
+import { type Fixtures, appFor, freshDb, seed, setPresence } from './helpers.js'
+
+const asNode = (fp: string) => ({ 'x-node-fingerprint': fp, 'content-type': 'application/json' })
+const asUser = (id: string) => ({ authorization: `Bearer ${id}`, 'content-type': 'application/json' })
+
+function candidate(over: Partial<Candidate> = {}): Candidate {
+  return {
+    id: 'n1', hostname: 'a', presence_state: 'LOCKED',
+    resident_models: {}, capability_profiles: {}, in_flight: 0, ...over,
+  }
+}
+
+describe('routing', () => {
+  it('refuses when every machine has a user present', () => {
+    const out = selectNode(
+      [candidate({ presence_state: 'ACTIVE' }), candidate({ id: 'n2', presence_state: 'IDLE' })],
+      'generate', null)
+    expect(isRefusal(out)).toBe(true)
+    // The expected daytime answer, not an error. A caller is better served by
+    // hearing it than by a request that hangs.
+    expect((out as any).refused).toBe('all-in-use')
+    expect((out as any).detail).toMatch(/locked or logged out/)
+  })
+
+  it('still serves ANE work while a user is present', () => {
+    const out = selectNode([candidate({ presence_state: 'ACTIVE' })], 'embed', null)
+    expect(isRefusal(out)).toBe(false)
+  })
+
+  it('fails closed when presence is unknown', () => {
+    const out = selectNode([candidate({ presence_state: null })], 'generate', null)
+    expect(isRefusal(out)).toBe(true)
+  })
+
+  it('prefers a node that already holds the model', () => {
+    // Loading costs 1-3s (E4). Putting that on the request path is the
+    // difference between a service and a curiosity, so residency outranks a
+    // faster but empty node.
+    const out = selectNode([
+      candidate({ id: 'fast-empty', capability_profiles: { m1: 90 } }),
+      candidate({ id: 'slow-resident', resident_models: { m1: 4 }, capability_profiles: { m1: 10 } }),
+    ], 'generate', 'm1')
+    expect((out as Candidate).id).toBe('slow-resident')
+  })
+
+  it('falls back to a node without the model rather than refusing', () => {
+    const out = selectNode([candidate({ id: 'empty' })], 'generate', 'm1')
+    expect((out as Candidate).id).toBe('empty')
+  })
+
+  it('breaks ties by measured throughput for the workload class', () => {
+    const out = selectNode([
+      candidate({ id: 'slow', resident_models: { m1: 4 }, capability_profiles: { m1: 12 } }),
+      candidate({ id: 'fast', resident_models: { m1: 4 }, capability_profiles: { m1: 40 } }),
+    ], 'generate', 'm1')
+    expect((out as Candidate).id).toBe('fast')
+  })
+
+  it('prefers the least loaded node over the fastest', () => {
+    // A faster node already handling three requests is worse than an idle one.
+    const out = selectNode([
+      candidate({ id: 'busy', capability_profiles: { m1: 90 }, in_flight: 3 }),
+      candidate({ id: 'idle', capability_profiles: { m1: 20 }, in_flight: 0 }),
+    ], 'generate', 'm1')
+    expect((out as Candidate).id).toBe('idle')
+  })
+
+  it('says so when there are no nodes at all', () => {
+    const out = selectNode([], 'generate', null)
+    expect((out as any).refused).toBe('no-nodes')
+  })
+})
+
+describe('serving over HTTP', () => {
+  let db: Db
+  let fx: Fixtures
+  let server: Server
+  let base: string
+
+  beforeEach(async () => {
+    db = await freshDb()
+    fx = await seed(db)
+    await db.query(`UPDATE nodes SET last_heartbeat = now() WHERE id = $1`, [fx.nodeId])
+    const app = appFor(db)
+    server = await new Promise<Server>((r) => { const s = app.listen(0, () => r(s)) })
+    base = `http://127.0.0.1:${(server.address() as any).port}`
+  })
+  afterEach(async () => {
+    broker.reset()
+    await new Promise<void>((r) => server.close(() => r()))
+  })
+  afterAll(async () => { await db?.end() })
+
+  /** Park a node on the reverse channel and answer whatever arrives. */
+  function attachNode(reply: (body: any) => any) {
+    let stop = false
+    const loop = (async () => {
+      while (!stop) {
+        const r = await fetch(`${base}/agent/v1/dispatch`, { headers: asNode(fx.fingerprint) })
+        if (r.status !== 200) continue
+        const d = await r.json()
+        await fetch(`${base}/agent/v1/dispatch/${d.dispatchId}/result`, {
+          method: 'POST', headers: asNode(fx.fingerprint),
+          body: JSON.stringify({ result: reply(d.body) }),
+        })
+      }
+    })()
+    return { stop: () => { stop = true }, loop }
+  }
+
+  it('refuses with 503 when no node is connected', async () => {
+    const r = await fetch(`${base}/v1/chat/completions`, {
+      method: 'POST', headers: asUser(fx.operatorId),
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
+    })
+    expect(r.status).toBe(503)
+    expect((await r.json()).error.type).toBe('no_capacity')
+  })
+
+  it('routes a completion to a connected node and returns it', async () => {
+    const node = attachNode((body) => ({
+      text: `echo: ${(body.messages[0] as any).content}`,
+      promptTokens: 5, completionTokens: 4,
+    }))
+    await new Promise((r) => setTimeout(r, 150))
+
+    const r = await fetch(`${base}/v1/chat/completions`, {
+      method: 'POST', headers: asUser(fx.operatorId),
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'hello' }], max_tokens: 32 }),
+    })
+    expect(r.status).toBe(200)
+    const body = await r.json()
+    expect(body.choices[0].message.content).toBe('echo: hello')
+    expect(body.usage.total_tokens).toBe(9)
+    expect(body.dai.node).toBe('rotorua')
+    node.stop()
+  })
+
+  it('refuses while the machine is in use, even with the node connected', async () => {
+    await setPresence(db, fx.nodeId, 'ACTIVE')
+    const node = attachNode(() => ({ text: 'x', promptTokens: 1, completionTokens: 1 }))
+    await new Promise((r) => setTimeout(r, 150))
+
+    const r = await fetch(`${base}/v1/chat/completions`, {
+      method: 'POST', headers: asUser(fx.operatorId),
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
+    })
+    // The whole point: a listening, healthy, capable node is still not
+    // available because someone is sitting at it.
+    expect(r.status).toBe(503)
+    expect((await r.json()).error.code).toBe('all-in-use')
+    node.stop()
+  })
+
+  it('caps max_tokens to the answering state policy and says it did', async () => {
+    const node = attachNode((body) => ({
+      text: 'ok', promptTokens: 1, completionTokens: body.max_tokens,
+    }))
+    await new Promise((r) => setTimeout(r, 150))
+
+    const r = await fetch(`${base}/v1/chat/completions`, {
+      method: 'POST', headers: asUser(fx.operatorId),
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }], max_tokens: 99999 }),
+    })
+    const body = await r.json()
+    // LOCKED allows 2048. Bounding the completion bounds how long a returning
+    // user waits, since one request has no seam to yield at.
+    expect(body.dai.maxTokensApplied).toBe(2048)
+    expect(body.dai.cappedByPolicy).toBe(true)
+    node.stop()
+  })
+
+  it('rejects streaming rather than pretending to support it', async () => {
+    const r = await fetch(`${base}/v1/chat/completions`, {
+      method: 'POST', headers: asUser(fx.operatorId),
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }], stream: true }),
+    })
+    expect(r.status).toBe(400)
+  })
+
+  it('records resident models from the heartbeat, replacing rather than merging', async () => {
+    const send = (models: Record<string, number>) =>
+      fetch(`${base}/agent/v1/heartbeat`, {
+        method: 'POST', headers: asNode(fx.fingerprint),
+        body: JSON.stringify({ presenceState: 'LOCKED', residentModels: models }),
+      })
+    await send({ 'qwen-7b': 4.0, 'qwen-0.5b': 0.3 })
+    await send({ 'qwen-7b': 4.0 })
+    const { rows } = await db.query(`SELECT resident_models FROM nodes WHERE id=$1`, [fx.nodeId])
+    // A released model must disappear, or routing sends work to a node that has
+    // to reload it, which is exactly what residency exists to avoid.
+    expect(rows[0].resident_models).toEqual({ 'qwen-7b': 4.0 })
+  })
+
+  it('discards a late answer whose dispatch already timed out', async () => {
+    const r = await fetch(`${base}/agent/v1/dispatch/${crypto.randomUUID()}/result`, {
+      method: 'POST', headers: asNode(fx.fingerprint),
+      body: JSON.stringify({ result: { text: 'stale', promptTokens: 1, completionTokens: 1 } }),
+    })
+    expect(r.status).toBe(409)
+    expect((await r.json()).accepted).toBe(false)
+  })
+
+  it('lists models resident anywhere in the fleet', async () => {
+    await fetch(`${base}/agent/v1/heartbeat`, {
+      method: 'POST', headers: asNode(fx.fingerprint),
+      body: JSON.stringify({ presenceState: 'LOCKED', residentModels: { 'qwen-7b': 4 } }),
+    })
+    const r = await fetch(`${base}/v1/models`, { headers: asUser(fx.operatorId) })
+    expect((await r.json()).data.map((m: any) => m.id)).toContain('qwen-7b')
+  })
+})

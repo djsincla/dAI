@@ -8,6 +8,8 @@ import { agentRoutes } from './routes/agent.js'
 import { adminRoutes } from './routes/admin.js'
 import { startReaper } from './lib/work.js'
 import { Acl, aclMiddleware, describeAcls } from './lib/netacl.js'
+import { Broker } from './lib/broker.js'
+import { servingRoutes } from './routes/serving.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 export const OPENAPI_PATH = join(here, '..', 'openapi', 'dai.yaml')
@@ -29,6 +31,13 @@ const DOCS_HTML = `<!doctype html>
  * a mismatch can be caught before deployment.
  */
 export type Surface = 'agent' | 'admin' | 'both'
+
+/**
+ * Shared between the agent and serving surfaces: one holds the reverse channel
+ * open, the other pushes down it. In-process, so a second instance would need
+ * this in Postgres with LISTEN/NOTIFY before scaling out.
+ */
+export const broker = new Broker()
 
 export function createApp(db: Db, surface: Surface = 'both'): Express {
   const app = express()
@@ -83,10 +92,14 @@ export function createApp(db: Db, surface: Surface = 'both'): Express {
   // side is restarting, misbehaving or being scaled independently. Running them
   // as one process is the convenient default, not a requirement.
   if (surface !== 'admin') {
-    app.use('/agent/v1', aclMiddleware(agentAcl, 'agent'), agentRoutes(db))
+    app.use('/agent/v1', aclMiddleware(agentAcl, 'agent'), agentRoutes(db, broker))
   }
   if (surface !== 'agent') {
     app.use('/admin/v1', aclMiddleware(adminAcl, 'admin'), adminRoutes(db))
+    // OpenAI-compatible surface. Separate from /admin because its callers are
+    // applications with API keys rather than people with sessions, and it will
+    // want its own rate limits and availability treatment.
+    app.use('/v1', aclMiddleware(adminAcl, 'serving'), servingRoutes(db, broker))
   }
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {

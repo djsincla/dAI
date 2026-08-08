@@ -24,6 +24,10 @@ tags:
     description: Node-facing. Mutual TLS, client certificate identifies the node.
   - name: admin
     description: Human-facing. Session auth, pool-scoped role bindings.
+  - name: serving
+    description: |
+      OpenAI-compatible. Application callers with API keys, routed to whichever
+      node may take the request right now.
 
 paths:
   /agent/v1/enroll:
@@ -75,6 +79,73 @@ paths:
         '204': { description: Accepted }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+
+  /agent/v1/dispatch:
+    get:
+      tags: [agent]
+      summary: Hold open a reverse channel for interactive requests
+      description: |
+        The node dials out and parks here; the control plane pushes a request
+        down the open connection. Outbound from the node, so no inbound firewall
+        rules and no NAT traversal, which is what made pull the right choice for
+        batch. Push from the scheduler, so routing takes milliseconds rather than
+        a poll interval.
+
+        Returns 204 on timeout rather than holding forever, so a node notices a
+        control plane restart instead of waiting on a dead socket.
+      responses:
+        '200':
+          description: A request to handle now
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Dispatch' }
+        '204': { description: Nothing to do; reconnect }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /agent/v1/dispatch/{dispatchId}/result:
+    post:
+      tags: [agent]
+      summary: Return a completion for a pushed request
+      parameters:
+        - name: dispatchId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                result:
+                  type: object
+                  additionalProperties: true
+                  properties:
+                    text: { type: string }
+                    promptTokens: { type: integer }
+                    completionTokens: { type: integer }
+                error: { type: string }
+      responses:
+        '200':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { accepted: { type: boolean } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: |
+            Nobody was waiting. The dispatch timed out and the request has moved
+            on, so this answer is discarded rather than resolving a stale caller.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { accepted: { type: boolean } }
 
   /agent/v1/work:
     get:
@@ -139,6 +210,83 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+
+  /v1/models:
+    get:
+      tags: [serving]
+      summary: Models currently resident somewhere in the fleet
+      responses:
+        '200':
+          description: Model list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object: { type: string }
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        object: { type: string }
+                        owned_by: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /v1/chat/completions:
+    post:
+      tags: [serving]
+      summary: OpenAI-compatible completion, routed to an available node
+      description: |
+        Routed by eligibility first, then model residency, then measured
+        throughput for the workload class, then in-flight count.
+
+        Returns **503** when no node can currently take the request. During
+        working hours every harvest node has a user present and GPU work is
+        forbidden, so that is the expected answer rather than an error, and a
+        caller is better served by hearing it immediately than by a hang.
+
+        `max_tokens` is capped by the answering node's presence policy. A single
+        request has no seam to yield at, so bounding its length bounds how long a
+        returning user waits for their machine back.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [messages]
+              properties:
+                model: { type: string }
+                messages:
+                  type: array
+                  items: { type: object, additionalProperties: true }
+                max_tokens: { type: integer, minimum: 1 }
+                stream:
+                  type: boolean
+                  description: Not supported; a completion is dispatched as one unit.
+      responses:
+        '200':
+          description: Completion
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChatCompletion' }
+        '400':
+          description: |
+            Malformed request. Uses the OpenAI error shape rather than this
+            API's, because the callers of this surface are OpenAI clients.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OpenAIError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503':
+          description: No node can take this request right now
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OpenAIError' }
 
   /admin/v1/nodes:
     get:
@@ -376,6 +524,14 @@ components:
         presenceState: { $ref: '#/components/schemas/PresenceState' }
         onAcPower: { type: boolean }
         thermalOk: { type: boolean }
+        residentModels:
+          type: object
+          additionalProperties: { type: number }
+          description: |
+            Model hashes currently held in memory, hash -> resident GB. Routing
+            prefers a node that already has the model: E4 puts load at 1-3s and
+            paying that per request is the difference between a service and a
+            curiosity.
         capabilitySamples:
           type: array
           description: |
@@ -561,6 +717,67 @@ components:
               event: { type: string }
               detail: { type: object, additionalProperties: true }
 
+    Dispatch:
+      type: object
+      required: [dispatchId, kind, body]
+      properties:
+        dispatchId: { type: string, format: uuid }
+        kind: { $ref: '#/components/schemas/WorkKind' }
+        modelHash: { type: string, nullable: true }
+        body:
+          type: object
+          additionalProperties: true
+          description: The request to run, already capped by the node's policy.
+
+    OpenAIError:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            message: { type: string }
+            type: { type: string }
+            code: { type: string }
+
+    ChatCompletion:
+      type: object
+      required: [id, object, created, model, choices, usage]
+      properties:
+        id: { type: string }
+        object: { type: string }
+        created: { type: integer }
+        model: { type: string }
+        choices:
+          type: array
+          items:
+            type: object
+            properties:
+              index: { type: integer }
+              message:
+                type: object
+                properties:
+                  role: { type: string }
+                  content: { type: string }
+              finish_reason: { type: string }
+        usage:
+          type: object
+          properties:
+            prompt_tokens: { type: integer }
+            completion_tokens: { type: integer }
+            total_tokens: { type: integer }
+        dai:
+          type: object
+          description: |
+            Outside the OpenAI schema. A caller on a harvested fleet should be
+            able to see which machine answered and whether policy shortened the
+            request.
+          properties:
+            node: { type: string }
+            presenceState: { type: string, nullable: true }
+            seconds: { type: number }
+            maxTokensApplied: { type: integer }
+            cappedByPolicy: { type: boolean }
+
     Policy:
       type: object
       description: |
@@ -577,6 +794,11 @@ components:
           qos: { type: string, enum: [background, standard] }
           dutyMax: { type: number, minimum: 0, maximum: 1 }
           memFrac: { type: number, minimum: 0, maximum: 1 }
+          maxCompletionTokens:
+            type: integer
+            description: |
+              Largest single completion this state permits. Bounds how long a
+              returning user waits, since one request has no seam to yield at.
 
 security:
   - mtls: []

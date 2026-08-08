@@ -5,10 +5,11 @@ import { agentAuth } from '../lib/auth.js'
 import { POLICY, type WorkKind } from '../lib/policy.js'
 import { LeaseConflict, leaseWork, reportResult } from '../lib/work.js'
 import { clientIp, nodeNetworkAllowed } from '../lib/netacl.js'
+import type { Broker } from '../lib/broker.js'
 
 const KINDS: WorkKind[] = ['embed', 'generate', 'render']
 
-export function agentRoutes(db: Db): Router {
+export function agentRoutes(db: Db, broker: Broker): Router {
   const r = Router()
 
   /**
@@ -72,6 +73,7 @@ export function agentRoutes(db: Db): Router {
     const b = req.body as {
       presenceState: string; onAcPower?: boolean; thermalOk?: boolean
       capabilitySamples?: { workloadClass: string; itemsPerSecond: number }[]
+      residentModels?: Record<string, number>
     }
     const node = req.node!
 
@@ -85,10 +87,14 @@ export function agentRoutes(db: Db): Router {
       `UPDATE nodes
           SET presence_state = $1, on_ac_power = $2, thermal_ok = $3,
               last_heartbeat = now(),
-              capability_profiles = capability_profiles || $4::jsonb
-        WHERE id = $5`,
+              capability_profiles = capability_profiles || $4::jsonb,
+              -- Replaced rather than merged: a model the node has released is
+              -- no longer resident, and routing to it would put a 1-3s load on
+              -- the request path it was chosen to avoid.
+              resident_models = $5::jsonb
+        WHERE id = $6`,
       [b.presenceState, b.onAcPower ?? null, b.thermalOk ?? null,
-       JSON.stringify(profiles), node.id],
+       JSON.stringify(profiles), JSON.stringify(b.residentModels ?? {}), node.id],
     )
     // Presence history feeds the capacity graph, which cannot be drawn from
     // current state alone.
@@ -98,6 +104,43 @@ export function agentRoutes(db: Db): Router {
       [node.id, b.presenceState, b.onAcPower ?? null],
     )
     res.status(204).end()
+  })
+
+  /**
+   * Reverse channel. The node dials out and parks here; the control plane
+   * pushes an interactive request down the open connection.
+   *
+   * Outbound from the node, so no inbound firewall rules, no per-node
+   * addressing and no NAT traversal, which is what made pull the right choice
+   * for batch in the first place. Push from the scheduler, so routing takes
+   * milliseconds rather than a poll interval.
+   */
+  r.get('/dispatch', async (req, res) => {
+    const dispatch = await broker.waitForWork(req.node!.id)
+    if (!dispatch) {
+      // Timed out with nothing to do. Returning rather than holding forever
+      // keeps the connection observably alive and lets a node notice a control
+      // plane restart instead of waiting on a socket nobody is listening to.
+      res.status(204).end()
+      return
+    }
+    res.json({
+      dispatchId: dispatch.id,
+      kind: dispatch.kind,
+      modelHash: dispatch.modelHash,
+      body: dispatch.body,
+    })
+  })
+
+  r.post('/dispatch/:dispatchId/result', async (req, res) => {
+    const b = req.body as { result?: unknown; error?: string }
+    const accepted = broker.complete(req.params.dispatchId!, req.node!.id, {
+      body: b.result, error: b.error,
+    })
+    // A late answer whose dispatch already timed out is refused rather than
+    // silently dropped, so the agent can tell the difference between "done" and
+    // "nobody was waiting".
+    res.status(accepted ? 200 : 409).json({ accepted })
   })
 
   r.get('/work', async (req, res) => {

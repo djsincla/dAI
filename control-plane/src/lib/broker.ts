@@ -1,0 +1,163 @@
+import { randomUUID } from 'node:crypto'
+
+/**
+ * Reverse-channel dispatch for interactive requests.
+ *
+ * E3 chose pull dispatch because harvested machines come and go, and a
+ * scheduler that must reach *into* them needs credentials and reachability it
+ * will not reliably have. That reasoning is still right, and a naive push model
+ * would break it.
+ *
+ * So the node dials out and holds a connection open, and the control plane
+ * pushes down it. Outbound from the node, so no inbound firewall rules, no
+ * per-node addressing and no NAT traversal. Push from the scheduler, so routing
+ * takes milliseconds rather than a poll interval.
+ *
+ * Batch dispatch stays pull. It is self-balancing and has no latency
+ * requirement, and two mechanisms for two jobs is simpler than one mechanism
+ * bent to serve both.
+ *
+ * State is in-process. A second control plane instance would need this in
+ * Postgres with LISTEN/NOTIFY, or a shared queue. Worth knowing before scaling
+ * out rather than after.
+ */
+
+export interface Dispatch {
+  id: string
+  kind: string
+  modelHash: string | null
+  body: unknown
+  createdAt: number
+}
+
+interface Waiter {
+  resolve: (d: Dispatch | null) => void
+  timer: NodeJS.Timeout
+}
+
+interface Pending {
+  dispatch: Dispatch
+  nodeId: string
+  resolve: (result: { ok: true; body: unknown } | { ok: false; error: string }) => void
+  timer: NodeJS.Timeout
+}
+
+export class Broker {
+  /** Nodes currently holding a long-poll open, by node id. */
+  private waiters = new Map<string, Waiter>()
+  /** Dispatches handed to a node and awaiting a result, by dispatch id. */
+  private pending = new Map<string, Pending>()
+  /** Requests in flight per node, which the router uses to break ties. */
+  private inFlight = new Map<string, number>()
+
+  constructor(
+    private readonly pollTimeoutMs = 25_000,
+    private readonly requestTimeoutMs = 120_000,
+  ) {}
+
+  get inFlightCounts(): Map<string, number> {
+    return this.inFlight
+  }
+
+  /** Is this node currently listening? Only such nodes can be routed to. */
+  isConnected(nodeId: string): boolean {
+    return this.waiters.has(nodeId)
+  }
+
+  connectedNodes(): string[] {
+    return [...this.waiters.keys()]
+  }
+
+  /**
+   * A node parks here until work arrives or the poll times out.
+   *
+   * Returning null on timeout rather than holding forever keeps the connection
+   * observably alive: a node that has heard nothing for 25s reconnects, and a
+   * control plane restart does not leave nodes waiting on a socket nobody is
+   * listening to.
+   */
+  waitForWork(nodeId: string): Promise<Dispatch | null> {
+    this.release(nodeId)
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.waiters.delete(nodeId)
+        resolve(null)
+      }, this.pollTimeoutMs)
+      this.waiters.set(nodeId, { resolve, timer })
+    })
+  }
+
+  private release(nodeId: string): void {
+    const existing = this.waiters.get(nodeId)
+    if (existing) {
+      clearTimeout(existing.timer)
+      this.waiters.delete(nodeId)
+      // A node that reconnects while an older poll is open gets that poll
+      // closed rather than left dangling.
+      existing.resolve(null)
+    }
+  }
+
+  /**
+   * Hand a request to a node and wait for its answer.
+   *
+   * Rejects rather than hangs if the node never answers: a node that vanishes
+   * mid-request is the expected case on a harvested fleet, not an exception.
+   */
+  dispatch(
+    nodeId: string,
+    kind: string,
+    modelHash: string | null,
+    body: unknown,
+  ): Promise<{ ok: true; body: unknown } | { ok: false; error: string }> {
+    const waiter = this.waiters.get(nodeId)
+    if (!waiter) return Promise.resolve({ ok: false as const, error: 'node not connected' })
+
+    const dispatch: Dispatch = { id: randomUUID(), kind, modelHash, body, createdAt: Date.now() }
+    clearTimeout(waiter.timer)
+    this.waiters.delete(nodeId)
+    this.inFlight.set(nodeId, (this.inFlight.get(nodeId) ?? 0) + 1)
+
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.finish(dispatch.id)
+        resolve({ ok: false, error: 'node did not answer in time' })
+      }, this.requestTimeoutMs)
+      this.pending.set(dispatch.id, { dispatch, nodeId, resolve, timer })
+      waiter.resolve(dispatch)
+    })
+  }
+
+  /** A node returns a completion, or reports that it could not produce one. */
+  complete(dispatchId: string, nodeId: string, result: { body?: unknown; error?: string }): boolean {
+    const entry = this.pending.get(dispatchId)
+    // Checking the node id matters: a late answer from a node whose dispatch
+    // already timed out must not resolve a request that has moved on.
+    if (!entry || entry.nodeId !== nodeId) return false
+    this.finish(dispatchId)
+    entry.resolve(result.error ? { ok: false, error: result.error } : { ok: true, body: result.body })
+    return true
+  }
+
+  private finish(dispatchId: string): void {
+    const entry = this.pending.get(dispatchId)
+    if (!entry) return
+    clearTimeout(entry.timer)
+    this.pending.delete(dispatchId)
+    const n = (this.inFlight.get(entry.nodeId) ?? 1) - 1
+    if (n <= 0) this.inFlight.delete(entry.nodeId)
+    else this.inFlight.set(entry.nodeId, n)
+  }
+
+  /** Drop everything. Used between tests and on shutdown. */
+  reset(): void {
+    for (const [, w] of this.waiters) { clearTimeout(w.timer); w.resolve(null) }
+    for (const [, p] of this.pending) {
+      clearTimeout(p.timer)
+      p.resolve({ ok: false, error: 'control plane shutting down' })
+    }
+    this.waiters.clear()
+    this.pending.clear()
+    this.inFlight.clear()
+  }
+}

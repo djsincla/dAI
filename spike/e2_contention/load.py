@@ -39,6 +39,8 @@ def main():
                     help="target resident GPU memory")
     ap.add_argument("--matrix-n", type=int, default=4096,
                     help="edge length of each buffer")
+    ap.add_argument("--duty", type=float, default=1.0,
+                    help="fraction of wall time spent computing, 0<duty<=1")
     ap.add_argument("--duration", type=float, default=0,
                     help="seconds to run; 0 means until SIGTERM")
     ap.add_argument("--report", help="path to write a JSON summary on exit")
@@ -69,21 +71,31 @@ def main():
     start = time.perf_counter()
     iters = 0
     i = 0
+    duty = max(0.01, min(1.0, args.duty))
     while not _stop:
         if args.duration and time.perf_counter() - start >= args.duration:
             break
         # Walk the ring so each matmul touches a different pair of buffers.
         a = buffers[i % n_buffers]
         b = buffers[(i + 1) % n_buffers]
+        t0 = time.perf_counter()
         mx.eval(a @ b)
+        work = time.perf_counter() - t0
         iters += 1
         i += 1
+        # Duty cycling is the throttle that memory ceilings are not. E5 measured
+        # a 4 GB load costing 100% of viewport p95, so footprint does not govern
+        # how much a user is disturbed — occupancy does. Sleeping between units
+        # yields the GPU back in gaps the compositor can use.
+        if duty < 1.0:
+            time.sleep(work * (1.0 / duty - 1.0))
 
     elapsed = time.perf_counter() - start
     summary = {
         "event": "done",
         "iters": iters,
         "elapsed_s": round(elapsed, 3),
+        "duty_requested": round(duty, 2),
         "gflops": round(2 * (n ** 3) * iters / elapsed / 1e9, 1) if elapsed else 0,
         "resident_gb": round(resident / (1 << 30), 2),
         "peak_gb": round(mx.get_peak_memory() / (1 << 30), 2),

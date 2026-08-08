@@ -208,6 +208,10 @@ spike/
   e3_fleet/            coordinator + worker; heterogeneous scheduling (E3)
   e6_split/            all-reduce latency and the split-model ceiling (E6)
   presence/            user-presence detection: the agent's primary control
+control-plane/         API-first TypeScript service (see its own README)
+  openapi/dai.yaml     source of truth for both clients
+  src/                 dispatch, leases, policy, auth
+  test/                34 tests against real Postgres
 docs/
   PLAN.md              full design: tiers, use cases, architecture, verification
   CONTROL_PLANE.md     control plane spec: data model, RBAC, APIs, testing

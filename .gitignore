@@ -30,3 +30,8 @@ xcuserdata/
 *.mlpackage/
 *.mlmodelc/
 spike/e5_ane/results*/
+
+# Control plane
+control-plane/node_modules/
+control-plane/dist/
+control-plane/certs/

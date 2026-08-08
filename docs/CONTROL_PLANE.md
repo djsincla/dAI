@@ -249,6 +249,74 @@ not between units, and returns what it did not reach for requeue at the head of
 the queue. Verified across a real screen lock: `YIELD -> ACTIVE; 2 done, 6
 returned`. Without this a yield costs a whole batch.
 
+## 5a. Work kinds, including rendering
+
+Work is typed, and adding a kind is the extension point the design was built
+around. **Rendering does not need a separate codebase or a separate fleet.** It
+needs a runtime, a policy row, and a unit-sizing rule.
+
+| Kind | Runtime | Permitted in | Unit |
+|---|---|---|---|
+| `embed` | Core ML, ANE | all five states | one forward pass, ~27 ms |
+| `generate` | MLX, GPU | LOCKED, ABSENT | N tokens, ~1 s |
+| `render` | Blender/Cycles CLI, GPU | LOCKED, ABSENT | tile x sample range, see below |
+
+Apple Silicon is genuinely good at this, and the harvest infrastructure is
+identical: same presence detection, same policy engine, same enrollment, same
+dispatch. A studio whose Macs do both AI and render work is worth more than
+either alone, and it is the same agent.
+
+There is a pleasing symmetry in it. Blender was E2's *instrument*, the victim
+workload standing in for the artist whose machine must not be disturbed. It
+becomes the payload.
+
+### The one thing that genuinely conflicts
+
+**Render units are long, and the harvest tier assumes they are short.**
+
+The worker yields *between items*, so a preemption costs at most one item. That
+works because an item is ~27 ms of ANE work or ~1 s of generation. A rendered
+frame is minutes. Yielding mid-frame would either discard minutes of work or
+delay the yield until the frame finished, and E4's economics assumed neither.
+
+The fix is unit granularity, not a new mechanism. Cycles renders in tiles and
+accumulates samples progressively, so a unit becomes **"tile T, samples 0-63"**
+rather than "frame F". Partial samples are a valid, mergeable result: the
+coordinator composites tiles and accumulates sample batches, which is the same
+partial-result-and-requeue path the harvest worker already implements.
+
+Sizing follows E4's rule directly. Load cost for a render unit is scene
+parse plus BVH build, which is far more expensive than a model load, so units
+must be correspondingly longer to amortise it, and the scene should stay resident
+across units from the same job rather than being reloaded per unit.
+
+### What rendering makes urgent
+
+**Asset distribution**, already listed as an open question, stops being optional.
+A model is a few GB, cached once, and shared across every job. A scene is tens of
+GB, differs per job, and is useless the moment the job completes. Pulling that N
+times from a central store on every dispatch will saturate whatever network the
+fleet has.
+
+This is the one place rendering genuinely changes the architecture rather than
+extending it, and it should be designed before the render kind ships.
+
+### What it does not change
+
+- Presence policy. Rendering is GPU work, so E2 applies unchanged: perceptible
+  at every setting while a user is present, therefore LOCKED and ABSENT only.
+- The ANE stays free for `embed` work during the day, so a machine can render
+  overnight and embed while its owner works.
+- Capability profiles. Render throughput is another workload class in the same
+  map, and E3's finding holds: it must be measured, not inferred from the chip.
+
+### Prior art to respect
+
+Deadline, OpenCue and Tractor already do distributed rendering well, and studios
+run them. Competing on scheduling is not the opening. The wedge is that this
+fleet already exists for AI work, already respects the artist, and rendering is
+an additional kind on the same agent rather than a second system to deploy.
+
 ## 6. Scheduling
 
 ### Harvest tier

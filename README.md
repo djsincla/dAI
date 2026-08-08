@@ -1,6 +1,7 @@
 # dAI - Distributed AI on Harvested Apple Silicon
 
-Centrally scheduled AI compute harvested from idle Apple Silicon workstations.
+Centrally scheduled compute harvested from idle Apple Silicon workstations: AI
+inference today, distributed rendering as a second work kind on the same agent.
 
 The premise comes from the second-GPU render farm: hardware that is already
 bought and sits idle 16 hours a day can do useful work at a marginal cost of

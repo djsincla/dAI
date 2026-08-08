@@ -149,9 +149,28 @@ for a model that fits. The only defensible use is a model that does not, and eve
 then the comparison is against buying one larger machine — an M3 Ultra with
 512 GB holds anything this fleet could assemble, at full single-node speed.
 
-Note also that `shard()` does **not** reduce peak load-time memory: every rank
-loads full weights before keeping its slice. A fleet cannot use sharding to hold
-a model no single node can load, which is the most tempting reason to want it.
+### `lazy=True` is mandatory, and it is not the default
+
+Peak memory during load decides whether sharding can hold an oversized model at
+all. Measured per rank, 7B-4bit across two nodes:
+
+| Load mode | Peak per rank | Resident | Full model |
+|---|---|---|---|
+| `lazy=False` (eager) | **5.01 GB** | 2.28 GB | 3.99 GB |
+| `lazy=True` | **2.90 GB** | 2.28 GB | 3.99 GB |
+
+Eager peaks *above* the full model, because each rank briefly holds full weights
+and the sharded copy at once. Lazy peaks well below it, materialising only this
+rank's slice.
+
+**So a fleet CAN hold a model no single node could load — but only lazily.** With
+eager loading the fleet would OOM on precisely the model the second machine was
+bought for, and `lazy=False` is the more obvious thing to write.
+
+Capacity follows from the ~1.27x transient overhead above slice size. For N nodes
+whose smallest has M_min memory, the largest loadable model is roughly
+`N x M_min / 1.27`. For this pair (48 GB smallest) that is ~75 GB — a 70B at
+8-bit, or roughly a 130B at 4-bit. Neither machine could load either alone.
 
 ## Measurement notes
 

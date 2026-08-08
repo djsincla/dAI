@@ -97,9 +97,12 @@ instruments cover different contention paths:
 - **Sharding is a memory technique, not a speed technique.** End-to-end on GbE:
   **11.69 tok/s sharded across two nodes vs 77.46 tok/s on one** — a 6.6x
   slowdown to save 43% of per-node memory (2.28 GB vs 3.99 GB). Never split for
-  speed; only to fit a model that otherwise would not. And `shard()` does not
-  reduce *peak load* memory — every rank loads full weights before keeping its
-  slice — so a fleet cannot use it to hold a model no single node can load.
+  speed; only to fit a model that otherwise would not — which it *can* do, but
+  **only with `lazy=True`**. Peak load memory per rank is 5.01 GB eager (above
+  the 3.99 GB full model, since each rank briefly holds both copies) versus
+  2.90 GB lazy. Eager loading would OOM on exactly the model the second machine
+  was bought for. Capacity is roughly `N x smallest_node / 1.27`, so this pair
+  could load ~75 GB — a 70B at 8-bit or ~130B at 4-bit.
 - **A latency microbenchmark bounds a distributed system, it does not predict
   it.** The all-reduce ceiling said 31.72 tok/s; reality delivered 11.69, so the
   ceiling was 2.7x optimistic. Tight loops enjoy warm connections and no

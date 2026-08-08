@@ -220,6 +220,12 @@ def summary():
     ideal = sum(w["throughput"] for w in STATE["workers"].values() if w.get("throughput"))
     return {
         "policy": STATE["policy"],
+        # Distinct from "nodes": a worker appears here the moment it polls,
+        # whereas nodes only populates once it posts a first result. Without
+        # this a node that has joined but is still loading its model looks
+        # identical to one that never connected.
+        "workers_seen": sorted(STATE["seen_workers"]),
+        "min_workers": STATE["min_workers"],
         "elapsed_s": round(elapsed, 2),
         "items_done": total_items,
         "items_remaining": len(STATE["units"]),

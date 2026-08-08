@@ -25,6 +25,16 @@ Two things make the result credible rather than incidental:
   resolved. Reading via IOKit and `pmset` rather than AppKit was the load-bearing
   decision, and it is now confirmed rather than assumed.
 
+### Related, from E3: Metal works as a non-console user
+
+While running E3, `orca` had user `kim` logged in at the console and a worker
+executing over SSH as `dwayne`. Metal was reachable and GPU matmuls ran
+normally.
+
+That is a fourth session context beyond the three tested here, and it further
+supports the conclusion that Metal access is not gated on owning the console
+session.
+
 ### Open: the ABSENT state is untested
 
 Every daemon sample recorded `console_user = dwayne`. The logout step was

@@ -35,7 +35,7 @@ the idea before any architecture is committed.
 | **E3** | What is aggregate throughput vs. an API call or a rented GPU hour? | **Scheduling ✅ · cost ⏳** |
 | **E4** | What does preemption cost, and what work-unit size amortizes it? | **PASSES** ✅ |
 | **E5** | Is ANE work less perceptible than GPU work? | **PASSES** ✅ |
-| **E6** | Can a large model be split across the pool? | **NOT on LAN** ❌ · Thunderbolt untested |
+| **E6** | Can a large model be split across the pool? | **Interconnect-defined** ⚠️ |
 
 E1 is the existential gate — if GPU access requires an active GUI session, the
 fleet is limited to logged-in-but-idle machines and the product is materially
@@ -83,15 +83,17 @@ instruments cover different contention paths:
 - **Yield latency is now dominated by presence polling, not memory release.**
   Release is ~20 ms; polling at 2 s means up to 2 s of work continues after a
   user returns. Tune the polling interval, not the release path.
-- **Split-model inference does not work over LAN.** Measured all-reduce latency
-  between the two machines is 16.7 ms for a 7 KB payload — pure latency, not
-  bandwidth. Qwen2's `shard()` is *tensor* parallel, needing ~56 round-trips per
-  token on a 28-layer model, which caps generation at **1.07 tok/s against 77.5
-  tok/s on one machine alone** — 1.4%, before any compute. The same WiFi gives
-  0.95 scaling efficiency for independent work units (E3), a ~70x swing from
-  workload shape alone. **The two tiers have incompatible network requirements**,
-  which is the empirical case for keeping them separate. Thunderbolt would change
-  the number and has not been tested — no link was present.
+- **Split-model viability is decided entirely by the interconnect.** Qwen2's
+  `shard()` is *tensor* parallel — ~56 all-reduces per token on a 28-layer model
+  — so the comm-only ceiling swings 30x on the wire alone: **1.07 tok/s over
+  WiFi (27 ms RTT) vs 31.72 tok/s over gigabit Ethernet (0.48 ms)**, against
+  77.5 tok/s for the same model on one machine. **The cluster tier does not
+  require Thunderbolt** — a commodity USB Ethernet adapter reaches a usable
+  regime, which is far more deployable than daisy-chained machines. Generation is
+  latency-bound and runs at near wire speed (0.563 ms all-reduce vs 0.48 ms
+  ping); prefill is bandwidth-bound and saturates the gigabit link at 928 Mbps.
+  By contrast the harvest tier is interconnect-insensitive — 0.95 efficiency over
+  the same WiFi (E3).
 - **Capability is workload-dependent, not a machine property.** Across an
   M2 Max/64 GB and an M4 Pro/48 GB, the M2 Max led by 7.5% on a 1.5B model and
   26.3% on a 7B — relative capability moved 3.5x from model size alone, and

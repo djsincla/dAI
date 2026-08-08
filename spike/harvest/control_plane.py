@@ -101,6 +101,28 @@ class ControlPlane:
             "csrPem": csr_pem,
         }, expect=(202,))
 
+    def collect_certificate(self, node_id, enrollment_token):
+        """Poll for the signed certificate after approval.
+
+        Returns None while still pending. Cannot use mTLS, since the whole point
+        is that the node has no certificate yet, so the single-use enrollment
+        token stands in.
+        """
+        req = urllib.request.Request(f"{self.base}/agent/v1/enroll/{node_id}", method="GET")
+        req.add_header("x-enrollment-token", enrollment_token)
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout,
+                                        context=self.ssl_context) as resp:
+                if resp.status == 202:
+                    return None
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            raise ControlPlaneError(
+                f"certificate collection -> {exc.code}: "
+                f"{exc.read().decode(errors='replace')[:200]}") from exc
+        except urllib.error.URLError as exc:
+            raise ControlPlaneError(f"certificate collection unreachable: {exc.reason}") from exc
+
     # -- policy -------------------------------------------------------------
 
     def fetch_policy(self):

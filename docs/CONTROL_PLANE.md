@@ -170,6 +170,25 @@ fleet. **Authentication has to be mutual, and the node has to pin the CA.**
 
 ### Certificates
 
+Implemented in `src/lib/ca.ts` and verified end to end against a second machine
+enrolling over TLS with no development escape hatch in play.
+
+**The bootstrap bundle is three things: the control plane URL, a join token, and
+the server CA.** A node must be able to verify the control plane before it has
+an identity of its own, so the server CA has to arrive out of band. Delivering
+only a URL and a token means the node's first act is trusting whatever answers.
+
+**The two CAs are distinct and must not be confused.** The *node* CA signs agent
+identities. The *server* CA signs the control plane's own TLS certificate and is
+what a node pins. Handing a node the wrong one fails every subsequent connection
+with a certificate error that reads like a network problem; that mistake was
+made while building this and cost real time.
+
+**A CA without `keyUsage` is refused outright.** Python's TLS stack rejects it
+with "CA cert does not include key usage extension", which again reads like
+connectivity. `scripts/make-certs.sh` sets `basicConstraints` and `keyUsage`
+explicitly for that reason.
+
 - Issued at enrollment **approval**, never on token presentation. A joining node
   lands in `pending` with its hardware fingerprint and receives nothing until an
   admin promotes it.
@@ -180,6 +199,11 @@ fleet. **Authentication has to be mutual, and the node has to pin the CA.**
 - **Short-lived, automatically rotated.** Long-lived credentials on laptops that
   leave the building are the wrong default. Rotation failure should degrade to
   "stops getting work", not "keeps working forever".
+- **Node certificates are client-auth only.** A node certificate must not be
+  usable to impersonate the control plane to another node.
+- **The subject comes from the node record, not the CSR.** A machine does not
+  choose the name it is known by, or it could request an identity belonging to
+  another node.
 - **Revocation is immediate and checked on every lease**, not cached. A stolen
   laptop must stop receiving work the moment it is reported, and node identity is
   cheap to check because the agent is already talking to the control plane.

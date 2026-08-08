@@ -1,16 +1,32 @@
 import { Router } from 'express'
-import { createHash, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import type { Db } from '../lib/db.js'
 import { agentAuth } from '../lib/auth.js'
 import { POLICY, type WorkKind } from '../lib/policy.js'
 import { LeaseConflict, leaseWork, reportResult } from '../lib/work.js'
 import { clientIp, nodeNetworkAllowed } from '../lib/netacl.js'
 import type { Broker } from '../lib/broker.js'
+import { type Ca, newEnrollmentToken } from '../lib/ca.js'
+import { existsSync, readFileSync } from 'node:fs'
 
 const KINDS: WorkKind[] = ['embed', 'generate', 'render']
 
-export function agentRoutes(db: Db, broker: Broker): Router {
+export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
   const r = Router()
+
+  /**
+   * The CA a node needs in order to keep talking to us.
+   *
+   * This is the *server* CA, not the node CA. The node CA signs agent
+   * identities and a node never needs it; the server CA is what lets a node
+   * verify the control plane. Returning the wrong one produces a certificate
+   * verification failure that reads like a connectivity problem, which is
+   * exactly what happened the first time this was wired up.
+   */
+  const serverCaPath = process.env.TLS_CA
+  const serverCaPem = serverCaPath && existsSync(serverCaPath)
+    ? readFileSync(serverCaPath, 'utf8')
+    : null
 
   /**
    * Enrollment never auto-trusts a token bearer. The node lands in `pending`
@@ -34,18 +50,62 @@ export function agentRoutes(db: Db, broker: Broker): Router {
       return
     }
 
-    // Stand-in for signing the CSR. The real issuer signs at approval, not here.
-    const fingerprint = createHash('sha256').update(b.csrPem).digest('hex')
-
+    // The CSR is stored, not signed. Signing happens at approval, so a leaked
+    // join token is a nuisance rather than a fleet compromise.
+    const enrollmentToken = newEnrollmentToken()
     const { rows } = await db.query(
       `INSERT INTO nodes (hostname, chip, memory_gb, metal_working_set_gb, os_version,
-                          state, cert_fingerprint)
-       VALUES ($1,$2,$3,$4,$5,'pending',$6)
-       ON CONFLICT (cert_fingerprint) DO UPDATE SET hostname = EXCLUDED.hostname
+                          state, csr_pem, enrollment_token)
+       VALUES ($1,$2,$3,$4,$5,'pending',$6,$7)
        RETURNING id, state`,
-      [b.hostname, b.chip, b.memoryGb, b.metalWorkingSetGb, b.osVersion, fingerprint],
+      [b.hostname, b.chip, b.memoryGb, b.metalWorkingSetGb, b.osVersion,
+       b.csrPem, enrollmentToken],
     )
-    res.status(202).json({ nodeId: rows[0]!.id, state: 'pending', fingerprint })
+    res.status(202).json({
+      nodeId: rows[0]!.id,
+      state: 'pending',
+      // The node keeps this to collect its certificate once approved. It is the
+      // only way back in before the node has an identity, which is why it is
+      // single use.
+      enrollmentToken,
+    })
+  })
+
+  /**
+   * Collect a certificate after approval.
+   *
+   * Cannot require mTLS: the node has no certificate yet, which is the whole
+   * reason it is calling. The enrollment token stands in, and is cleared on
+   * collection because a credential that can be replayed is one that will be.
+   */
+  r.get('/enroll/:nodeId', async (req, res) => {
+    const token = req.header('x-enrollment-token')
+    if (!token) {
+      res.status(401).json({ error: 'unauthorized', detail: 'no enrollment token' })
+      return
+    }
+    const { rows } = await db.query(
+      `SELECT id, state, cert_pem, enrollment_token FROM nodes WHERE id = $1`,
+      [req.params.nodeId],
+    )
+    const node = rows[0] as any
+    if (!node || node.enrollment_token !== token) {
+      res.status(401).json({ error: 'unauthorized', detail: 'invalid enrollment token' })
+      return
+    }
+    if (node.state === 'pending' || !node.cert_pem) {
+      res.status(202).json({ state: 'pending' })
+      return
+    }
+    await db.query(`UPDATE nodes SET enrollment_token = NULL WHERE id = $1`, [node.id])
+    res.json({
+      state: 'active',
+      certPem: node.cert_pem,
+      // Lets a node refresh its pinned server CA over an authenticated channel
+      // rather than only out of band, which matters when the server CA rotates.
+      serverCaPem,
+      nodeCaPem: ca.certPem,
+    })
   })
 
   r.use(agentAuth(db))

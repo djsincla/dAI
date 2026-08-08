@@ -66,17 +66,30 @@ export function agentAuth(db: Db) {
       return
     }
     const { rows } = await db.query(
-      `SELECT id, hostname, state, presence_state, paused_until, owner_user_id
+      `SELECT id, hostname, state, presence_state, paused_until, owner_user_id,
+              revoked_at, cert_not_after
          FROM nodes WHERE cert_fingerprint = $1`,
       [fingerprint],
     )
-    const node = rows[0] as NodeIdentity | undefined
+    const node = rows[0] as (NodeIdentity & {
+      revoked_at: Date | null; cert_not_after: Date | null
+    }) | undefined
     if (!node) {
       res.status(401).json({ error: 'unauthorized', detail: 'unknown certificate' })
       return
     }
-    // Revocation is checked on every request rather than cached, so a stolen
-    // laptop stops receiving work the moment it is reported.
+    // Revocation and expiry are checked on every request rather than cached.
+    // A stolen laptop must stop being a fleet member the moment it is reported,
+    // and a certificate that has aged out must stop working on its own so that
+    // renewal is routine rather than something anyone has to remember.
+    if (node.revoked_at) {
+      res.status(401).json({ error: 'unauthorized', detail: 'certificate revoked' })
+      return
+    }
+    if (node.cert_not_after && node.cert_not_after < new Date()) {
+      res.status(401).json({ error: 'unauthorized', detail: 'certificate expired; re-enroll' })
+      return
+    }
     if (node.state === 'pending') {
       res.status(401).json({ error: 'unauthorized', detail: 'node not approved' })
       return

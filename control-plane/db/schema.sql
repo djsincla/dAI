@@ -62,6 +62,16 @@ CREATE TABLE nodes (
     -- Drives the pause right that no role can override.
     owner_user_id         uuid REFERENCES users(id) ON DELETE SET NULL,
     cert_fingerprint      text UNIQUE,
+    -- Kept so an admin can see what was signed, and so a revoked certificate
+    -- can be identified after the fact.
+    cert_pem              text,
+    cert_not_after        timestamptz,
+    csr_pem               text,
+    -- One-time secret the node presents to collect its certificate after
+    -- approval. Cleared on collection: a credential that can be replayed is
+    -- a credential that will be.
+    enrollment_token      text,
+    revoked_at            timestamptz,
     enrolled_at           timestamptz,
     paused_until          timestamptz,
     presence_state        text,

@@ -9,6 +9,7 @@ import { adminRoutes } from './routes/admin.js'
 import { startReaper } from './lib/work.js'
 import { Acl, aclMiddleware, describeAcls } from './lib/netacl.js'
 import { Broker } from './lib/broker.js'
+import { Ca } from './lib/ca.js'
 import { servingRoutes } from './routes/serving.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -38,6 +39,12 @@ export type Surface = 'agent' | 'admin' | 'both'
  * this in Postgres with LISTEN/NOTIFY before scaling out.
  */
 export const broker = new Broker()
+
+/**
+ * Node identity issuer. Its private key is read from disk rather than the
+ * database, so a database compromise cannot mint fleet members.
+ */
+export const ca = Ca.fromEnv()
 
 export function createApp(db: Db, surface: Surface = 'both'): Express {
   const app = express()
@@ -92,10 +99,10 @@ export function createApp(db: Db, surface: Surface = 'both'): Express {
   // side is restarting, misbehaving or being scaled independently. Running them
   // as one process is the convenient default, not a requirement.
   if (surface !== 'admin') {
-    app.use('/agent/v1', aclMiddleware(agentAcl, 'agent'), agentRoutes(db, broker))
+    app.use('/agent/v1', aclMiddleware(agentAcl, 'agent'), agentRoutes(db, broker, ca))
   }
   if (surface !== 'agent') {
-    app.use('/admin/v1', aclMiddleware(adminAcl, 'admin'), adminRoutes(db))
+    app.use('/admin/v1', aclMiddleware(adminAcl, 'admin'), adminRoutes(db, ca))
     // OpenAI-compatible surface. Separate from /admin because its callers are
     // applications with API keys rather than people with sessions, and it will
     // want its own rate limits and availability treatment.
@@ -144,7 +151,11 @@ if (import.meta.url === `file://${process.argv[1]}`) {
         {
           cert: readFileSync(certPath),
           key: readFileSync(keyPath),
-          ca: existsSync(caPath) ? readFileSync(caPath) : undefined,
+          // Client certificates are verified against the *node* CA, which is
+          // not necessarily the CA that issued this server's own certificate.
+          // Conflating them would mean anything trusted to talk to the fleet
+          // could also impersonate a node.
+          ca: [ca.certPem, ...(existsSync(caPath) ? [readFileSync(caPath, 'utf8')] : [])],
           // Nodes present certificates; humans do not. A missing client cert is
           // therefore rejected by the agent surface rather than by TLS itself.
           requestCert: surface !== 'admin',

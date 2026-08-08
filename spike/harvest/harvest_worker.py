@@ -41,7 +41,15 @@ import time
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent / "presence"))
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 import presence  # noqa: E402
-from ane_runtime import ANERuntime, ANEPlacementError  # noqa: E402
+# Optional. A node without Core ML can still do GPU and batch work, so a
+# missing runtime must degrade the agent rather than stop it starting. This
+# failed on a real node that had MLX but not coremltools.
+try:
+    from ane_runtime import ANERuntime, ANEPlacementError  # noqa: E402
+except Exception as _ane_import_error:  # pragma: no cover
+    ANERuntime = None
+    class ANEPlacementError(RuntimeError):
+        pass
 from control_plane import (  # noqa: E402
     ControlPlane, ControlPlaneError, NotEnrolled, apply_policy, merge_policy,
 )
@@ -142,7 +150,13 @@ class HarvestWorker:
         # exists. GPU work is forbidden in three of five presence states, so
         # without the ANE path a logged-in machine contributes nothing at all.
         self.runtime = Runtime(model_name)
-        self.ane = ANERuntime(ane_model) if ane_model else None
+        self.ane = None
+        if ane_model:
+            if ANERuntime is None:
+                print(f"[warn] --ane-model given but Core ML is unavailable "
+                      f"({_ane_import_error}); running GPU work only")
+            else:
+                self.ane = ANERuntime(ane_model)
         self.monitor = presence.PresenceMonitor(promote_after=promote_after)
         self.verbose = verbose
         self.qos_background = None

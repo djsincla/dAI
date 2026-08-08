@@ -105,6 +105,56 @@ observability. A real contention signal would have to measure utilisation.
   false "they are gone" costs a model load and an immediate preemption. Tests
   lower it; production should not.
 
+## The ANE path: a logged-in machine now contributes
+
+GPU work is permitted in only two of five presence states, so without an ANE
+runtime a logged-in machine stood down entirely. `ane_runtime.py` adds the
+second runtime and the worker now advertises which *kinds* of work it may
+currently run.
+
+**Work is typed and capability-negotiated.** Units carry a `kind`; the worker
+sends `?kinds=embed,generate` reflecting what policy permits right now; the
+coordinator serves only those and keeps separate queues. Running in IDLE with a
+mixed 200-item corpus:
+
+    queues at start:  {generate: 100, embed: 100}
+    queues after:     {generate: 100, embed: 0}
+
+The GPU queue is untouched while the ANE queue drains completely — which is
+exactly the policy made visible, and the first time a machine with a user logged
+into it has done any work at all.
+
+**Placement is verified at load, and the runtime refuses to start without it.**
+Core ML treats `CPU_AND_NE` as a preference and falls back to CPU silently. A
+worker that believed it was on the ANE while actually running on the CPU would
+be disturbing the very user it is trying to avoid, and every log would look
+fine. `MLComputePlan` is checked at load and anything below 80% ANE residency
+is rejected rather than run.
+
+### Two bugs, ~50x between them
+
+ANE throughput started at 0.5 items/s against 36.7 items/s for the same model
+run standalone.
+
+**Background QoS was being applied to ANE work.** Duty cycling had been exempted
+but QoS had not. E5 measured ANE work as invisible, so there is nothing to be
+polite about — and background QoS costs ~26x on bursty items. The worker was
+paying a large throughput tax to buy politeness that was already free, in
+precisely the states where ANE work is the *only* thing permitted. Making QoS
+kind-aware: **0.5 -> 6.5 items/s**.
+
+**Presence polling cost 4x the work it guarded.** `read_signals()` is ~116 ms —
+six subprocess calls (`ioreg`, `pmset` x3, `stat`) — against a 27 ms ANE item.
+Polling per item spent 81% of the worker's time asking whether the user was
+back. Caching for `POLL_INTERVAL_ACTIVE` costs nothing in responsiveness,
+because that interval already *is* the designed yield latency (E4: sampling
+frequency dominates end-to-end yield, not the ~20 ms release). **6.5 -> ~30
+items/s**, matching the standalone ceiling.
+
+Both errors share a shape worth noting: **a safety mechanism sized without
+reference to the work it protects.** Politeness that costs 26x where it buys
+nothing, and a check costing 4x the operation it guards.
+
 ## Caveats
 
 - Single machine, single yield cycle. Not yet run across the fleet with both
@@ -112,6 +162,11 @@ observability. A real contention signal would have to measure utilisation.
 - Yield latency was not measured precisely — the log shows detection to unload
   within ~2 s, but that bound is the poll interval plus item duration, and item
   duration was inflated by the QoS bug during the run that produced it.
-- The worker has no ANE path, so in the three states where only ANE work is
-  permitted it stands down entirely rather than switching runtimes. That is the
-  obvious next piece.
+- The ANE workload is E5's verified conv stack, not a real embedding model.
+  Converting one needs torch and is a separate task; the mechanism, placement
+  verification and policy integration are what this exercises, and swapping the
+  model changes only `ANERuntime.run`.
+- The GPU path has still only been exercised in IDLE and PASSIVE. LOCKED and
+  ABSENT — where `generate` work actually runs — need a locked screen to test.
+- Everything now runs on one Python 3.13 venv (`.venv-harvest`) carrying both
+  MLX and coremltools, which also matches orca. The 3.12/3.14 split is gone.

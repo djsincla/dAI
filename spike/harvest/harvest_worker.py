@@ -40,7 +40,9 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent / "presence"))
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 import presence  # noqa: E402
+from ane_runtime import ANERuntime, ANEPlacementError  # noqa: E402
 
 MAX_TOKENS = 24
 
@@ -115,36 +117,88 @@ class Runtime:
 
 
 class HarvestWorker:
-    def __init__(self, coordinator, name, model_name, verbose=True,
+    def __init__(self, coordinator, name, model_name, ane_model=None, verbose=True,
                  promote_after=presence.IDLE_PROMOTE_SECONDS):
         self.coordinator = coordinator.rstrip("/")
         self.name = name
         self.machine = machine_label()
+        # Two runtimes, chosen by what policy permits rather than by what work
+        # exists. GPU work is forbidden in three of five presence states, so
+        # without the ANE path a logged-in machine contributes nothing at all.
         self.runtime = Runtime(model_name)
+        self.ane = ANERuntime(ane_model) if ane_model else None
         self.monitor = presence.PresenceMonitor(promote_after=promote_after)
         self.verbose = verbose
         self.qos_background = None
+        self._reading = None
+        self._reading_at = 0.0
         self.stats = {"items": 0, "units": 0, "yields": 0, "items_lost": 0,
                       "loads": 0, "load_s": 0.0, "work_s": 0.0, "idle_s": 0.0}
+
+    def presence(self, max_age=None):
+        """Presence reading, cached briefly.
+
+        read_signals() costs ~116ms (six subprocess calls: ioreg, pmset x3,
+        stat). An ANE item costs ~27ms, so polling per item spent 81% of the
+        worker's time asking whether the user was back — the check cost 4x the
+        work it was guarding.
+
+        Caching for POLL_INTERVAL_ACTIVE costs nothing in responsiveness,
+        because that interval is already the designed yield latency (E4: the
+        sampling interval dominates end-to-end yield, not the ~20ms release).
+        """
+        max_age = presence.POLL_INTERVAL_ACTIVE if max_age is None else max_age
+        now = time.monotonic()
+        if self._reading is None or (now - self._reading_at) >= max_age:
+            self._reading = self.monitor.update()
+            self._reading_at = now
+        return self._reading
 
     def log(self, msg):
         if self.verbose:
             print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
-    def apply_qos(self, policy):
-        """Follow the policy's QoS. E1 measured this at ~2.4x throughput, so
-        leaving it pinned to background wastes most of the overnight window."""
-        want_bg = policy["qos"] == "background"
+    def apply_qos(self, policy, kind=None):
+        """Set process QoS for the work about to run.
+
+        GPU work follows the policy. ANE work never does: E5 measured it as
+        indistinguishable from no load, so there is nothing to be polite about,
+        while background QoS costs ~26x on bursty items. Running ANE work under
+        background priority pays a large throughput tax to buy politeness that
+        is already free — and ANE work is all a logged-in machine may do, so the
+        tax lands on the majority of presence states.
+        """
+        want_bg = policy["qos"] == "background" and kind != "embed"
         if want_bg != self.qos_background:
             if set_background_qos(want_bg):
                 self.qos_background = want_bg
                 self.log(f"  QoS -> {'background' if want_bg else 'standard'}")
 
-    def may_work(self, policy):
-        """GPU inference is the only thing this worker can do, so a policy that
-        forbids GPU means stand down — even though ANE work would be allowed.
-        A Core ML path (E5) would be the daytime complement."""
-        return policy["gpu"] and policy["duty_max"] > 0
+    def available_kinds(self, policy):
+        """Work kinds this worker may run *right now*.
+
+        Advertised to the coordinator so it hands out only servable work,
+        instead of the worker fetching a unit it must immediately return.
+        """
+        kinds = []
+        if policy["gpu"] and policy["duty_max"] > 0:
+            kinds.append("generate")
+        # E5: ANE work is indistinguishable from no load, so it stays permitted
+        # wherever the policy allows it — including states where a user is
+        # present and GPU work is not.
+        if policy["ane"] and self.ane is not None:
+            kinds.append("embed")
+        return kinds
+
+    def runtime_for(self, kind):
+        return self.ane if kind == "embed" else self.runtime
+
+    def unload_all(self, except_runtime=None):
+        freed = 0.0
+        for rt in (self.runtime, self.ane):
+            if rt is not None and rt is not except_runtime and rt.loaded:
+                freed += rt.unload()
+        return freed
 
     def poll_interval(self, state):
         # E4: yield latency is dominated by sampling frequency, not by releasing
@@ -152,10 +206,11 @@ class HarvestWorker:
         return (presence.POLL_INTERVAL_IDLE if state in ("LOCKED", "ABSENT")
                 else presence.POLL_INTERVAL_ACTIVE)
 
-    def fetch(self):
+    def fetch(self, kinds):
         try:
-            with urllib.request.urlopen(
-                    f"{self.coordinator}/work?worker={self.name}", timeout=60) as r:
+            url = (f"{self.coordinator}/work?worker={self.name}"
+                   f"&kinds={','.join(kinds)}")
+            with urllib.request.urlopen(url, timeout=60) as r:
                 return json.load(r)
         except urllib.error.URLError as exc:
             self.log(f"  coordinator unreachable ({exc}); retry in 3s")
@@ -182,7 +237,7 @@ class HarvestWorker:
             self.log(f"  failed to report unit {unit_id}: {exc}")
             return None
 
-    def process(self, unit):
+    def process(self, unit, kind):
         """Run a unit, re-checking presence between every item.
 
         Between-item is the right granularity: a unit is a batch, so checking
@@ -191,15 +246,20 @@ class HarvestWorker:
         keeping the presence check itself negligible.
         """
         items = unit["items"]
+        runtime = self.runtime_for(kind)
+        self.apply_qos(self.presence()["policy"], kind)
         t0 = time.perf_counter()
         done = 0
 
         for index, item in enumerate(items):
-            reading = self.monitor.update()
+            reading = self.presence()
             policy = reading["policy"]
-            self.apply_qos(policy)
+            self.apply_qos(policy, kind)
 
-            if not self.may_work(policy):
+            # Re-check that *this* kind is still permitted, not merely that some
+            # work is: a machine moving from LOCKED to ACTIVE keeps ANE work
+            # legal while revoking GPU work mid-unit.
+            if kind not in self.available_kinds(policy):
                 unfinished = items[index:]
                 self.stats["yields"] += 1
                 self.stats["items_lost"] += 0  # nothing in flight was discarded
@@ -209,13 +269,15 @@ class HarvestWorker:
                 return done, unfinished, time.perf_counter() - t0
 
             item_t0 = time.perf_counter()
-            self.runtime.run(item["prompt"])
+            runtime.run(item) if kind == "embed" else runtime.run(item["prompt"])
             item_s = time.perf_counter() - item_t0
             done += 1
 
             # E2: duty cycle is a real, monotonic lever independent of QoS.
-            # Sleeping proportionally yields the GPU back in gaps.
-            duty = policy["duty_max"]
+            # Sleeping proportionally yields the GPU back in gaps. ANE work is
+            # exempt — E5 measured it as invisible, so throttling it would cost
+            # throughput to buy politeness that is already free.
+            duty = 1.0 if kind == "embed" else policy["duty_max"]
             if 0 < duty < 1.0:
                 time.sleep(item_s * (1.0 / duty - 1.0))
 
@@ -224,49 +286,72 @@ class HarvestWorker:
     def run(self):
         self.log(f"harvest worker {self.name} ({self.machine})")
         self.log(f"coordinator {self.coordinator}")
+        if self.ane is not None:
+            try:
+                load_s = self.ane.load()
+                pl = self.ane.placement
+                self.log(f"  ANE model loaded in {load_s:.2f}s "
+                         f"({pl['ane_share']:.0%} of {pl['total_ops']} ops on ANE)")
+            except ANEPlacementError as exc:
+                # Refuse rather than silently disturbing the user from the CPU.
+                self.log(f"  ANE model REJECTED: {exc}")
+                self.ane = None
+            except Exception as exc:
+                self.log(f"  ANE model failed to load: {exc!r}")
+                self.ane = None
 
         while True:
-            reading = self.monitor.update()
+            reading = self.presence()
             state, policy = reading["state"], reading["policy"]
-            self.apply_qos(policy)
+            kinds = self.available_kinds(policy)
 
-            if not self.may_work(policy):
-                if self.runtime.loaded:
-                    freed = self.runtime.unload()
+            if not kinds:
+                freed = self.unload_all()
+                if freed:
                     self.log(f"  standing down in {state}; released in {freed*1000:.0f}ms")
                 wait = self.poll_interval(state)
                 self.stats["idle_s"] += wait
                 time.sleep(wait)
                 continue
 
-            work = self.fetch()
+            # Release the GPU model as soon as GPU work stops being permitted,
+            # even though ANE work continues. E4 puts reload at 1-3s, so holding
+            # it against a possible return is not worth the resident memory.
+            if "generate" not in kinds and self.runtime.loaded:
+                freed = self.runtime.unload()
+                self.log(f"  GPU work not permitted in {state}; "
+                         f"released model in {freed*1000:.0f}ms")
+
+            work = self.fetch(kinds)
             if work is None:
                 continue
-            if work.get("wait"):
+            if work.get("wait") or work.get("idle"):
                 time.sleep(3)
                 continue
             if work.get("done"):
                 break
 
-            if not self.runtime.loaded:
+            kind = work.get("kind", "generate")
+            if kind == "generate" and not self.runtime.loaded:
                 load_s = self.runtime.load()
                 self.stats["loads"] += 1
                 self.stats["load_s"] += load_s
-                self.log(f"  loaded model in {load_s:.2f}s (state={state})")
+                self.log(f"  loaded GPU model in {load_s:.2f}s (state={state})")
 
-            done, unfinished, seconds = self.process(work)
+            done, unfinished, seconds = self.process(work, kind)
             self.stats["items"] += done
+            self.stats.setdefault(f"items_{kind}", 0)
+            self.stats[f"items_{kind}"] += done
             self.stats["units"] += 1
             self.stats["work_s"] += seconds
             self.report(work["unit_id"], done, unfinished, seconds)
 
             if not unfinished:
                 rate = done / seconds if seconds else 0
-                self.log(f"  unit: {done} items in {seconds:.2f}s ({rate:.2f}/s) "
-                         f"state={state} duty={policy['duty_max']:.2f}")
+                self.log(f"  {kind}: {done} items in {seconds:.2f}s ({rate:.2f}/s) "
+                         f"state={state}")
 
-        if self.runtime.loaded:
-            self.runtime.unload()
+        self.unload_all()
         self.log("done: " + json.dumps(self.stats))
         return 0
 
@@ -275,7 +360,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--coordinator", required=True)
-    ap.add_argument("--model", default="mlx-community/Qwen2.5-1.5B-Instruct-4bit")
+    ap.add_argument("--model", default="mlx-community/Qwen2.5-1.5B-Instruct-4bit",
+                    help="MLX model for GPU 'generate' work")
+    ap.add_argument("--ane-model",
+                    help="Core ML .mlpackage for ANE 'embed' work. Without it "
+                         "the worker can only run in LOCKED and ABSENT.")
     ap.add_argument("--name", default=platform.node().split(".")[0])
     ap.add_argument("--promote-after", type=float,
                     default=presence.IDLE_PROMOTE_SECONDS,
@@ -285,6 +374,7 @@ def main():
                          "and an instant preemption); lower it only for tests.")
     args = ap.parse_args()
     return HarvestWorker(args.coordinator, args.name, args.model,
+                         ane_model=args.ane_model,
                          promote_after=args.promote_after).run()
 
 

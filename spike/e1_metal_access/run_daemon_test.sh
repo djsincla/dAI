@@ -1,5 +1,5 @@
 #!/bin/bash
-# E1 daemon test — the existential gate for the harvest tier.
+# E1 daemon test - the existential gate for the harvest tier.
 #
 # Installs the probe as a LaunchDaemon (system domain, session 0, root, no user
 # context) firing every 20s, so a single load captures samples across an
@@ -22,7 +22,7 @@ RESULTS="/tmp/dai_e1_daemon.jsonl"
 
 require_root() {
     if [[ $EUID -ne 0 ]]; then
-        echo "error: '$1' needs root — run: sudo $0 $1" >&2
+        echo "error: '$1' needs root - run: sudo $0 $1" >&2
         exit 1
     fi
 }
@@ -47,7 +47,7 @@ install)
 
 collect)
     if [[ ! -s "$RESULTS" ]]; then
-        echo "No results at $RESULTS — is the daemon loaded?" >&2
+        echo "No results at $RESULTS - is the daemon loaded?" >&2
         echo "launchctl print system/$LABEL | head -20" >&2
         launchctl print system/"$LABEL" 2>&1 | grep -E "state|last exit" >&2
         exit 1

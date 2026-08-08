@@ -1,4 +1,4 @@
-# Harvest worker — fleet dispatch with presence-driven yield
+# Harvest worker - fleet dispatch with presence-driven yield
 
 The intersection nothing had tested. E3 measured a fleet with nobody at the
 keyboards; E2 and E5 measured contention with no scheduler. This runs both at
@@ -6,7 +6,7 @@ once.
 
 ## It works end to end
 
-Driven by a real signal — `caffeinate -d` holds a genuine
+Driven by a real signal - `caffeinate -d` holds a genuine
 `PreventUserIdleDisplaySleep` assertion, the same one a video call or media
 playback holds, which `presence.py` classifies as PASSIVE. The worker is told
 nothing.
@@ -66,7 +66,7 @@ Two findings compound against it: E2 put that setting at +46% of viewport p95
 resulting throughput negligible anyway. Paying a visible cost for almost no work
 is the worst available trade.
 
-Where GPU harvesting does run — LOCKED and ABSENT — standard QoS applies and
+Where GPU harvesting does run - LOCKED and ABSENT - standard QoS applies and
 neither penalty exists.
 
 **This raises the stakes on E5 again.** ANE work is now the *only* thing a
@@ -85,7 +85,7 @@ gating on it blocks harvesting entirely on any normally-used machine.
 
 This is the **same failure as the earlier sharingd/Handoff bug, one layer down**.
 That fix split display assertions from system assertions so presence would be
-classified correctly — and then used the system assertions as a hard policy gate,
+classified correctly - and then used the system assertions as a hard policy gate,
 which is just as wrong. The gate is removed; the signal is still surfaced for
 observability. A real contention signal would have to measure utilisation.
 
@@ -96,7 +96,7 @@ observability. A real contention signal would have to measure utilisation.
   the head of the queue. Without this a yield would cost a whole batch, which is
   the expense E4's economics exist to avoid.
 - **QoS follows presence at runtime** via `setpriority(PRIO_DARWIN_PROCESS, 0,
-  PRIO_DARWIN_BG)` — the same mechanism `taskpolicy -b` uses, callable on self,
+  PRIO_DARWIN_BG)` - the same mechanism `taskpolicy -b` uses, callable on self,
   so it is not fixed at launch by a plist.
 - **Capability estimates ignore yielded units.** A yield with zero items done
   would otherwise register as zero throughput and poison the node's profile in
@@ -120,7 +120,7 @@ mixed 200-item corpus:
     queues at start:  {generate: 100, embed: 100}
     queues after:     {generate: 100, embed: 0}
 
-The GPU queue is untouched while the ANE queue drains completely — which is
+The GPU queue is untouched while the ANE queue drains completely - which is
 exactly the policy made visible, and the first time a machine with a user logged
 into it has done any work at all.
 
@@ -138,13 +138,13 @@ run standalone.
 
 **Background QoS was being applied to ANE work.** Duty cycling had been exempted
 but QoS had not. E5 measured ANE work as invisible, so there is nothing to be
-polite about — and background QoS costs ~26x on bursty items. The worker was
+polite about - and background QoS costs ~26x on bursty items. The worker was
 paying a large throughput tax to buy politeness that was already free, in
 precisely the states where ANE work is the *only* thing permitted. Making QoS
 kind-aware: **0.5 -> 6.5 items/s**.
 
-**Presence polling cost 4x the work it guarded.** `read_signals()` is ~116 ms —
-six subprocess calls (`ioreg`, `pmset` x3, `stat`) — against a 27 ms ANE item.
+**Presence polling cost 4x the work it guarded.** `read_signals()` is ~116 ms -
+six subprocess calls (`ioreg`, `pmset` x3, `stat`) - against a 27 ms ANE item.
 Polling per item spent 81% of the worker's time asking whether the user was
 back. Caching for `POLL_INTERVAL_ACTIVE` costs nothing in responsiveness,
 because that interval already *is* the designed yield latency (E4: sampling
@@ -173,7 +173,7 @@ Work actually executed, counted by state:
 | `embed` (ANE) | **54 units** | 42 units |
 | `generate` (GPU) | **0 units** | 96 units |
 
-**Zero GPU units ran while a user was present**, across 1,970 items — the safety
+**Zero GPU units ran while a user was present**, across 1,970 items - the safety
 property the whole policy exists to guarantee. ANE work continued throughout, so
 the machine never stopped contributing.
 
@@ -189,11 +189,11 @@ Two things worth reading out of that table.
 
 **ANE throughput is identical whether or not a user is present** (30.2 vs 31.1).
 The politeness machinery costs nothing on the ANE path because there is nothing
-to be polite about — which is what E5 predicted and what the kind-aware QoS fix
+to be polite about - which is what E5 predicted and what the kind-aware QoS fix
 delivered.
 
 **ANE work is 5.5x the item rate of GPU work here**, but the items are not
-comparable — an embed item is one Core ML forward pass, a generate item is 24
+comparable - an embed item is one Core ML forward pass, a generate item is 24
 LLM tokens. The useful reading is that the daytime path is not a token gesture:
 a machine in use runs a substantial workload rather than idling until its owner
 goes home.
@@ -202,7 +202,7 @@ goes home.
 
 - Single machine, single yield cycle. Not yet run across the fleet with both
   nodes yielding independently.
-- Yield latency was not measured precisely — the log shows detection to unload
+- Yield latency was not measured precisely - the log shows detection to unload
   within ~2 s, but that bound is the poll interval plus item duration, and item
   duration was inflated by the QoS bug during the run that produced it.
 - The ANE workload is E5's verified conv stack, not a real embedding model.

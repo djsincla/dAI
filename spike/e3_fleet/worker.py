@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-E3 worker — pulls work units, runs MLX inference, reports throughput.
+E3 worker - pulls work units, runs MLX inference, reports throughput.
 
 Deliberately minimal in its dependencies: MLX and mlx-lm and nothing else. This
 is the piece that has to run on every harvested machine, so anything it needs is
@@ -8,7 +8,7 @@ something the fleet has to install and keep in sync. The shipping agent replaces
 this with a single signed mlx-swift binary for exactly that reason.
 
 Reports its machine identity so the coordinator can attribute throughput. The
-coordinator never trusts a declared capability — it derives throughput from
+coordinator never trusts a declared capability - it derives throughput from
 completed work, because measured behaviour and spec sheets disagree on Apple
 Silicon (bandwidth-bound work inverts the ranking core counts would predict).
 

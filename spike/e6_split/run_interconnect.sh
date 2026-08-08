@@ -9,7 +9,7 @@
 #
 # Produces, per link: RTT, all-reduce latency at three payload sizes, the
 # comm-only token ceiling, and the end-to-end sharded generation rate. The last
-# one is what matters — the ceiling proved 2.7x optimistic against real
+# one is what matters - the ceiling proved 2.7x optimistic against real
 # generation on gigabit, because a tight all-reduce loop pays neither
 # synchronisation nor per-op overhead.
 #

@@ -3,8 +3,8 @@
 Background MLX load with a controlled unified-memory footprint.
 
 Stands in for a harvest-tier inference worker. Synthetic rather than a real
-model on purpose: it isolates the two variables E2 actually sweeps — resident
-memory and sustained GPU work — without confounding them with model-specific
+model on purpose: it isolates the two variables E2 actually sweeps - resident
+memory and sustained GPU work - without confounding them with model-specific
 load times or download size. A real-model rerun should follow once the
 synthetic sweep identifies the interesting region.
 
@@ -13,7 +13,7 @@ working set genuinely streams through memory. Reusing a single buffer would sit
 in cache and understate bandwidth contention, which is the whole mechanism we
 are trying to measure on unified memory.
 
-QoS is set by the caller (`taskpolicy -b`), not here — that mirrors how launchd
+QoS is set by the caller (`taskpolicy -b`), not here - that mirrors how launchd
 applies ProcessType and keeps this process honest about what it inherited.
 """
 
@@ -85,7 +85,7 @@ def main():
         i += 1
         # Duty cycling is the throttle that memory ceilings are not. E5 measured
         # a 4 GB load costing 100% of viewport p95, so footprint does not govern
-        # how much a user is disturbed — occupancy does. Sleeping between units
+        # how much a user is disturbed - occupancy does. Sleeping between units
         # yields the GPU back in gaps the compositor can use.
         if duty < 1.0:
             time.sleep(work * (1.0 / duty - 1.0))

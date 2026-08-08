@@ -1,4 +1,4 @@
-# Python — .venv (3.14, MLX) and .venv-coreml (3.12, coremltools)
+# Python. .venv (3.14, MLX) and .venv-harvest (3.13, MLX + coremltools)
 .venv*/
 __pycache__/
 *.py[cod]

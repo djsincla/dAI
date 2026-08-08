@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-E4 — What does preemption cost, and what work-unit size amortizes it?
+E4 - What does preemption cost, and what work-unit size amortizes it?
 
 The harvest tier yields the moment a user returns, throwing away whatever was
 in flight. Two numbers decide whether that is affordable:
@@ -9,7 +9,7 @@ in flight. Two numbers decide whether that is affordable:
   D  seconds of useful work per unit
 
 Load is pure overhead paid again after every preemption, so overhead fraction is
-L/(L+D). Holding that under a target t requires D >= L*(1-t)/t — at t=10%,
+L/(L+D). Holding that under a target t requires D >= L*(1-t)/t - at t=10%,
 D >= 9L. That single inequality sizes the work-unit protocol, which is why E4
 blocks Phase 1.
 
@@ -68,7 +68,7 @@ def time_uncached_read(path):
       9.83 GB/s on an M2 Max, well above the NVMe's real rate).
 
       Adding F_NOCACHE was not enough, because the synthetic file was written as
-      zeros and APFS stores those sparsely — reading it never touched the device
+      zeros and APFS stores those sparsely - reading it never touched the device
       at all, and the number went *up* to 15.35 GB/s.
 
     Reading the actual safetensors sidesteps both: real data, real file layout,
@@ -121,7 +121,7 @@ def time_load(repo):
 
 def time_release(model, tokenizer):
     """In-process yield. The agent's other option is killing the process, where
-    the kernel reclaims immediately — this measures the cheaper-to-restart path
+    the kernel reclaims immediately - this measures the cheaper-to-restart path
     of keeping the worker alive."""
     before = mx.get_active_memory()
     t0 = time.perf_counter()

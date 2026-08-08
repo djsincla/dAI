@@ -1,4 +1,4 @@
-# E5 — Is ANE work less perceptible than GPU work?
+# E5 - Is ANE work less perceptible than GPU work?
 
 **Test machine:** MacBook Pro, Apple M2 Max, 64 GB unified, macOS 26.3
 **Interactive workload:** Blender 4.0.2 EEVEE viewport orbit (see `../e2_contention/`)
@@ -9,19 +9,19 @@
 
 | Condition | n | p50 | p95 | p99 | fps | p95 vs baseline |
 |---|---|---|---|---|---|---|
-| baseline | 2 | 16.59 | 21.00 | 21.78 | 67.7 | — |
+| baseline | 2 | 16.59 | 21.00 | 21.78 | 67.7 | - |
 | gpu-25gb | 2 | 21.18 | 33.45 | 34.08 | 45.0 | **+59.2%** |
 | gpu-4gb | 2 | 32.81 | 42.01 | 42.69 | 32.2 | **+100.0%** |
 | **ane** | 2 | 16.60 | **17.57** | 17.98 | 66.3 | **−16.4% (within noise)** |
 
-Baseline p95 samples were 17.79 and 24.22 ms — a **36% spread with no load at
+Baseline p95 samples were 17.79 and 24.22 ms - a **36% spread with no load at
 all**. That is the noise floor, and anything smaller than it is not an effect.
 
 ## ANE load is indistinguishable from no load
 
 The hypothesis holds. While sustaining 169 inferences/s of verified Neural
 Engine work, the viewport was statistically indistinguishable from idle: p95 of
-17.33 and 17.81 ms across the two runs — a **tighter spread than the baseline's
+17.33 and 17.81 ms across the two runs - a **tighter spread than the baseline's
 own**, and sitting at the good end of baseline's range.
 
 Against +59% to +100% for equivalent GPU work.
@@ -43,7 +43,7 @@ run on CPU.
 
 ## Memory fraction is not a politeness dial
 
-A **4 GB** load — a small fraction of a 64 GB machine — degraded p95 by 100%.
+A **4 GB** load - a small fraction of a 64 GB machine - degraded p95 by 100%.
 Memory ceiling governs *what fits*; it does not govern *how much a user is
 disturbed*. The agent must throttle compute rate, not just footprint.
 
@@ -67,7 +67,7 @@ solid is that 4 GB is not gentle.
 
 The baseline moved 36% between runs with nothing loaded. Measured once at the
 start of a sweep, that variance is silently attributed to whatever condition ran
-next — which is exactly how the retracted finding above was manufactured.
+next - which is exactly how the retracted finding above was manufactured.
 
 `run_e5.sh` now measures a baseline before *and* after each loaded condition and
 pools them, and `analyze.py` prints the baseline spread and flags any delta
@@ -98,6 +98,6 @@ ships no compiled `BlobWriter` for Python 3.14 and conversion fails with
 runtimes live in separate venvs.
 
 `MLComputePlan.load_from_path` also needs a compiled `.mlmodelc`, not an
-`.mlpackage` — given the package it aborts the process at the C++ level rather
+`.mlpackage` - given the package it aborts the process at the C++ level rather
 than raising. The compiled artifact lives in a temp directory owned by the
 `MLModel`, so that reference must stay alive while the plan is read.

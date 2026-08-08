@@ -2,8 +2,8 @@
 # End-to-end test of presence-driven yield, using a real signal path.
 #
 # The worker is not told anything. `caffeinate -d` holds a genuine
-# PreventUserIdleDisplaySleep assertion — the same thing a video call or media
-# playback holds — which presence.py classifies as PASSIVE, where E2 says GPU
+# PreventUserIdleDisplaySleep assertion - the same thing a video call or media
+# playback holds - which presence.py classifies as PASSIVE, where E2 says GPU
 # work is not permitted. So this exercises the production path end to end
 # rather than stubbing the presence source.
 #

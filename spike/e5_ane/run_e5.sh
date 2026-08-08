@@ -1,5 +1,5 @@
 #!/bin/bash
-# E5 — is ANE work less perceptible to an interactive user than GPU work?
+# E5 - is ANE work less perceptible to an interactive user than GPU work?
 #
 # Four conditions against the same Blender viewport benchmark:
 #
@@ -45,7 +45,7 @@ wait_for_loaded() {  # logfile
 
 # Baselines are interleaved between every loaded condition, not measured once
 # at the start. Two full runs of this experiment produced baseline p95 of
-# 17.79ms and 24.22ms — a 36% swing with no load at all, large enough to
+# 17.79ms and 24.22ms - a 36% swing with no load at all, large enough to
 # manufacture or erase an entire effect. A single leading baseline made
 # gpu-25gb look 3x gentler than gpu-4gb in one run and identical to it in the
 # next. Each condition is therefore compared against the baselines measured

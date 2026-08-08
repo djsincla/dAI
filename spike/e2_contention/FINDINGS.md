@@ -1,4 +1,4 @@
-# E2 — At what settings does the interactive user notice?
+# E2 - At what settings does the interactive user notice?
 
 **Test machine:** MacBook Pro, Apple M2 Max, 64 GB unified, macOS 26.3
 **Instrument:** Blender 4.0.2 EEVEE viewport orbit, 150 frames, p95 frame time
@@ -17,14 +17,14 @@
 | bg-duty100 | background | 1.00 | 8 GB | 41.80 ms | +139.5% |
 | std-duty100 | standard | 1.00 | 8 GB | 50.53 ms | +189.6% |
 
-Baseline p95 samples: 17.36, 17.39, 17.45, 18.41, 24.90 ms — median 17.45.
+Baseline p95 samples: 17.36, 17.39, 17.45, 18.41, 24.90 ms - median 17.45.
 
-**Every tested GPU configuration is perceptible.** The gentlest — background QoS
-at 25% duty — still costs 46% of viewport p95. There is no throttle setting that
+**Every tested GPU configuration is perceptible.** The gentlest - background QoS
+at 25% duty - still costs 46% of viewport p95. There is no throttle setting that
 makes GPU harvesting invisible to someone using the machine.
 
 This narrows the harvest tier sharply: **GPU work waits for LOCKED or ABSENT.**
-Which in turn makes E5's result load-bearing — ANE work, measured as
+Which in turn makes E5's result load-bearing - ANE work, measured as
 indistinguishable from no load, is the *only* daytime harvesting option.
 
 ## Two independent levers, both real
@@ -63,7 +63,7 @@ Footprint governs what fits. Occupancy governs disturbance.
 ## On the noise floor
 
 The reported floor is 43%, but that is driven entirely by one outlier baseline
-(24.90 ms) against four clustered at 17.36–18.41 — a true spread of ~6% with
+(24.90 ms) against four clustered at 17.36–18.41 - a true spread of ~6% with
 occasional excursions.
 
 The conservative 43% was used anyway, and **every condition still failed it**.

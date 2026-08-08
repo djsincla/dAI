@@ -3,7 +3,7 @@
 Aggregate E5 viewport results across interleaved reps.
 
 The reason this exists rather than a single before/after comparison: two full
-runs of E5 produced baseline p95 of 17.79ms and 24.22ms with no load at all — a
+runs of E5 produced baseline p95 of 17.79ms and 24.22ms with no load at all - a
 36% swing. Against a single leading baseline that variance made gpu-25gb look 3x
 gentler than gpu-4gb in one run and identical to it in the next. Any effect
 smaller than the baseline's own spread is not an effect.

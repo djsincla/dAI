@@ -1,4 +1,4 @@
-# E3 — Fleet throughput and heterogeneous scheduling
+# E3 - Fleet throughput and heterogeneous scheduling
 
 **Fleet:** `rotorua` MacBook Pro M2 Max / 64 GB / macOS 26.3 · `orca` M4 Pro (10P+4E) / 48 GB / macOS 26.5.1
 **Network:** WiFi, 8–47 ms RTT (avg 27 ms)
@@ -14,14 +14,14 @@
 ## Capability is workload-dependent, not a machine property
 
 The same two machines running the same code differ by 7.5% on a 1.5B model and
-26.3% on a 7B — **relative capability moved 3.5x purely from model size.**
+26.3% on a 7B - **relative capability moved 3.5x purely from model size.**
 
 Neither number matches the spec sheet. Memory bandwidth is ~400 GB/s on the M2
 Max against ~273 GB/s on the M4 Pro, a 47% advantage. Observed: 7.5% at 1.5B,
 26.3% at 7B, trending toward but not reaching the bandwidth ratio.
 
 The mechanism is what the ratio is *made of*. At 1.5B with 24-token outputs,
-per-item fixed costs — tokenization, prompt evaluation, sampling setup — dominate,
+per-item fixed costs - tokenization, prompt evaluation, sampling setup - dominate,
 and the M4 Pro's newer cores close most of the gap. At 7B the weights actually
 have to stream, bandwidth starts to bind, and the older wider chip pulls ahead.
 
@@ -44,7 +44,7 @@ round-trips amortise across ~1.5 s work units.
 
 The residual loss is a straggler tail, not network overhead: orca finished 6.3 s
 before rotorua on the 7B run (7.3% idle) and 5.3 s before it on the 1.5B run
-(8.4%). That is the granularity cost of a fixed batch size — the last batch each
+(8.4%). That is the granularity cost of a fixed batch size - the last batch each
 node takes is sized for steady state, not for the end of the queue. Tapering
 batch size as the queue drains, or plain work-stealing, would recover most of it.
 
@@ -55,7 +55,7 @@ nothing about coordinator load, tail stragglers, or contention at fleet scale.
 
 At a 7.5% spread, `8 * rate/mean` rounds to 8 for both nodes, so the 1.5B run was
 effectively round-robin. The observed 324/276 work split came from pull-based
-self-pacing — fast nodes simply ask for more work sooner — rather than from the
+self-pacing - fast nodes simply ask for more work sooner - rather than from the
 weighting logic.
 
 That is worth stating plainly: **pull-based dispatch is self-balancing, and
@@ -70,7 +70,7 @@ measure nothing.
 `orca` had `kim` logged in at the console while the worker ran over SSH as
 `dwayne`. Metal was reachable and GPU matmuls executed normally.
 
-That is a session context E1 did not cover — E1 tested a root daemon in session
+That is a session context E1 did not cover - E1 tested a root daemon in session
 0 and a LaunchAgent in the console user's Aqua session. Adds evidence that Metal
 access on Apple Silicon is not gated on owning the console session.
 
@@ -82,8 +82,8 @@ access on Apple Silicon is not gated on owning the console session.
   properly needs measured wall power, not estimates, and the plan's position is
   that sovereignty rather than price-performance is the argument anyway.
 - **Wider capability spread untested.** Both machines are within 26% of each
-  other. The scheduling behaviour that matters — an 8 GB node beside a 512 GB
-  one — is unexercised.
+  other. The scheduling behaviour that matters - an 8 GB node beside a 512 GB
+  one - is unexercised.
 - **No preemption during the run.** E3 measured a quiet fleet. Combining it with
   presence-driven yield is the real test of the harvest tier.
 

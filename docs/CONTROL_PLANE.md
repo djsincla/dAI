@@ -1,8 +1,8 @@
-# dAI Control Plane — specification
+# dAI Control Plane - specification
 
 Everything here is grounded in the Phase 0 spike (`spike/*/FINDINGS.md`). Where a
 design choice exists only because a measurement forced it, the measurement is
-cited — those are the parts not to "simplify" later.
+cited - those are the parts not to "simplify" later.
 
 ## 1. What runs where
 
@@ -19,8 +19,8 @@ placement verification, `HIDIdleTime`, `pmset` assertions, and `ProcessType` QoS
 | Identity | client certificate | user session |
 | Depends on | Metal, ANE, IOKit, launchd | Postgres, object store |
 
-TypeScript for the control plane because the UI is the dominant surface — fleet
-views, pool management, RBAC screens, activity logs — and shared types across the
+TypeScript for the control plane because the UI is the dominant surface - fleet
+views, pool management, RBAC screens, activity logs - and shared types across the
 API boundary is a real saving. The scheduler is I/O-bound (lease units, collect
 results), not CPU-bound, so the runtime suits it. Go would be the alternative if
 a single static binary mattered more than UI velocity.
@@ -42,7 +42,7 @@ a single static binary mattered more than UI velocity.
 | `capability_profiles` | **map of workload class → measured throughput**, not a scalar |
 
 `capability_profiles` is a map because E3 measured the same two machines
-differing **7.5% on a 1.5B model and 26.3% on a 7B** — relative capability moved
+differing **7.5% on a 1.5B model and 26.3% on a 7B** - relative capability moved
 3.5x from model size alone, and neither figure matched the 47% their memory
 bandwidth ratio predicted. A single stored capability number misallocates by
 20-40% depending on workload. It is also why chip generation and core count must
@@ -58,12 +58,12 @@ Profiles are derived from completed work, never declared.
 | `membership` | tag query (`chip=m-series AND mem>=32`) | explicit pinned list |
 | `schedule` | `independent-units` | `gang` |
 | `preempt` | `on-user-activity` | `never` |
-| `topology` | — | required interconnect + measured admission (§6) |
+| `topology` | - | required interconnect + measured admission (§6) |
 | `priority`, `limits` | ✓ | ✓ |
 
 The two tiers are not configurations of one thing. E6 measured the same code
 swinging **0.95 scaling efficiency for independent units against 1.4% of a single
-machine for tensor-parallel**, on the same network — a ~70x swing from workload
+machine for tensor-parallel**, on the same network - a ~70x swing from workload
 shape. Harvest is interconnect-insensitive; cluster is interconnect-defined.
 
 ### Job and WorkUnit
@@ -73,11 +73,11 @@ shape. Harvest is interconnect-insensitive; cluster is interconnect-defined.
 | `job_id`, `kind` | `kind` is negotiated, see §5 |
 | `payload`, `result` | |
 | `state` | `pending` \| `leased` \| `done` \| `failed` |
-| `lease_node_id`, `lease_expires_at` | **required** — see below |
+| `lease_node_id`, `lease_expires_at` | **required** - see below |
 | `attempts` | |
 
 **Leases must expire.** The spike coordinator holds in-flight units in memory
-with no timeout, so a node that vanishes strands its units permanently — which
+with no timeout, so a node that vanishes strands its units permanently - which
 happened during cluster testing when `orca` dropped off the network mid-run.
 Production requires a lease TTL with automatic requeue.
 
@@ -103,7 +103,7 @@ that someone will otherwise "fix" them:
   gentleness slider.
 - **ANE work is exempt from QoS and duty throttling.** E5 measured it as
   indistinguishable from no load, and background QoS costs ~26x on bursty work.
-  Throttling it buys politeness that is already free — that bug cost 50x
+  Throttling it buys politeness that is already free - that bug cost 50x
   throughput in the worker before it was caught.
 
 ## 3. Identity
@@ -138,7 +138,7 @@ Pool-scoped role bindings: `(group, role, pool)`.
 ### The owner right sits outside RBAC
 
 **A machine's owner can always pause it, and no role can override that.** Not a
-permission — a hard-coded property of `Node.owner_user_id`. The moment an
+permission - a hard-coded property of `Node.owner_user_id`. The moment an
 operator can force work onto someone's Mac, the agent is malware in that
 person's mental model, and the plan's one-strike social constraint is lost.
 
@@ -147,7 +147,7 @@ control plane unreachable.
 
 ### Activity log is owner-readable by default
 
-Every node's activity log — what ran, when, how much memory, when it yielded —
+Every node's activity log - what ran, when, how much memory, when it yielded -
 is readable by its owner regardless of role bindings. Without it, every unrelated
 slowdown gets blamed on the agent and there is no way to disprove it.
 
@@ -170,7 +170,7 @@ Two protocol properties the spike proved necessary:
 work changes with presence state: GPU work is legal only in LOCKED and ABSENT,
 ANE work in all five. Without `?kinds=`, an agent fetches work it must
 immediately hand back. With it, a logged-in machine drains the ANE queue while
-the GPU queue waits — measured as `{generate: 100, embed: 100}` going to
+the GPU queue waits - measured as `{generate: 100, embed: 100}` going to
 `{generate: 100, embed: 0}`.
 
 **Results carry an unfinished remainder.** A harvest agent yields *between items*,
@@ -186,8 +186,8 @@ Pull-based, and deliberately so: harvested machines come and go, and a scheduler
 that must reach *into* them needs credentials and reachability it will not
 reliably have.
 
-E3 found **pull dispatch is self-balancing** — fast nodes simply ask for work
-sooner — and that capability weighting is a second-order correction on top. At a
+E3 found **pull dispatch is self-balancing** - fast nodes simply ask for work
+sooner - and that capability weighting is a second-order correction on top. At a
 7.5% capability spread the weighting rounded to no change at all, and the
 observed 324/276 split came from self-pacing. Weighting earns its keep on wide
 spreads (an 8 GB node beside a 512 GB one), not on similar machines.
@@ -203,11 +203,11 @@ dropping fails the whole job. No preemption, ever.
 Pools must pass measured admission before serving (`spike/cluster/admit.py`):
 
 - **Interconnect.** Tensor parallelism all-reduces after every attention and MLP
-  block — ~56 round-trips per token on a 28-layer model. Measured all-reduce
+  block - ~56 round-trips per token on a 28-layer model. Measured all-reduce
   swung 16.687 ms (WiFi) to 0.563 ms (gigabit), a 30x throughput swing. Latency,
   not bandwidth, binds at generation time.
 - **Capacity.** `N x smallest_node / 1.27`. Every rank transiently holds ~1.27x
-  its slice during load, and **`lazy=True` is mandatory** — eager loading peaks
+  its slice during load, and **`lazy=True` is mandatory** - eager loading peaks
   at 5.01 GB against a 3.99 GB model, so a fleet would OOM on exactly the model
   the extra machines were bought for.
 - **Projected throughput uses a 0.37 realisation factor.** The comm-only ceiling
@@ -216,7 +216,7 @@ Pools must pass measured admission before serving (`spike/cluster/admit.py`):
 
 **Admission must also refuse a model that fits on one node.** Sharding costs 6.6x
 throughput (11.69 vs 77.46 tok/s) to save 43% of per-node memory. The tier exists
-to run models larger than any single machine — that is its benefit, and outside
+to run models larger than any single machine - that is its benefit, and outside
 that case it is strictly worse than not splitting.
 
 ## 7. UI
@@ -226,13 +226,13 @@ Fleet view columns that carry information, from the spike:
 | Column | Why |
 |---|---|
 | Unified memory | The binding capability constraint; belongs beside the name |
-| Headroom | What is takeable *now* under policy — not total RAM |
+| Headroom | What is takeable *now* under policy - not total RAM |
 | Presence state | ACTIVE/PASSIVE/IDLE/LOCKED/ABSENT |
 | Idle pattern | 24h availability histogram: "can I schedule 8 hours here?" |
 | Yields / 7d | Reliability signal, and early warning a policy is too aggressive |
 
 Headline graph: **aggregate eligible capacity over 24 hours**, split by GPU and
-ANE. The overnight swell as machines lock is the value proposition made visible —
+ANE. The overnight swell as machines lock is the value proposition made visible -
 and the ANE band showing daytime capacity is what E5 bought.
 
 Policy editing shows blast radius before saving: *"41 of 63 machines eligible,
@@ -241,7 +241,7 @@ Policy editing shows blast radius before saving: *"41 of 63 machines eligible,
 ## 8. Testing
 
 Non-negotiable, and the spike says why: **six separate measurements failed
-optimistically before being caught** — `lazy=True` hiding load cost, page cache
+optimistically before being caught** - `lazy=True` hiding load cost, page cache
 faking disk speed, vsync faking frame times, a single baseline manufacturing a
 finding that had to be retracted, background QoS measured on the wrong workload
 shape, and a microbenchmark ceiling 2.7x above reality. Every one looked
@@ -269,9 +269,9 @@ These are the cases, drawn from real captures:
 | Test | Guards |
 |---|---|
 | `sharingd` holds a permanent Handoff assertion | Machine must not be pinned in PASSIVE forever |
-| `caffeinate` holds `PreventUserIdleSystemSleep` | Must **not** block GPU work — sleep assertions are not a contention signal |
+| `caffeinate` holds `PreventUserIdleSystemSleep` | Must **not** block GPU work - sleep assertions are not a contention signal |
 | Safari/`coreaudiod` system assertions | Same; these are permanent on a normal machine |
-| Video call holds `PreventUserIdleDisplaySleep` | Must classify PASSIVE — a real human is watching |
+| Video call holds `PreventUserIdleDisplaySleep` | Must classify PASSIVE - a real human is watching |
 | `hid_idle_s` unreadable (returns `None`) | Must fail closed to ACTIVE, never to ABSENT |
 | ANE work under any state | Must never be QoS-throttled or duty-limited |
 | GPU work in ACTIVE/PASSIVE/IDLE | Must be refused at every duty and QoS |
@@ -324,7 +324,7 @@ rather than per-commit. Everything above runs anywhere.
 ## 9. Deployment
 
 **The control plane is platform-independent and deploys anywhere.** Browser UI,
-containerised service, Postgres. Nothing in it is macOS-specific — all Apple
+containerised service, Postgres. Nothing in it is macOS-specific - all Apple
 platform dependence lives in the node agent, which is precisely why the split
 in §1 is drawn where it is.
 
@@ -342,7 +342,7 @@ Two things to get right even in a local deployment, because retrofitting them is
 painful:
 
 - The agent talks to a **configured endpoint**, never `localhost`. The moment a
-  second machine joins, `localhost` breaks — and the spike already hit exactly
+  second machine joins, `localhost` breaks - and the spike already hit exactly
   this when `launchd` plists carried absolute paths.
 - mTLS is on from the start. A local deployment that skips certificates grows an
   unauthenticated agent API that is then hard to close.
@@ -358,12 +358,12 @@ the fleet needs to move.
 `spike/e3_fleet/coordinator.py` already implements the protocol shape: typed
 queues, `?kinds=` negotiation, partial results with requeue, and capability
 estimates derived from completed work. The control plane reimplements that
-contract with persistence, auth, and lease expiry — the wire protocol carries
+contract with persistence, auth, and lease expiry - the wire protocol carries
 over largely unchanged.
 
 Order of work:
 
-1. Persistence + lease expiry (the spike's fatal gap — units strand when a node
+1. Persistence + lease expiry (the spike's fatal gap - units strand when a node
    vanishes, observed live)
 2. Agent API with mTLS and the enrollment approval queue
 3. Human API + RBAC
@@ -372,7 +372,7 @@ Order of work:
 
 ## 11. Open questions
 
-- **Node loss is tolerated rather than prevented — deliberately, for now.**
+- **Node loss is tolerated rather than prevented - deliberately, for now.**
   `orca` vanished twice during this work, once asleep and once from a flat
   battery, and a gang-scheduled job dies when any member goes.
 
@@ -382,7 +382,7 @@ Order of work:
   current rule.
 
   The consequence is a design obligation, not a shrug: since node loss is not
-  prevented, the gang scheduler has to **handle it cleanly** — detect a member
+  prevented, the gang scheduler has to **handle it cleanly** - detect a member
   going away, fail the job with a specific reason rather than hanging, release
   the pool, and requeue rather than strand. That is stricter than what the spike
   coordinator does today, where in-flight units are held in memory with no
@@ -402,5 +402,5 @@ Order of work:
   isolation, or whether pool-per-team is sufficient.
 - **`mem_frac` direction.** Three observations now suggest larger working sets
   disturb *less* (E5 run 1, E2 sweep) rather than more. Not established, and it
-  does not change policy — but nobody should reason from footprint until it is
+  does not change policy - but nobody should reason from footprint until it is
   settled.

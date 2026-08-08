@@ -32,8 +32,16 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+# Work is typed, because a harvest worker's *permitted* work changes with
+# presence state. In LOCKED/ABSENT it may run GPU inference; in ACTIVE, PASSIVE
+# and IDLE only ANE work is allowed (E2 + the ~26x bursty-QoS penalty). A worker
+# therefore advertises which kinds it can currently serve and the coordinator
+# hands out only those, instead of the worker fetching work it must immediately
+# hand back.
+WORK_KINDS = ("generate", "embed")
+
 STATE = {
-    "units": [],          # pending work units
+    "queues": {k: [] for k in WORK_KINDS},
     "in_flight": {},      # unit_id -> (worker_id, dispatched_at)
     "done": [],           # completed unit records
     "workers": {},        # worker_id -> {throughput, units, items, seconds}
@@ -66,6 +74,10 @@ exec ./.venv/bin/python worker.py --coordinator "$COORD" "$@"
 """
 
 
+def queue_len():
+    return sum(len(q) for q in STATE["queues"].values())
+
+
 def make_corpus(n):
     """Synthetic but realistic batch-classification work — Tier 1 use case #3.
 
@@ -82,12 +94,18 @@ def make_corpus(n):
         "a university delaying financial aid disbursement",
         "a telecom apologising for a regional network failure",
     ]
-    return [
-        {"id": i,
-         "prompt": f"In one sentence, state the primary operational risk in this "
-                   f"scenario: {topics[i % len(topics)]} (case {i})."}
-        for i in range(n)
-    ]
+    # Half GPU-only generation, half ANE-eligible. A realistic harvest fleet has
+    # both, and the split is what makes the policy visible: a logged-in machine
+    # should still drain the embed queue while the generate queue waits for it to
+    # lock.
+    corpus = []
+    for i in range(n):
+        kind = "generate" if i % 2 == 0 else "embed"
+        corpus.append({
+            "id": i, "kind": kind,
+            "prompt": f"In one sentence, state the primary operational risk in this "
+                      f"scenario: {topics[i % len(topics)]} (case {i})."})
+    return corpus
 
 
 def next_batch_size(worker_id):
@@ -126,7 +144,13 @@ class Handler(BaseHTTPRequestHandler):
         # Exact-prefix, not startswith("/work"): "/worker.py" also starts with
         # "/work" and was being served a JSON work unit instead of the script.
         if self.path == "/work" or self.path.startswith("/work?"):
-            worker_id = self.path.split("worker=")[-1] if "worker=" in self.path else "?"
+            from urllib.parse import parse_qs, urlparse
+            query = parse_qs(urlparse(self.path).query)
+            worker_id = query.get("worker", ["?"])[0]
+            # A worker with no declared kinds is an older client; give it
+            # everything rather than starving it.
+            kinds = [k for k in query.get("kinds", [",".join(WORK_KINDS)])[0].split(",")
+                     if k in WORK_KINDS]
             with STATE["lock"]:
                 STATE["seen_workers"].add(worker_id)
                 # Hold the start until the whole fleet has checked in. A node
@@ -136,15 +160,24 @@ class Handler(BaseHTTPRequestHandler):
                 if len(STATE["seen_workers"]) < STATE["min_workers"]:
                     waiting = STATE["min_workers"] - len(STATE["seen_workers"])
                     return self._send({"wait": True, "need": waiting})
-                if not STATE["units"]:
+                if queue_len() == 0:
                     return self._send({"done": True})
+                # Serve the longest queue this worker can handle, so a fleet
+                # where only some nodes may run GPU work still drains evenly.
+                servable = [k for k in kinds if STATE["queues"][k]]
+                if not servable:
+                    return self._send({"idle": True, "reason": "no work of a "
+                                       "kind this worker may currently run"})
+                kind = max(servable, key=lambda k: len(STATE["queues"][k]))
+                queue = STATE["queues"][kind]
                 size = next_batch_size(worker_id)
-                batch = [STATE["units"].pop(0) for _ in range(min(size, len(STATE["units"])))]
+                batch = [queue.pop(0) for _ in range(min(size, len(queue)))]
                 unit_id = f"u{time.time_ns()}"
                 STATE["in_flight"][unit_id] = (worker_id, time.perf_counter())
                 if STATE["started"] is None:
                     STATE["started"] = time.perf_counter()
-            return self._send({"done": False, "unit_id": unit_id, "items": batch})
+            return self._send({"done": False, "unit_id": unit_id,
+                               "kind": kind, "items": batch})
 
         if self.path == "/status":
             with STATE["lock"]:
@@ -191,7 +224,8 @@ class Handler(BaseHTTPRequestHandler):
                 STATE["in_flight"].pop(payload["unit_id"], None)
                 STATE["done"].append(payload)
                 if unfinished:
-                    STATE["units"][:0] = unfinished
+                    for item in reversed(unfinished):
+                        STATE["queues"][item.get("kind", "generate")].insert(0, item)
                     STATE["requeued"] = STATE.get("requeued", 0) + len(unfinished)
                 w = STATE["workers"].setdefault(
                     worker_id, {"units": 0, "items": 0, "seconds": 0.0,
@@ -208,7 +242,7 @@ class Handler(BaseHTTPRequestHandler):
                 # register as zero throughput and poison the node's profile.
                 if w["items"] > 0 and w["seconds"] > 0:
                     w["throughput"] = w["items"] / w["seconds"]
-                remaining = len(STATE["units"])
+                remaining = queue_len()
             rate = payload["count"] / payload["seconds"] if payload["seconds"] else 0
             tag = f"  YIELD +{len(unfinished)} requeued" if unfinished else ""
             print(f"  {worker_id:<22} {payload['count']:>3} items in "
@@ -247,7 +281,8 @@ def summary():
         "min_workers": STATE["min_workers"],
         "elapsed_s": round(elapsed, 2),
         "items_done": total_items,
-        "items_remaining": len(STATE["units"]),
+        "items_remaining": queue_len(),
+        "queues": {k: len(q) for k, q in STATE["queues"].items()},
         "items_requeued": STATE.get("requeued", 0),
         "aggregate_items_s": round(aggregate, 3),
         "sum_of_solo_rates": round(ideal, 3) if ideal else None,
@@ -267,7 +302,8 @@ def main():
     ap.add_argument("--out", default="results.json")
     args = ap.parse_args()
 
-    STATE["units"] = make_corpus(args.corpus)
+    for item in make_corpus(args.corpus):
+        STATE["queues"][item["kind"]].append(item)
     STATE["policy"] = args.policy
     STATE["min_workers"] = args.min_workers
 
@@ -283,7 +319,7 @@ def main():
     try:
         while True:
             with STATE["lock"]:
-                remaining = len(STATE["units"]) + len(STATE["in_flight"])
+                remaining = queue_len() + len(STATE["in_flight"])
             if remaining == 0 and STATE["started"]:
                 break
             time.sleep(0.5)

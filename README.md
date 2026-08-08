@@ -36,7 +36,7 @@ the idea before any architecture is committed.
 | **E4** | What does preemption cost, and what work-unit size amortizes it? | **PASSES** ✅ |
 | **E5** | Is ANE work less perceptible than GPU work? | **PASSES** ✅ |
 | **E6** | Can a large model be split across the pool? | **Interconnect-defined** ⚠️ |
-| **Harvest** | Fleet dispatch + presence-driven yield together | **Works** ✅ |
+| **Harvest** | Fleet dispatch + presence-driven yield, GPU and ANE | **Works** ✅ |
 
 E1 is the existential gate — if GPU access requires an active GUI session, the
 fleet is limited to logged-in-but-idle machines and the product is materially
@@ -113,6 +113,20 @@ instruments cover different contention paths:
   real `PreventUserIdleDisplaySleep` assertion with the worker told nothing.
   Yield granularity is between *items*, not between work units, so a preemption
   costs at most the item in flight.
+- **A logged-in machine now contributes.** The worker runs two runtimes and
+  advertises which *kinds* of work its current policy permits; the coordinator
+  keeps typed queues and serves only those. In IDLE with a mixed corpus the GPU
+  queue stayed at 100 while the ANE queue drained to 0. ANE placement is
+  verified with `MLComputePlan` at load and anything below 80% residency is
+  refused — a worker that thought it was on the ANE but ran on the CPU would
+  disturb the very user it is avoiding, and every log would look fine.
+- **Two bugs cost ~50x on the ANE path, and share a shape.** ANE work was being
+  run under background QoS (0.5 items/s), buying politeness E5 had already shown
+  was free while paying the 26x bursty penalty; and presence polling cost ~116 ms
+  against a 27 ms work item, so 81% of the time went to asking whether the user
+  was back. Kind-aware QoS and a presence cache took it to ~30 items/s, matching
+  standalone. Both are **safety mechanisms sized without reference to the work
+  they protect**.
 - **Background QoS costs ~26x on bursty work, not the ~2.4x E1 measured.** Per
   item, 0.5B / 24 tokens: 0.136 s standard vs 3.528 s background. E1's figure
   came from a sustained matmul loop; a worker interleaving CPU and GPU gets

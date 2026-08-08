@@ -1,0 +1,460 @@
+openapi: 3.1.0
+info:
+  title: dAI control plane
+  version: 0.1.0
+  description: |
+    Source of truth for both clients. The agent is Swift and the control plane
+    TypeScript, so this schema is the only artifact they share and the only place
+    a mismatch can be caught before deployment.
+
+    Two surfaces with different auth and different availability requirements:
+    /agent/v1 is mTLS, /admin/v1 is session plus pool-scoped RBAC.
+
+servers:
+  - url: https://localhost:8443
+
+tags:
+  - name: agent
+    description: Node-facing. Mutual TLS, client certificate identifies the node.
+  - name: admin
+    description: Human-facing. Session auth, pool-scoped role bindings.
+
+paths:
+  /agent/v1/enroll:
+    post:
+      tags: [agent]
+      summary: Request enrollment
+      description: |
+        A join token never grants trust by itself. The node lands in `pending`
+        with its hardware fingerprint and receives no certificate until an admin
+        approves it.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EnrollRequest' }
+      responses:
+        '202':
+          description: Enrollment pending approval
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnrollResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /agent/v1/policy:
+    get:
+      tags: [agent]
+      summary: Current presence policy for this node
+      responses:
+        '200':
+          description: Policy table
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Policy' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /agent/v1/heartbeat:
+    post:
+      tags: [agent]
+      summary: Report presence, health and capability samples
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Heartbeat' }
+      responses:
+        '204': { description: Accepted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /agent/v1/work:
+    get:
+      tags: [agent]
+      summary: Lease a unit of work
+      description: |
+        `kinds` is what the node may run *right now* under its presence policy,
+        not what it is capable of. GPU work is legal only in LOCKED and ABSENT;
+        ANE work in all five states. Without this the agent fetches work it must
+        immediately hand back.
+      parameters:
+        - name: kinds
+          in: query
+          required: true
+          description: Comma-separated work kinds the node may currently run
+          schema:
+            type: string
+            example: embed,generate
+      responses:
+        '200':
+          description: A leased unit, or a reason none was given
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/WorkLease'
+                  - $ref: '#/components/schemas/NoWork'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /agent/v1/work/{unitId}/result:
+    post:
+      tags: [agent]
+      summary: Report completed items and hand back the remainder
+      description: |
+        A harvest agent yields between items, not between units, and returns what
+        it did not reach. Without this a yield costs a whole batch.
+      parameters:
+        - name: unitId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WorkResult' }
+      responses:
+        '200':
+          description: Accepted; reports how many items were requeued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [requeued]
+                properties:
+                  requeued: { type: integer, minimum: 0 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409':
+          description: Lease expired or held by another node; result rejected
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /admin/v1/nodes:
+    get:
+      tags: [admin]
+      summary: List nodes
+      responses:
+        '200':
+          description: Nodes visible to the caller
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Node' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /admin/v1/nodes/{nodeId}/approve:
+    post:
+      tags: [admin]
+      summary: Approve a pending node and issue its certificate
+      parameters:
+        - name: nodeId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Node approved
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Node' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/v1/nodes/{nodeId}/pause:
+    post:
+      tags: [admin]
+      summary: Pause a node
+      description: |
+        The owner of a machine may always pause it and no role overrides that.
+        This is not a permission, it is a property of the node's owner. An
+        operator who could force work onto someone's Mac makes the agent malware
+        in that person's mental model.
+      parameters:
+        - name: nodeId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                until: { type: string, format: date-time, nullable: true }
+      responses:
+        '200':
+          description: Node paused
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Node' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/v1/pools:
+    get:
+      tags: [admin]
+      summary: List pools
+      responses:
+        '200':
+          description: Pools
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Pool' }
+
+  /admin/v1/jobs:
+    post:
+      tags: [admin]
+      summary: Submit a job
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/JobRequest' }
+      responses:
+        '201':
+          description: Job created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/v1/jobs/{jobId}:
+    get:
+      tags: [admin]
+      summary: Job status
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Job
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+components:
+  securitySchemes:
+    mtls:
+      type: mutualTLS
+      description: Node client certificate, issued at enrollment approval
+    session:
+      type: apiKey
+      in: header
+      name: authorization
+      description: Human session token
+
+  responses:
+    BadRequest:
+      description: Malformed request
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: Missing or invalid credentials
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: Authenticated but not permitted for this pool
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: No such resource
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+        detail: { type: string }
+
+    WorkKind:
+      type: string
+      description: |
+        embed runs on the ANE and is permitted in every presence state.
+        generate and render are GPU work, permitted only in LOCKED and ABSENT.
+      enum: [embed, generate, render]
+
+    PresenceState:
+      type: string
+      enum: [ACTIVE, PASSIVE, IDLE, LOCKED, ABSENT]
+
+    EnrollRequest:
+      type: object
+      required: [joinToken, hostname, chip, memoryGb, metalWorkingSetGb, osVersion, csrPem]
+      properties:
+        joinToken: { type: string }
+        hostname: { type: string }
+        chip: { type: string, example: Apple M2 Max }
+        memoryGb: { type: number }
+        metalWorkingSetGb:
+          type: number
+          description: |
+            Metal self-caps well below installed RAM (~81% on an M2 Max).
+            Ceilings are fractions of this, never of installed memory.
+        osVersion: { type: string }
+        csrPem:
+          type: string
+          description: |
+            CSR for a keypair generated on-device in the Secure Enclave and
+            marked non-exportable, so a copied certificate is useless without
+            the hardware.
+
+    EnrollResponse:
+      type: object
+      required: [nodeId, state]
+      properties:
+        nodeId: { type: string, format: uuid }
+        state: { type: string, enum: [pending] }
+        fingerprint: { type: string }
+
+    Heartbeat:
+      type: object
+      required: [presenceState]
+      properties:
+        presenceState: { $ref: '#/components/schemas/PresenceState' }
+        onAcPower: { type: boolean }
+        thermalOk: { type: boolean }
+        capabilitySamples:
+          type: array
+          description: |
+            Throughput observed from completed work, never declared. Capability
+            is workload-dependent: the same two machines differed 7.5% on a 1.5B
+            model and 26.3% on a 7B, so this is a map per workload class rather
+            than a scalar.
+          items:
+            type: object
+            required: [workloadClass, itemsPerSecond]
+            properties:
+              workloadClass: { type: string }
+              itemsPerSecond: { type: number }
+
+    WorkLease:
+      type: object
+      required: [unitId, kind, items, leaseExpiresAt]
+      properties:
+        unitId: { type: string, format: uuid }
+        kind: { $ref: '#/components/schemas/WorkKind' }
+        modelHash:
+          type: string
+          nullable: true
+          description: |
+            Content hash from the signed catalogue. A work unit carries data and
+            references a model; it cannot name an interpreter, a path, or a
+            command. That bounds the blast radius of a compromised control plane.
+        items:
+          type: array
+          items: { type: object, additionalProperties: true }
+        leaseExpiresAt: { type: string, format: date-time }
+
+    NoWork:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          enum: [empty, none-of-these-kinds, node-paused]
+
+    WorkResult:
+      type: object
+      required: [completed, seconds]
+      properties:
+        completed:
+          type: array
+          items: { type: object, additionalProperties: true }
+        unfinished:
+          type: array
+          description: Items the agent did not reach; requeued at the head.
+          items: { type: object, additionalProperties: true }
+        seconds: { type: number }
+        failed: { type: boolean, default: false }
+
+    Node:
+      type: object
+      required: [id, hostname, tier, state]
+      properties:
+        id: { type: string, format: uuid }
+        hostname: { type: string }
+        chip: { type: string }
+        memoryGb: { type: number }
+        metalWorkingSetGb: { type: number }
+        tier: { type: string, enum: [harvest, cluster] }
+        state: { type: string, enum: [pending, active, cordoned, paused, offline] }
+        ownerUserId: { type: string, format: uuid, nullable: true }
+        presenceState: { $ref: '#/components/schemas/PresenceState' }
+        lastHeartbeat: { type: string, format: date-time, nullable: true }
+        capabilityProfiles:
+          type: object
+          additionalProperties: { type: number }
+
+    Pool:
+      type: object
+      required: [id, name, tier, schedule, preempt]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        tier: { type: string, enum: [harvest, cluster] }
+        schedule: { type: string, enum: [independent-units, gang] }
+        preempt: { type: string, enum: [on-user-activity, never] }
+        priority: { type: integer }
+
+    JobRequest:
+      type: object
+      required: [poolId, kind, items]
+      properties:
+        poolId: { type: string, format: uuid }
+        kind: { $ref: '#/components/schemas/WorkKind' }
+        modelHash: { type: string, nullable: true }
+        batchSize: { type: integer, minimum: 1, default: 8 }
+        items:
+          type: array
+          minItems: 1
+          items: { type: object, additionalProperties: true }
+
+    Job:
+      type: object
+      required: [id, poolId, kind, state, counts]
+      properties:
+        id: { type: string, format: uuid }
+        poolId: { type: string, format: uuid }
+        kind: { $ref: '#/components/schemas/WorkKind' }
+        state: { type: string, enum: [pending, running, complete, failed] }
+        counts:
+          type: object
+          properties:
+            pending: { type: integer }
+            leased: { type: integer }
+            done: { type: integer }
+            failed: { type: integer }
+
+    Policy:
+      type: object
+      description: |
+        Per presence state. Values are E2 measurements, not estimates.
+        mem_frac is NOT a politeness dial: a 32 GB load disturbed a viewport
+        less than an 8 GB one at identical duty. Footprint governs what fits,
+        occupancy governs disturbance.
+      additionalProperties:
+        type: object
+        required: [gpu, ane, qos, dutyMax, memFrac]
+        properties:
+          gpu: { type: boolean }
+          ane: { type: boolean }
+          qos: { type: string, enum: [background, standard] }
+          dutyMax: { type: number, minimum: 0, maximum: 1 }
+          memFrac: { type: number, minimum: 0, maximum: 1 }
+
+security:
+  - mtls: []
+  - session: []

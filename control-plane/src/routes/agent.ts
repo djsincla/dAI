@@ -90,6 +90,13 @@ export function agentRoutes(db: Db): Router {
       [b.presenceState, b.onAcPower ?? null, b.thermalOk ?? null,
        JSON.stringify(profiles), node.id],
     )
+    // Presence history feeds the capacity graph, which cannot be drawn from
+    // current state alone.
+    await db.query(
+      `INSERT INTO presence_samples (node_id, presence_state, on_ac_power)
+       VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
+      [node.id, b.presenceState, b.onAcPower ?? null],
+    )
     res.status(204).end()
   })
 

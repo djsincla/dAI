@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dAI fleet</title>
+<link rel="stylesheet" href="./app.css">
+</head>
+<body>
+<header>
+  <h1>dAI <span class="sub">fleet</span></h1>
+  <nav>
+    <a href="/docs" target="_blank" rel="noreferrer">API</a>
+    <a href="/openapi.yaml" target="_blank" rel="noreferrer">spec</a>
+  </nav>
+  <label class="session">
+    session
+    <input id="session" type="text" placeholder="user id" autocomplete="off" size="36">
+  </label>
+</header>
+
+<main>
+  <section id="capacity" class="panel">
+    <div class="panel-head">
+      <h2>Eligible capacity</h2>
+      <p class="note">
+        GPU work runs only when a machine is locked or logged out. ANE work runs
+        whatever its owner is doing, so the band beneath the curve is the
+        capacity that exists during the working day.
+      </p>
+    </div>
+    <div class="stats" id="stats"></div>
+    <div class="chart-wrap"><svg id="chart" viewBox="0 0 900 220" preserveAspectRatio="none"></svg></div>
+    <div class="legend">
+      <span><i class="swatch gpu"></i>GPU (locked or absent)</span>
+      <span><i class="swatch ane"></i>ANE (any state)</span>
+      <span class="axis-note">last 24 hours</span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Nodes</h2></div>
+    <div class="table-wrap">
+      <table id="nodes">
+        <thead>
+          <tr>
+            <th>Machine</th>
+            <th>Chip</th>
+            <th class="num" title="Metal caps itself near 81% of unified memory">Working set</th>
+            <th class="num" title="What is takeable right now under policy, not total memory">Headroom</th>
+            <th>Presence</th>
+            <th>Permits</th>
+            <th class="num" title="How often this node interrupted work in the last week">Yields 7d</th>
+            <th>State</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="empty" id="nodes-empty" hidden>No nodes yet. Enroll one, then approve it.</p>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Queues</h2></div>
+    <div id="queues" class="queues"></div>
+  </section>
+</main>
+
+<div id="drawer" class="drawer" hidden>
+  <div class="drawer-head">
+    <h2 id="drawer-title"></h2>
+    <button id="drawer-close" aria-label="Close">&times;</button>
+  </div>
+  <div id="drawer-body"></div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>

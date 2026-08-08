@@ -139,3 +139,23 @@ CREATE TABLE activity_log (
 );
 
 CREATE INDEX activity_log_node_idx ON activity_log(node_id, at DESC);
+
+-- Presence history, written on heartbeat.
+--
+-- The headline fleet graph is aggregate eligible capacity over 24 hours, split
+-- by GPU and ANE. The overnight swell as machines lock is the value proposition
+-- made visible, and the ANE band is the daytime capacity E5 bought. Neither can
+-- be drawn from current state alone.
+--
+-- Also answers the two questions a wrangler actually has about a node: can I
+-- count on it tonight (the idle pattern), and how often does it interrupt
+-- (yields per week, which is the early warning that a policy is too aggressive).
+CREATE TABLE presence_samples (
+    node_id        uuid NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    at             timestamptz NOT NULL DEFAULT now(),
+    presence_state text NOT NULL,
+    on_ac_power    boolean,
+    PRIMARY KEY (node_id, at)
+);
+
+CREATE INDEX presence_samples_at_idx ON presence_samples(at DESC);

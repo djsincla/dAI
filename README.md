@@ -113,6 +113,12 @@ instruments cover different contention paths:
   real `PreventUserIdleDisplaySleep` assertion with the worker told nothing.
   Yield granularity is between *items*, not between work units, so a preemption
   costs at most the item in flight.
+- **Verified against a real screen lock: zero GPU units ran while a user was
+  present**, across 1,970 items, while ANE work continued throughout — 54 ANE
+  units in ACTIVE against 0 GPU units, then 96 GPU units once locked, then a
+  clean mid-unit yield on unlock. ANE throughput was identical present or absent
+  (30.2 vs 31.1 items/s), because the politeness machinery costs nothing on a
+  path that needs none.
 - **A logged-in machine now contributes.** The worker runs two runtimes and
   advertises which *kinds* of work its current policy permits; the coordinator
   keeps typed queues and serves only those. In IDLE with a mixed corpus the GPU

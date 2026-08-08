@@ -155,6 +155,49 @@ Both errors share a shape worth noting: **a safety mechanism sized without
 reference to the work it protects.** Politeness that costs 26x where it buys
 nothing, and a check costing 4x the operation it guards.
 
+## Full state machine verified against a real screen lock
+
+A single run across an unlock/lock/unlock cycle, worker told nothing:
+
+```
+09:32:45  QoS -> standard
+09:33:01  loaded GPU model in 0.50s (state=LOCKED)
+09:35:38  QoS -> background
+09:35:38  YIELD -> ACTIVE (user present); 2 done, 6 returned
+```
+
+Work actually executed, counted by state:
+
+| Kind | ACTIVE (user present) | LOCKED |
+|---|---|---|
+| `embed` (ANE) | **54 units** | 42 units |
+| `generate` (GPU) | **0 units** | 96 units |
+
+**Zero GPU units ran while a user was present**, across 1,970 items — the safety
+property the whole policy exists to guarantee. ANE work continued throughout, so
+the machine never stopped contributing.
+
+Throughput by state and kind:
+
+| Kind | State | Rate |
+|---|---|---|
+| embed (ANE) | ACTIVE | 30.2 items/s |
+| embed (ANE) | LOCKED | 31.1 items/s |
+| generate (GPU) | LOCKED | 5.5 items/s |
+
+Two things worth reading out of that table.
+
+**ANE throughput is identical whether or not a user is present** (30.2 vs 31.1).
+The politeness machinery costs nothing on the ANE path because there is nothing
+to be polite about — which is what E5 predicted and what the kind-aware QoS fix
+delivered.
+
+**ANE work is 5.5x the item rate of GPU work here**, but the items are not
+comparable — an embed item is one Core ML forward pass, a generate item is 24
+LLM tokens. The useful reading is that the daytime path is not a token gesture:
+a machine in use runs a substantial workload rather than idling until its owner
+goes home.
+
 ## Caveats
 
 - Single machine, single yield cycle. Not yet run across the fleet with both
@@ -166,7 +209,9 @@ nothing, and a check costing 4x the operation it guards.
   Converting one needs torch and is a separate task; the mechanism, placement
   verification and policy integration are what this exercises, and swapping the
   model changes only `ANERuntime.run`.
-- The GPU path has still only been exercised in IDLE and PASSIVE. LOCKED and
-  ABSENT — where `generate` work actually runs — need a locked screen to test.
+- ABSENT (nobody logged in) remains untested; LOCKED is now covered.
+- Yield latency was bounded but not timed precisely. The design bound is the
+  cached poll interval (0.5 s) plus the in-flight item, so under ~1 s for
+  generate work, but the exact unlock instant was not instrumented.
 - Everything now runs on one Python 3.13 venv (`.venv-harvest`) carrying both
   MLX and coremltools, which also matches orca. The 3.12/3.14 split is gone.

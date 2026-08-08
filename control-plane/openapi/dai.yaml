@@ -53,6 +53,85 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
 
+  /agent/v1/enroll/{nodeId}:
+    get:
+      tags: [agent]
+      summary: Collect a certificate after approval
+      description: |
+        Cannot require mTLS: the node has no certificate yet, which is why it is
+        calling. The enrollment token returned by `/enroll` stands in, and is
+        cleared on collection because a credential that can be replayed is one
+        that will be.
+      security: []
+      parameters:
+        - name: nodeId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: x-enrollment-token
+          in: header
+          required: false
+          description: |
+            Not marked required on purpose. A missing credential should read as
+            401 from the handler rather than 400 from the request validator: it
+            is an authentication failure, not a malformed request.
+          schema: { type: string }
+      responses:
+        '200':
+          description: Approved; certificate issued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [state, certPem]
+                properties:
+                  state: { type: string, enum: [active] }
+                  certPem: { type: string }
+                  serverCaPem:
+                    type: string
+                    nullable: true
+                    description: |
+                      The CA that signs the control plane's own TLS certificate.
+                      This is what a node pins to verify the server; a node that
+                      verifies nothing accepts work from anything that can reach
+                      it on the network. Distinct from nodeCaPem, and confusing
+                      the two produces a verification failure that reads like a
+                      connectivity problem.
+                  nodeCaPem:
+                    type: string
+                    description: |
+                      The CA that signed this node's certificate. Informational:
+                      the node does not need it to connect.
+        '202':
+          description: Still awaiting approval
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { state: { type: string, enum: [pending] } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /admin/v1/nodes/{nodeId}/revoke:
+    post:
+      tags: [admin]
+      summary: Revoke a node certificate
+      description: |
+        Checked on every request rather than cached, so a stolen laptop stops
+        being a fleet member immediately rather than at the next renewal.
+      parameters:
+        - name: nodeId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Revoked
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Node' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /agent/v1/policy:
     get:
       tags: [agent]
@@ -314,10 +393,17 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         '200':
-          description: Node approved
+          description: Node approved and certificate issued
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Node' }
+        '400':
+          description: |
+            The stored CSR cannot be signed. The node stays pending rather than
+            becoming a member without a usable identity.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
@@ -507,15 +593,20 @@ components:
           description: |
             CSR for a keypair generated on-device in the Secure Enclave and
             marked non-exportable, so a copied certificate is useless without
-            the hardware.
+            the hardware. Stored, not signed: signing happens at approval, so a
+            leaked join token is a nuisance rather than a fleet compromise.
 
     EnrollResponse:
       type: object
-      required: [nodeId, state]
+      required: [nodeId, state, enrollmentToken]
       properties:
         nodeId: { type: string, format: uuid }
         state: { type: string, enum: [pending] }
-        fingerprint: { type: string }
+        enrollmentToken:
+          type: string
+          description: |
+            Single use. The only way back in before the node has an identity,
+            so it is cleared once the certificate is collected.
 
     Heartbeat:
       type: object
@@ -598,7 +689,13 @@ components:
         tier: { type: string, enum: [harvest, cluster] }
         state: { type: string, enum: [pending, active, cordoned, paused, offline] }
         ownerUserId: { type: string, format: uuid, nullable: true }
-        presenceState: { $ref: '#/components/schemas/PresenceState' }
+        presenceState:
+          # Null until the node's first heartbeat. A freshly enrolled node has
+          # no presence yet, which is precisely the state the enrollment flow
+          # produces.
+          oneOf:
+            - $ref: '#/components/schemas/PresenceState'
+            - type: 'null'
         lastHeartbeat: { type: string, format: date-time, nullable: true }
         capabilityProfiles:
           type: object

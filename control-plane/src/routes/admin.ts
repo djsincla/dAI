@@ -2,8 +2,9 @@ import { Router } from 'express'
 import type { Db } from '../lib/db.js'
 import { mayPauseNode, requireRole, userAuth } from '../lib/auth.js'
 import { POLICY, type PresenceState } from '../lib/policy.js'
+import type { Ca } from '../lib/ca.js'
 
-export function adminRoutes(db: Db): Router {
+export function adminRoutes(db: Db, ca: Ca): Router {
   const r = Router()
   r.use(userAuth(db))
 
@@ -42,16 +43,35 @@ export function adminRoutes(db: Db): Router {
       return
     }
 
-    const { rows } = await db.query(
-      `UPDATE nodes SET state='active', enrolled_at=now()
-        WHERE id=$1 AND state='pending'
-      RETURNING id, hostname, tier, state`,
+    const { rows: pending } = await db.query(
+      `SELECT id, hostname, csr_pem FROM nodes WHERE id=$1 AND state='pending'`,
       [req.params.nodeId],
     )
-    if (rows.length === 0) {
+    if (pending.length === 0) {
       res.status(404).json({ error: 'not_found', detail: 'no pending node with that id' })
       return
     }
+    const node = pending[0] as any
+
+    // Approval is where identity is minted. Until this point the node has a
+    // queue position and nothing else.
+    let signed
+    try {
+      signed = ca.sign(node.csr_pem, node.id, node.hostname)
+    } catch (err) {
+      res.status(400).json({ error: 'bad_request',
+                             detail: `cannot sign CSR: ${(err as Error).message}` })
+      return
+    }
+
+    const { rows } = await db.query(
+      `UPDATE nodes
+          SET state='active', enrolled_at=now(),
+              cert_pem=$2, cert_fingerprint=$3, cert_not_after=$4
+        WHERE id=$1
+      RETURNING id, hostname, tier, state`,
+      [node.id, signed.certPem, signed.fingerprint, signed.notAfter],
+    )
     await db.query(`INSERT INTO activity_log (node_id, event, detail) VALUES ($1,'node.approved',$2)`,
       [req.params.nodeId, JSON.stringify({ by: req.user!.id })])
     res.json(rows[0])
@@ -213,6 +233,30 @@ export function adminRoutes(db: Db): Router {
         at: (e.at as Date).toISOString(), event: e.event, detail: e.detail,
       })),
     })
+  })
+
+  /**
+   * Revoke a node's certificate.
+   *
+   * Checked on every request rather than cached, so a stolen laptop stops being
+   * a fleet member immediately rather than at the next renewal.
+   */
+  r.post('/nodes/:nodeId/revoke', async (req, res) => {
+    const { rows: admin } = await db.query(
+      `SELECT 1 FROM role_bindings rb
+         JOIN group_members gm ON gm.group_id = rb.group_id
+        WHERE gm.user_id = $1 AND rb.role = 'admin' LIMIT 1`, [req.user!.id])
+    if (admin.length === 0) {
+      res.status(403).json({ error: 'forbidden', detail: 'admin role required' })
+      return
+    }
+    const { rows } = await db.query(
+      `UPDATE nodes SET revoked_at=now(), state='cordoned' WHERE id=$1
+       RETURNING id, hostname, tier, state`, [req.params.nodeId])
+    if (rows.length === 0) { res.status(404).json({ error: 'not_found' }); return }
+    await db.query(`INSERT INTO activity_log (node_id, event, detail) VALUES ($1,'cert.revoked',$2)`,
+      [req.params.nodeId, JSON.stringify({ by: req.user!.id })])
+    res.json(rows[0])
   })
 
   r.get('/pools', async (_req, res) => {

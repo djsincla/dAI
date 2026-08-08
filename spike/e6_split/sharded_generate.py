@@ -47,6 +47,10 @@ def main():
     ap.add_argument("--model", default="mlx-community/Qwen2.5-7B-Instruct-4bit")
     ap.add_argument("--max-tokens", type=int, default=128)
     ap.add_argument("--reps", type=int, default=3)
+    ap.add_argument("--lazy", action="store_true",
+                    help="defer weight materialisation until after shard(); "
+                         "determines whether peak load memory is the full model "
+                         "or only this rank's slice")
     args = ap.parse_args()
 
     from mlx_lm import load, stream_generate
@@ -62,14 +66,20 @@ def main():
                 print(json.dumps({"error": "only one rank; check MLX_HOSTFILE"}))
             return 1
 
+    mx.reset_peak_memory()
     t0 = time.perf_counter()
-    model, tokenizer = load(args.model, lazy=False)
+    # lazy=True defers materialisation. If shard() then only realises this
+    # rank's slice, peak stays at the slice size and a fleet CAN hold a model no
+    # single node could load. If peak still hits full model size, sharding is
+    # useless for exactly the case it is wanted for.
+    model, tokenizer = load(args.model, lazy=args.lazy)
     if group is not None:
         # Tensor-parallel: each rank keeps its slice of every projection.
         model.shard(group)
     mx.eval(model.parameters())
     load_s = time.perf_counter() - t0
     resident_gb = mx.get_active_memory() / (1 << 30)
+    peak_gb = mx.get_peak_memory() / (1 << 30)
 
     # Greedy via an explicit sampler; stream_generate takes `sampler`, not
     # `temp`. Determinism is load-bearing under sharding: logits are all-reduced
@@ -101,7 +111,9 @@ def main():
             "nodes": size,
             "model": args.model,
             "load_s": round(load_s, 2),
+            "lazy": args.lazy,
             "resident_gb_this_rank": round(resident_gb, 2),
+            "peak_gb_this_rank": round(peak_gb, 2),
             "runs": runs,
             "median_steady_tok_s": round(sorted(rates)[len(rates) // 2], 2) if rates else None,
         }

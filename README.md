@@ -30,7 +30,7 @@ the idea before any architecture is committed.
 
 | Experiment | Question | Status |
 |---|---|---|
-| **E1** | Can MLX reach Metal from a `launchd` daemon with no user session? | Agent ✅ · Daemon ⏳ |
+| **E1** | Can MLX reach Metal from a `launchd` daemon with no user session? | **PASSES** ✅ |
 | **E2** | At what memory ceiling and QoS does the interactive user notice? | Harness built ✅ · Sweep ⏳ |
 | **E3** | What is aggregate throughput vs. an API call or a rented GPU hour? | Not started |
 | **E4** | What does preemption cost, and what work-unit size amortizes it? | Not started |
@@ -59,7 +59,14 @@ instruments cover different contention paths:
 
 ### Confirmed so far
 
-- MLX 0.32.0 runs from a `LaunchAgent` in the user's Aqua session, GPU verified.
+- **E1 passes.** MLX reaches Metal from a `LaunchDaemon` in session 0 (`uid 0`,
+  `security_session = System`), screen locked or unlocked, and every presence
+  signal stays readable there. **The node agent can ship as a single system
+  daemon** — no split into a computing daemon plus a sensing agent, and no
+  dependency on a logged-in user. Reading presence via IOKit and `pmset` rather
+  than AppKit was the load-bearing decision.
+  *Still open:* the fully-logged-out `ABSENT` state is untested, which caps
+  confidence in overnight capacity but is no longer existential.
 - **Background QoS costs ~2.4× GPU throughput** (~3183 vs ~7830 GFLOPS fp32).
   `ProcessType: Background` matches `taskpolicy -b`. This is the politeness
   dial, so it should be dynamic — Background while a user is present, promoted

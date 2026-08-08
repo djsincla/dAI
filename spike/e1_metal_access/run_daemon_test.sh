@@ -59,13 +59,18 @@ from collections import Counter
 rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
 print(f"{len(rows)} samples from the daemon context\n")
 
-hdr = f"{'time':<9} {'session':<9} {'uid':<5} {'console':<10} {'locked':<7} {'GPU':<5} {'gflops':>8}"
+hdr = (f"{'time':<9} {'session':<9} {'uid':<5} {'console':<10} {'locked':<7} "
+       f"{'GPU':<5} {'gflops':>8}  {'presence':<9} {'idle_s':>7}")
 print(hdr); print("-" * len(hdr))
 for r in rows:
     p, g = r["process"], r.get("gpu", {})
+    pres = r.get("presence", {})
+    sig = pres.get("signals", {})
+    idle = sig.get("hid_idle_s")
     print(f"{r['timestamp'][11:19]:<9} {str(p['security_session']):<9} {p['uid']:<5} "
           f"{str(p['console_user']):<10} {str(p['screen_locked_raw']):<7} "
-          f"{('YES' if r['gpu_reachable'] else 'NO'):<5} {str(g.get('gflops','-')):>8}")
+          f"{('YES' if r['gpu_reachable'] else 'NO'):<5} {str(g.get('gflops','-')):>8}  "
+          f"{str(pres.get('state','-')):<9} {(idle if idle is not None else -1):>7.0f}")
 
 print()
 by_lock = {}
@@ -74,16 +79,40 @@ for r in rows:
 for lock, oks in sorted(by_lock.items()):
     print(f"  screen_locked={lock:<6} -> GPU reachable in {sum(oks)}/{len(oks)} samples")
 
-failures = [r for r in rows if not r["gpu_reachable"]]
-if failures:
-    print(f"\n!!! {len(failures)} FAILURE(S). First traceback:\n")
-    print(failures[0].get("error", "<no traceback captured>")[:2000])
-    print("\nVERDICT: E1 FAILS in at least one daemon state. The harvest tier")
-    print("cannot rely on a system daemon; fall back to a LaunchAgent and")
-    print("accept logged-in-but-idle machines only.")
+# A daemon that can compute but cannot tell whether a human is at the machine
+# is just as unusable as one that cannot compute. Both are session-0 questions.
+missing = Counter()
+for r in rows:
+    for name in r.get("presence", {}).get("unavailable_signals", []):
+        missing[name] += 1
+    if "error" in r.get("presence", {}):
+        missing["presence module failed"] += 1
+
+print()
+if missing:
+    for name, count in missing.most_common():
+        print(f"  SIGNAL LOST: {name} unavailable in {count}/{len(rows)} samples")
 else:
-    print("\nVERDICT: E1 PASSES. Metal is reachable from a LaunchDaemon in every")
-    print("sampled state. The node agent can ship as a system daemon.")
+    print(f"  All presence signals readable in all {len(rows)} samples.")
+
+gpu_fail = [r for r in rows if not r["gpu_reachable"]]
+print()
+if gpu_fail:
+    print(f"!!! {len(gpu_fail)} GPU FAILURE(S). First traceback:\n")
+    print(gpu_fail[0].get("error", "<no traceback captured>")[:2000])
+    print("\nVERDICT: E1 FAILS. Metal is not reachable from a LaunchDaemon in at")
+    print("least one state. The harvest tier cannot ship as a system daemon;")
+    print("fall back to a LaunchAgent and accept logged-in-but-idle machines only.")
+elif missing:
+    print("VERDICT: E1 PARTIAL. Metal works from a daemon, but at least one")
+    print("presence signal does not. The agent could compute without being able")
+    print("to tell whether a human is present, which is not shippable. Either")
+    print("find a session-0-safe replacement for the lost signal, or split the")
+    print("agent: a daemon that computes plus a LaunchAgent that senses.")
+else:
+    print("VERDICT: E1 PASSES. Metal is reachable and every presence signal is")
+    print("readable from a LaunchDaemon in every sampled state. The node agent")
+    print("can ship as a single system daemon.")
 PY
     ;;
 

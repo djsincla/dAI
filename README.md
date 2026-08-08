@@ -33,7 +33,7 @@ the idea before any architecture is committed.
 | **E1** | Can MLX reach Metal from a `launchd` daemon with no user session? | **PASSES** ✅ |
 | **E2** | At what memory ceiling and QoS does the interactive user notice? | Harness built ✅ · Sweep ⏳ |
 | **E3** | What is aggregate throughput vs. an API call or a rented GPU hour? | Not started |
-| **E4** | What does preemption cost, and what work-unit size amortizes it? | Not started |
+| **E4** | What does preemption cost, and what work-unit size amortizes it? | **PASSES** ✅ |
 | **E5** | Is ANE work less perceptible than GPU work? | Not started |
 
 E1 is the existential gate — if GPU access requires an active GUI session, the
@@ -73,6 +73,15 @@ instruments cover different contention paths:
   to Standard once the machine is confirmed idle.
 - Metal self-caps at `max_recommended_working_set_size` = 51.8 GiB on a 64 GB
   machine (~81%). Agent memory ceilings sit under *that*, not under installed RAM.
+- **Preemption is ~20x cheaper than the plan assumed.** A 14B 4-bit model loads
+  in 1.4 s warm / 2.8 s cold and releases in 28 ms, against a planned assumption
+  of 30-60 s. Unified memory is why: there is no host→device PCIe transfer, so
+  weights land straight in memory the GPU already addresses. Minimum work units
+  are 4-25 s, not the ~10 minutes targeted. **The agent should yield
+  aggressively** — the reload costs seconds.
+- **Yield latency is now dominated by presence polling, not memory release.**
+  Release is ~20 ms; polling at 2 s means up to 2 s of work continues after a
+  user returns. Tune the polling interval, not the release path.
 - **Contention shows up in the tail, not the median.** One unreplicated run at a
   25 GB ceiling under background QoS: p50 frame time moved +3% while p95 moved
   +65% and p99 +82% (mean fps 68.7 → 53.4). Reporting medians or mean fps would
@@ -91,7 +100,10 @@ Silicon has to the original dedicated card.
 
 ```
 spike/
-  e1_metal_access/     probe + launchd plists + runner for the E1 gate
+  e1_metal_access/     Metal + presence access from a session-0 daemon (E1)
+  e2_contention/       victim workloads + MLX load generator (E2)
+  e4_preemption/       model load/release cost and work-unit sizing (E4)
+  presence/            user-presence detection: the agent's primary control
 docs/
   PLAN.md              full design: tiers, use cases, architecture, verification
 ```

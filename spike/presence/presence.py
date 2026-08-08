@@ -31,6 +31,14 @@ import json
 import subprocess
 import time
 
+# How often to sample. E4 measured memory release at ~20ms and model reload at
+# 1-3s, which makes this interval the dominant term in end-to-end yield latency:
+# polling every 2s means up to 2s of work continues after a user touches the
+# keyboard, ~100x the cost of the release it triggers. Sampling is cheap (ioreg
+# and pmset reads), so poll fast. Tune this, not the release path.
+POLL_INTERVAL_ACTIVE = 0.5   # user present or recently present
+POLL_INTERVAL_IDLE = 5.0     # confirmed idle; nothing to interrupt quickly
+
 # Seconds of no HID input before the machine stops counting as actively used.
 ACTIVE_IDLE_THRESHOLD = 90
 # Sustained idle required before promoting to a more permissive state. Long on
@@ -246,7 +254,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--watch", action="store_true", help="poll continuously")
-    ap.add_argument("--interval", type=float, default=2.0)
+    ap.add_argument("--interval", type=float, default=POLL_INTERVAL_ACTIVE)
     ap.add_argument("--json", action="store_true", help="one-shot JSON")
     args = ap.parse_args()
 

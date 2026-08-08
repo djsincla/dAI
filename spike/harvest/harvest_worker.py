@@ -36,13 +36,14 @@ import platform
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent / "presence"))
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 import presence  # noqa: E402
 from ane_runtime import ANERuntime, ANEPlacementError  # noqa: E402
+from control_plane import (  # noqa: E402
+    ControlPlane, ControlPlaneError, NotEnrolled, apply_policy, merge_policy,
+)
 
 MAX_TOKENS = 24
 
@@ -117,10 +118,19 @@ class Runtime:
 
 
 class HarvestWorker:
-    def __init__(self, coordinator, name, model_name, ane_model=None, verbose=True,
-                 promote_after=presence.IDLE_PROMOTE_SECONDS):
-        self.coordinator = coordinator.rstrip("/")
+    def __init__(self, control_plane, name, model_name, ane_model=None, verbose=True,
+                 promote_after=presence.IDLE_PROMOTE_SECONDS,
+                 heartbeat_every=30.0, policy_every=300.0):
+        self.cp = control_plane
         self.name = name
+        self.heartbeat_every = heartbeat_every
+        self.policy_every = policy_every
+        self._last_heartbeat = 0.0
+        self._last_policy = 0.0
+        # Observed throughput per workload class, reported on heartbeat. The
+        # scheduler derives capability from completed work rather than from the
+        # chip, because the newer machine of the measured pair is the slower one.
+        self._samples = {}
         self.machine = machine_label()
         # Two runtimes, chosen by what policy permits rather than by what work
         # exists. GPU work is forbidden in three of five presence states, so
@@ -177,7 +187,7 @@ class HarvestWorker:
     def available_kinds(self, policy):
         """Work kinds this worker may run *right now*.
 
-        Advertised to the coordinator so it hands out only servable work,
+        Advertised to the control plane so it hands out only servable work,
         instead of the worker fetching a unit it must immediately return.
         """
         kinds = []
@@ -206,35 +216,61 @@ class HarvestWorker:
         return (presence.POLL_INTERVAL_IDLE if state in ("LOCKED", "ABSENT")
                 else presence.POLL_INTERVAL_ACTIVE)
 
+    def sync(self, reading):
+        """Heartbeat, and refresh policy occasionally.
+
+        Both are best effort. An unreachable control plane must never widen what
+        the agent will do, so a failure here leaves the last known policy in
+        place and the local table still bounds it.
+        """
+        now = time.monotonic()
+        if now - self._last_heartbeat >= self.heartbeat_every:
+            sig = reading["signals"]
+            try:
+                self.cp.heartbeat(
+                    reading["state"],
+                    on_ac_power=sig.get("on_ac_power"),
+                    thermal_ok=sig.get("thermal_ok"),
+                    capability_samples=self._samples or None,
+                )
+                self._last_heartbeat = now
+            except ControlPlaneError as exc:
+                self.log(f"  heartbeat failed: {exc}")
+
+        if now - self._last_policy >= self.policy_every:
+            try:
+                served = self.cp.fetch_policy()
+                merged = merge_policy(presence.POLICY, served)
+                apply_policy(merged)
+                self._last_policy = now
+            except ControlPlaneError as exc:
+                self.log(f"  policy refresh failed, keeping local: {exc}")
+
     def fetch(self, kinds):
         try:
-            url = (f"{self.coordinator}/work?worker={self.name}"
-                   f"&kinds={','.join(kinds)}")
-            with urllib.request.urlopen(url, timeout=60) as r:
-                return json.load(r)
-        except urllib.error.URLError as exc:
-            self.log(f"  coordinator unreachable ({exc}); retry in 3s")
+            return self.cp.lease_work(kinds)
+        except NotEnrolled as exc:
+            self.log(f"  not enrolled or not approved: {exc}")
+            time.sleep(15)
+            return None
+        except ControlPlaneError as exc:
+            self.log(f"  control plane unreachable ({exc}); retry in 3s")
             time.sleep(3)
             return None
 
-    def report(self, unit_id, done, unfinished, seconds):
+    def report(self, unit_id, completed, unfinished, seconds):
         """Return completed items and hand back what was not reached.
 
         Reporting partial progress is what makes preemption cheap. Discarding
         the whole unit would make a yield cost up to a full batch, which is the
-        expensive behaviour E4's economics were meant to avoid.
+        expense E4's economics exist to avoid.
         """
-        payload = {"worker": self.name, "machine": self.machine, "unit_id": unit_id,
-                   "count": done, "seconds": round(seconds, 3),
-                   "unfinished": unfinished}
-        req = urllib.request.Request(
-            f"{self.coordinator}/result", data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json"})
         try:
-            with urllib.request.urlopen(req, timeout=60) as r:
-                return json.load(r)
-        except urllib.error.URLError as exc:
-            self.log(f"  failed to report unit {unit_id}: {exc}")
+            return self.cp.report(unit_id, completed, unfinished, seconds)
+        except ControlPlaneError as exc:
+            # A 409 means the lease expired and the work was already requeued.
+            # Losing the result is correct in that case: another node has it.
+            self.log(f"  result for {unit_id} rejected: {exc}")
             return None
 
     def process(self, unit, kind):
@@ -249,7 +285,7 @@ class HarvestWorker:
         runtime = self.runtime_for(kind)
         self.apply_qos(self.presence()["policy"], kind)
         t0 = time.perf_counter()
-        done = 0
+        completed = []
 
         for index, item in enumerate(items):
             reading = self.presence()
@@ -262,16 +298,15 @@ class HarvestWorker:
             if kind not in self.available_kinds(policy):
                 unfinished = items[index:]
                 self.stats["yields"] += 1
-                self.stats["items_lost"] += 0  # nothing in flight was discarded
                 self.log(f"  YIELD -> {reading['state']} "
                          f"({', '.join(policy['blocked_by']) or 'user present'}); "
-                         f"{done} done, {len(unfinished)} returned")
-                return done, unfinished, time.perf_counter() - t0
+                         f"{len(completed)} done, {len(unfinished)} returned")
+                return completed, unfinished, time.perf_counter() - t0
 
             item_t0 = time.perf_counter()
             runtime.run(item) if kind == "embed" else runtime.run(item["prompt"])
             item_s = time.perf_counter() - item_t0
-            done += 1
+            completed.append({"id": item.get("id")})
 
             # E2: duty cycle is a real, monotonic lever independent of QoS.
             # Sleeping proportionally yields the GPU back in gaps. ANE work is
@@ -281,11 +316,19 @@ class HarvestWorker:
             if 0 < duty < 1.0:
                 time.sleep(item_s * (1.0 / duty - 1.0))
 
-        return done, [], time.perf_counter() - t0
+        return completed, [], time.perf_counter() - t0
 
     def run(self):
         self.log(f"harvest worker {self.name} ({self.machine})")
-        self.log(f"coordinator {self.coordinator}")
+        self.log(f"control plane {self.cp.base}")
+        try:
+            served = self.cp.fetch_policy()
+            apply_policy(merge_policy(presence.POLICY, served))
+            self._last_policy = time.monotonic()
+            self.log("  policy merged with control plane (stricter of the two wins)")
+        except ControlPlaneError as exc:
+            # Starting on the local table is correct: it is the conservative one.
+            self.log(f"  could not fetch policy, using local table: {exc}")
         if self.ane is not None:
             try:
                 load_s = self.ane.load()
@@ -302,6 +345,7 @@ class HarvestWorker:
 
         while True:
             reading = self.presence()
+            self.sync(reading)
             state, policy = reading["state"], reading["policy"]
             kinds = self.available_kinds(policy)
 
@@ -325,11 +369,11 @@ class HarvestWorker:
             work = self.fetch(kinds)
             if work is None:
                 continue
-            if work.get("wait") or work.get("idle"):
-                time.sleep(3)
+            if "reason" in work:
+                # empty | none-of-these-kinds | node-paused. None is an error,
+                # and all three mean the same thing to the agent: wait.
+                time.sleep(self.poll_interval(state))
                 continue
-            if work.get("done"):
-                break
 
             kind = work.get("kind", "generate")
             if kind == "generate" and not self.runtime.loaded:
@@ -338,13 +382,20 @@ class HarvestWorker:
                 self.stats["load_s"] += load_s
                 self.log(f"  loaded GPU model in {load_s:.2f}s (state={state})")
 
-            done, unfinished, seconds = self.process(work, kind)
+            completed, unfinished, seconds = self.process(work, kind)
+            done = len(completed)
             self.stats["items"] += done
             self.stats.setdefault(f"items_{kind}", 0)
             self.stats[f"items_{kind}"] += done
             self.stats["units"] += 1
             self.stats["work_s"] += seconds
-            self.report(work["unit_id"], done, unfinished, seconds)
+            self.report(work["unitId"], completed, unfinished, seconds)
+
+            if done and seconds:
+                # Workload class, not kind: throughput differs by model, which
+                # is why the scheduler stores a profile rather than a scalar.
+                cls = self.runtime.model_name if kind == "generate" else f"ane:{kind}"
+                self._samples[cls] = round(done / seconds, 3)
 
             if not unfinished:
                 rate = done / seconds if seconds else 0
@@ -359,7 +410,15 @@ class HarvestWorker:
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--coordinator", required=True)
+    ap.add_argument("--control-plane", required=True,
+                    help="base URL, e.g. https://control.local:8443")
+    ap.add_argument("--client-cert", help="node certificate (mTLS)")
+    ap.add_argument("--client-key", help="node private key")
+    ap.add_argument("--ca-cert", help="CA to pin. A node that verifies nothing "
+                                      "accepts work from anything on the network.")
+    ap.add_argument("--dev-fingerprint",
+                    help="development only: present this as node identity instead "
+                         "of a client certificate")
     ap.add_argument("--model", default="mlx-community/Qwen2.5-1.5B-Instruct-4bit",
                     help="MLX model for GPU 'generate' work")
     ap.add_argument("--ane-model",
@@ -373,7 +432,10 @@ def main():
                          "long (E4: a false 'they are gone' costs a model load "
                          "and an instant preemption); lower it only for tests.")
     args = ap.parse_args()
-    return HarvestWorker(args.coordinator, args.name, args.model,
+    cp = ControlPlane(args.control_plane,
+                      client_cert=args.client_cert, client_key=args.client_key,
+                      ca_cert=args.ca_cert, dev_fingerprint=args.dev_fingerprint)
+    return HarvestWorker(cp, args.name, args.model,
                          ane_model=args.ane_model,
                          promote_after=args.promote_after).run()
 

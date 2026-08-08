@@ -198,6 +198,52 @@ LLM tokens. The useful reading is that the daytime path is not a token gesture:
 a machine in use runs a substantial workload rather than idling until its owner
 goes home.
 
+## Wired to the control plane
+
+The agent now speaks the API at `control-plane/openapi/dai.yaml` rather than the
+spike coordinator. It is the second implementation of that schema and the
+control plane is the first, which is the reason for writing the schema before
+either: a mismatch shows up between two independent implementations rather than
+in production.
+
+Verified end to end over HTTP:
+
+```
+agent enrolls               -> pending, no certificate issued
+pending node asks for work  -> 401 "node not approved"
+admin approves              -> active
+agent starts                -> policy merged with control plane
+                               ANE model loaded, 100% of 34 ops on ANE
+                               embed at 22-36 items/s, state=ACTIVE
+```
+
+**The property that matters, tested through the real API.** With 3 embed units
+and 3 generate units queued and the machine in use, the agent ran 3 embed units
+and **zero** generate units. Final state: embed done, generate still pending.
+GPU work waited for the machine to be free, and neither side had to be trusted
+to enforce that alone.
+
+### Policy is merged, taking the stricter of the two
+
+The control plane serves a policy table and the agent carries its own. Neither
+wins outright: the agent applies whichever is more restrictive per field, and
+QoS resolves to `background` if either side asks for it.
+
+That is not indecision. The server knows fleet-wide intent and may be newer; the
+agent knows the machine and is the thing that will actually disturb its owner.
+Taking the intersection means neither a stale agent nor a compromised control
+plane can widen what runs on someone's Mac, and disagreement resolves toward
+less work rather than more.
+
+**Unreachable is never permission.** Every failure path leaves the agent doing
+less. A policy fetch that fails keeps the last known table, a heartbeat that
+fails is dropped, and a control plane that is down means standing down rather
+than falling back to a default that happens to be permissive.
+
+A 409 on reporting a result is treated as correct rather than as an error: the
+lease expired and another node already has the work, so losing the result is the
+right outcome.
+
 ## Caveats
 
 - Single machine, single yield cycle. Not yet run across the fleet with both

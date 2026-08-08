@@ -6,6 +6,7 @@ import { createPool, type Db } from './lib/db.js'
 import { agentRoutes } from './routes/agent.js'
 import { adminRoutes } from './routes/admin.js'
 import { startReaper } from './lib/work.js'
+import { Acl, aclMiddleware, describeAcls } from './lib/netacl.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 export const OPENAPI_PATH = join(here, '..', 'openapi', 'dai.yaml')
@@ -18,6 +19,12 @@ export const OPENAPI_PATH = join(here, '..', 'openapi', 'dai.yaml')
  */
 export function createApp(db: Db): Express {
   const app = express()
+
+  // Off unless a proxy is actually in front. With this unset, req.ip is the
+  // socket peer and X-Forwarded-For is ignored, so a caller cannot declare
+  // their own source address and walk through the network ACL.
+  if (process.env.TRUST_PROXY) app.set('trust proxy', process.env.TRUST_PROXY)
+
   app.use(express.json({ limit: '32mb' }))
 
   app.get('/healthz', (_req, res) => { res.json({ ok: true }) })
@@ -34,8 +41,14 @@ export function createApp(db: Db): Express {
     }),
   )
 
-  app.use('/agent/v1', agentRoutes(db))
-  app.use('/admin/v1', adminRoutes(db))
+  // Network ACLs run before auth: a request from a disallowed range is
+  // rejected without touching the database. Defence in depth, never a
+  // substitute for mTLS or sessions.
+  const agentAcl = new Acl(process.env.DAI_AGENT_CIDRS)
+  const adminAcl = new Acl(process.env.DAI_ADMIN_CIDRS)
+
+  app.use('/agent/v1', aclMiddleware(agentAcl, 'agent'), agentRoutes(db))
+  app.use('/admin/v1', aclMiddleware(adminAcl, 'admin'), adminRoutes(db))
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status ?? 500
@@ -53,6 +66,11 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const db = createPool()
   const app = createApp(db)
   startReaper(db)
+
+  for (const note of describeAcls(new Acl(process.env.DAI_AGENT_CIDRS),
+                                  new Acl(process.env.DAI_ADMIN_CIDRS))) {
+    console.warn(note)
+  }
 
   const port = Number(process.env.PORT ?? 8443)
   // TLS from the first deployment, including locally. A local plaintext start

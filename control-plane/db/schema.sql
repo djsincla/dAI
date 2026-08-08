@@ -72,6 +72,10 @@ CREATE TABLE nodes (
     -- by the node, and never inferred from the chip: the newer M4 Pro is the
     -- slower machine of the pair measured.
     capability_profiles   jsonb NOT NULL DEFAULT '{}'::jsonb,
+    -- Networks this node may connect from, comma-separated CIDRs. Pinned at
+    -- enrollment so a copied certificate presented from elsewhere is refused
+    -- even though the certificate itself is valid. NULL means unpinned.
+    allowed_cidrs         text,
     created_at            timestamptz NOT NULL DEFAULT now()
 );
 

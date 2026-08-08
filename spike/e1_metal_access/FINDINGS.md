@@ -3,18 +3,50 @@
 **Test machine:** MacBook Pro, Apple M2 Max, 64 GB unified, macOS 26.3 (25D125), Xcode 26.6 / Swift 6.3.3
 **Runtime:** MLX 0.32.0 (`mlx` + `mlx-metal`, native `cp314` / `macosx_26_0_arm64` wheels)
 
-## Status
+## Status: E1 PASSES
 
-| Context | Session | GPU reachable | Notes |
-|---|---|---|---|
-| Interactive shell | Aqua | **YES** | Baseline, 4 samples |
-| LaunchAgent (`gui/501`) | Aqua | **YES** | 4/4 samples, exit 0 |
-| LaunchDaemon (`system`) | — | **PENDING** | Needs `sudo`; see `run_daemon_test.sh` |
-| LaunchDaemon, screen locked | — | **PENDING** | Same run, captured by interval sampling |
-| LaunchDaemon, logged out | — | **PENDING** | Same run, optional step |
+| Context | Session | uid | GPU reachable | Presence signals |
+|---|---|---|---|---|
+| Interactive shell | Aqua | 501 | **YES** | all readable |
+| LaunchAgent (`gui/501`) | Aqua | 501 | **YES** (4/4) | all readable |
+| LaunchDaemon, unlocked | **System** | **0** | **YES** (2/2) | all readable |
+| LaunchDaemon, screen locked | **System** | **0** | **YES** (2/2) | all readable |
+| LaunchDaemon, logged out | — | — | **UNTESTED** | **UNTESTED** |
 
-The daemon case is the actual gate. The agent result only proves the weaker
-deployment shape works.
+**The node agent can ship as a single system daemon.** No split into a computing
+daemon plus a sensing LaunchAgent, and no dependency on a logged-in user.
+
+Two things make the result credible rather than incidental:
+
+- The context is genuinely session 0 (`security_session = System`, `uid = 0`),
+  not the Aqua session in disguise.
+- Presence signals survived. `hid_idle_s` tracked correctly across samples
+  (1 → 5 → 38 → 5s), `screen_locked` flipped accurately, `console_user`
+  resolved. Reading via IOKit and `pmset` rather than AppKit was the load-bearing
+  decision, and it is now confirmed rather than assumed.
+
+### Open: the ABSENT state is untested
+
+Every daemon sample recorded `console_user = dwayne`. The logout step was
+skipped, so the state with the most permissive policy — 85% memory ceiling,
+standard QoS — has never actually been exercised. Locked-with-a-user-logged-in
+passing is encouraging but is not proof: with no user session at all,
+WindowServer's state differs.
+
+No longer existential, since a fallback to "harvest only while someone is
+logged in" still leaves a working product. But it caps overnight capacity, which
+is where most of the value is. Worth closing before Phase 1 policy is finalized.
+
+## Confirmed: QoS behaves identically in session 0
+
+Daemon samples ran 2549 / 2401 / 2934 GFLOPS — mean ~2630, excluding a 1628
+first sample that is cold-start shader compilation. That closely matches the
+LaunchAgent's ~3183 under the same `ProcessType: Background`, and sits far below
+the ~7830 foreground baseline.
+
+So `ProcessType` is genuinely the control, and it throttles a system daemon the
+same way it throttles a user agent. The dynamic-QoS design below applies
+unchanged to the shipping deployment shape.
 
 ## Confirmed finding: background QoS costs ~2.4x GPU throughput
 

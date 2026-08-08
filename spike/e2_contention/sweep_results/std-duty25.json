@@ -1,0 +1,12 @@
+{
+  "label": "std-duty25",
+  "frames_measured": 109,
+  "mean_ms": 18.27,
+  "p50_ms": 16.68,
+  "p95_ms": 33.53,
+  "p99_ms": 33.79,
+  "max_ms": 34.17,
+  "mean_fps": 54.7,
+  "hitches": 8,
+  "hitch_pct": 7.34
+}

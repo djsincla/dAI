@@ -31,7 +31,7 @@ the idea before any architecture is committed.
 | Experiment | Question | Status |
 |---|---|---|
 | **E1** | Can MLX reach Metal from a `launchd` daemon with no user session? | **PASSES** ✅ |
-| **E2** | At what memory ceiling and QoS does the interactive user notice? | Harness built ✅ · Sweep ⏳ |
+| **E2** | At what memory ceiling and QoS does the interactive user notice? | **PASSES** ✅ |
 | **E3** | What is aggregate throughput vs. an API call or a rented GPU hour? | **Scheduling ✅ · cost ⏳** |
 | **E4** | What does preemption cost, and what work-unit size amortizes it? | **PASSES** ✅ |
 | **E5** | Is ANE work less perceptible than GPU work? | **PASSES** ✅ |
@@ -107,6 +107,13 @@ instruments cover different contention paths:
   it.** The all-reduce ceiling said 31.72 tok/s; reality delivered 11.69, so the
   ceiling was 2.7x optimistic. Tight loops enjoy warm connections and no
   synchronisation stalls; real forward passes pay both.
+- **No GPU setting is safe while a user is present.** E2 swept QoS x duty cycle
+  against a Blender viewport: the gentlest configuration tested (background QoS,
+  25% duty) still cost **+46% of p95**, rising to +190% at standard QoS and full
+  duty. **GPU harvesting waits for LOCKED or ABSENT**, which makes ANE work the
+  only daytime option and E5 load-bearing. Duty cycle and QoS are two real,
+  independent levers; `presence.py` now carries measured values rather than
+  estimates.
 - **Capability is workload-dependent, not a machine property.** Across an
   M2 Max/64 GB and an M4 Pro/48 GB, the M2 Max led by 7.5% on a 1.5B model and
   26.3% on a 7B — relative capability moved 3.5x from model size alone, and

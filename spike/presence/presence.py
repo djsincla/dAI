@@ -49,27 +49,41 @@ IDLE_PROMOTE_SECONDS = 300
 # immediate.
 STATES = ["ACTIVE", "PASSIVE", "IDLE", "LOCKED", "ABSENT"]
 
-# What the agent may do in each state.
+# What the agent may do in each state. These are E2/E5 measurements, not
+# estimates.
 #
-# The GPU/ANE split is the most important column here. E5 measured a saturating
-# ANE workload as statistically indistinguishable from no load at all (p95
-# -16%, inside a 36% baseline noise floor) while equivalent GPU work cost
-# +59-100%. The ANE is separate silicon and an artist's viewport does not touch
-# it, so ANE work stays permitted in states where GPU work is forbidden.
+# E2 swept QoS x duty cycle against a Blender EEVEE viewport and found NO GPU
+# setting safe while a user is present. The gentlest tested — background QoS at
+# 25% duty — still cost 46% of viewport p95, against a generous 43% noise floor.
+# GPU harvesting therefore waits for LOCKED or ABSENT.
 #
-# mem_frac is NOT a politeness dial and must not be treated as one: E5 saw a
-# 4 GB load — a small fraction of a 64 GB machine — degrade viewport p95 by
-# 100%. Footprint governs what fits, not how much a user is disturbed.
-# Throttling disturbance requires limiting compute rate, which this table does
-# not yet express. See e5_ane/FINDINGS.md.
+#   background/0.25  +46%    background/1.0  +140%
+#   background/0.50  +90%    standard/1.0    +190%
+#
+# E5 measured a saturating ANE workload as indistinguishable from no load at all
+# (p95 -16%, inside the noise floor). The ANE is separate silicon an artist's
+# viewport never touches, so ANE work stays permitted in every state. That makes
+# it the *only* daytime harvesting option, which is why E5 matters as much as it
+# does.
+#
+# duty_max is the lever E2 identified; it is monotonic and independent of QoS.
+# mem_frac is NOT a politeness dial and must never be used as one — E2 measured
+# a 32 GB load disturbing *less* than an 8 GB one at identical duty (+90% vs
+# +190%), and E5 saw a 4 GB load cost 100% of p95. Footprint governs what fits.
+# Occupancy governs disturbance.
 POLICY = {
-    "ACTIVE":  {"gpu": False, "ane": False, "qos": None,         "mem_frac": 0.00},
-    # ANE stays on through PASSIVE and even ACTIVE-adjacent states on the E5
-    # result; GPU does not.
-    "PASSIVE": {"gpu": False, "ane": True,  "qos": "background", "mem_frac": 0.15},
-    "IDLE":    {"gpu": True,  "ane": True,  "qos": "background", "mem_frac": 0.35},
-    "LOCKED":  {"gpu": True,  "ane": True,  "qos": "standard",   "mem_frac": 0.70},
-    "ABSENT":  {"gpu": True,  "ane": True,  "qos": "standard",   "mem_frac": 0.85},
+    #             GPU     ANE    QoS            duty_max  mem_frac
+    "ACTIVE":  {"gpu": False, "ane": True,  "qos": "background", "duty_max": 0.00, "mem_frac": 0.00},
+    "PASSIVE": {"gpu": False, "ane": True,  "qos": "background", "duty_max": 0.00, "mem_frac": 0.15},
+    # No input for ACTIVE_IDLE_THRESHOLD and nothing holding the display awake.
+    # GPU work is allowed at the gentlest measured setting only: the screen is
+    # still on and the user may be reading, and E4 puts yield at ~20ms plus the
+    # poll interval, so a return is absorbed quickly.
+    "IDLE":    {"gpu": True,  "ane": True,  "qos": "background", "duty_max": 0.25, "mem_frac": 0.35},
+    # Nobody can see the screen. Full occupancy, and promote QoS for the ~2.4x
+    # throughput E1 measured.
+    "LOCKED":  {"gpu": True,  "ane": True,  "qos": "standard",   "duty_max": 1.00, "mem_frac": 0.70},
+    "ABSENT":  {"gpu": True,  "ane": True,  "qos": "standard",   "duty_max": 1.00, "mem_frac": 0.85},
 }
 
 
@@ -204,15 +218,16 @@ def effective_policy(state, sig):
     policy = dict(POLICY[state])
     reasons = []
     if not sig["on_ac_power"]:
-        policy.update(gpu=False, ane=False, mem_frac=0.0)
+        policy.update(gpu=False, ane=False, duty_max=0.0, mem_frac=0.0)
         reasons.append("on battery")
     if not sig["thermal_ok"]:
-        policy.update(gpu=False, mem_frac=0.0)
+        policy.update(gpu=False, duty_max=0.0, mem_frac=0.0)
         reasons.append("thermal pressure")
     if sig["busy_assertions"]:
         # A render or long job is running even though nobody is typing. Not a
         # presence signal, but competing with it wastes both workloads.
         policy["mem_frac"] = min(policy["mem_frac"], 0.15)
+        policy["duty_max"] = 0.0
         policy["gpu"] = False
         reasons.append(f"machine busy ({len(sig['busy_assertions'])} assertion/s)")
     policy["blocked_by"] = reasons
@@ -282,7 +297,7 @@ def main():
         return 0
 
     print(f"{'state':<9} {'observed':<9} {'idle':>7} {'lock':>6} {'ac':>4} "
-          f"{'gpu':>4} {'qos':>11} {'mem':>5}  assertions")
+          f"{'gpu':>4} {'qos':>11} {'duty':>5} {'mem':>5}  assertions")
     print("-" * 82)
     while True:
         r = monitor.update()
@@ -290,7 +305,8 @@ def main():
         print(f"{r['state']:<9} {r['observed']:<9} "
               f"{(s['hid_idle_s'] if s['hid_idle_s'] is not None else -1):>7.1f} "
               f"{str(s['screen_locked']):>6} {str(s['on_ac_power']):>4} "
-              f"{str(p['gpu']):>4} {str(p['qos']):>11} {p['mem_frac']:>5.2f}  "
+              f"{str(p['gpu']):>4} {str(p['qos']):>11} {p['duty_max']:>5.2f} "
+              f"{p['mem_frac']:>5.2f}  "
               f"{','.join(s['display_assertions'] + s['busy_assertions'])[:34]}",
               flush=True)
         time.sleep(args.interval)

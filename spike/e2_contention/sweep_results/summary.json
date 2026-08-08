@@ -1,0 +1,90 @@
+{
+  "baseline_median_p95_ms": 17.45,
+  "baseline_samples": [
+    17.36,
+    17.39,
+    17.45,
+    18.41,
+    24.9
+  ],
+  "noise_floor_pct": 43.4,
+  "conditions": [
+    {
+      "label": "bg-duty25",
+      "qos": "background",
+      "duty": 0.25,
+      "mem": 8,
+      "p50_ms": 16.66,
+      "p95_ms": 25.55,
+      "p99_ms": 33.65,
+      "mean_fps": 60.0,
+      "hitch_pct": 1.83
+    },
+    {
+      "label": "bg-duty50",
+      "qos": "background",
+      "duty": 0.5,
+      "mem": 8,
+      "p50_ms": 16.69,
+      "p95_ms": 33.13,
+      "p99_ms": 33.88,
+      "mean_fps": 58.8,
+      "hitch_pct": 3.67
+    },
+    {
+      "label": "bg-duty100",
+      "qos": "background",
+      "duty": 1.0,
+      "mem": 8,
+      "p50_ms": 33.3,
+      "p95_ms": 41.8,
+      "p99_ms": 42.53,
+      "mean_fps": 31.1,
+      "hitch_pct": 0.0
+    },
+    {
+      "label": "std-duty25",
+      "qos": "standard",
+      "duty": 0.25,
+      "mem": 8,
+      "p50_ms": 16.68,
+      "p95_ms": 33.53,
+      "p99_ms": 33.79,
+      "mean_fps": 54.7,
+      "hitch_pct": 7.34
+    },
+    {
+      "label": "std-duty50",
+      "qos": "standard",
+      "duty": 0.5,
+      "mem": 8,
+      "p50_ms": 17.23,
+      "p95_ms": 33.7,
+      "p99_ms": 34.26,
+      "mean_fps": 47.2,
+      "hitch_pct": 0.92
+    },
+    {
+      "label": "std-duty100",
+      "qos": "standard",
+      "duty": 1.0,
+      "mem": 8,
+      "p50_ms": 37.54,
+      "p95_ms": 50.53,
+      "p99_ms": 72.1,
+      "mean_fps": 26.2,
+      "hitch_pct": 0.0
+    },
+    {
+      "label": "std-mem32",
+      "qos": "standard",
+      "duty": 1.0,
+      "mem": 32,
+      "p50_ms": 17.17,
+      "p95_ms": 33.17,
+      "p99_ms": 35.66,
+      "mean_fps": 47.9,
+      "hitch_pct": 1.83
+    }
+  ]
+}

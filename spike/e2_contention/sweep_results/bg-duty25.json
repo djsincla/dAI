@@ -1,0 +1,12 @@
+{
+  "label": "bg-duty25",
+  "frames_measured": 109,
+  "mean_ms": 16.66,
+  "p50_ms": 16.66,
+  "p95_ms": 25.55,
+  "p99_ms": 33.65,
+  "max_ms": 33.85,
+  "mean_fps": 60.0,
+  "hitches": 2,
+  "hitch_pct": 1.83
+}

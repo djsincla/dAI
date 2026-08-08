@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  E1 probe as a LaunchDaemon: system domain, session 0, root, no user context.
+  This is the context a production dAI node agent would run in, and the one
+  whose Metal access is unproven.
+
+  StartInterval rather than a single RunAtLoad so one load captures samples
+  across an unlock -> lock -> logout cycle without manual timing.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.dai.e1probe.daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/dwayne/Developer/dAI/spike/.venv/bin/python</string>
+        <string>/Users/dwayne/Developer/dAI/spike/e1_metal_access/probe.py</string>
+        <string>/tmp/dai_e1_daemon.jsonl</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>E1_CONTEXT</key>
+        <string>daemon</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>20</integer>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/dai_e1_daemon.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/dai_e1_daemon.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

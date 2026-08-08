@@ -36,6 +36,32 @@ incorrectly in exactly the places that matter.
 instead of a client certificate. It is off by default: a deployment that
 silently accepts a header as node identity has no authentication at all.
 
+## Network access control
+
+Two optional layers, both defence in depth and neither a substitute for
+authentication. A caller from an allowed network with no credentials is still
+refused.
+
+```bash
+DAI_AGENT_CIDRS=10.0.0.0/24,192.168.4.0/22   # who may reach /agent/v1
+DAI_ADMIN_CIDRS=192.168.4.0/22               # who may reach /admin/v1
+```
+
+Unset means open, and the server logs a warning saying so at startup. The two
+surfaces are configured separately because agents live on the fleet network and
+humans may not.
+
+Nodes can additionally be pinned to the network they enrolled from
+(`nodes.allowed_cidrs`). That check runs *after* the certificate has identified
+the node, so it answers "is this node calling from where it should be" rather
+than "who is this", and it is the layer that catches valid key material copied
+off a machine and used somewhere else. Refusals are written to the node's
+activity log, which its owner can read.
+
+**X-Forwarded-For is ignored unless `TRUST_PROXY` is set.** Reading it
+unconditionally would let any caller declare their own source address, which
+makes an allowlist worse than not having one.
+
 ## What the skeleton implements
 
 **Lease expiry**, which is the gap that made the spike coordinator lose work. It

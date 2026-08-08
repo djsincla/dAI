@@ -10,6 +10,12 @@ info:
     Two surfaces with different auth and different availability requirements:
     /agent/v1 is mTLS, /admin/v1 is session plus pool-scoped RBAC.
 
+    Both sit behind an optional network allowlist (DAI_AGENT_CIDRS,
+    DAI_ADMIN_CIDRS), and nodes may additionally be pinned to the network they
+    enrolled from. That is defence in depth and never a substitute for
+    authentication: a caller from an allowed network with no credentials is
+    still refused.
+
 servers:
   - url: https://localhost:8443
 
@@ -54,6 +60,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Policy' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   /agent/v1/heartbeat:
     post:
@@ -67,6 +74,7 @@ paths:
       responses:
         '204': { description: Accepted }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   /agent/v1/work:
     get:
@@ -95,6 +103,7 @@ paths:
                   - $ref: '#/components/schemas/WorkLease'
                   - $ref: '#/components/schemas/NoWork'
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   /agent/v1/work/{unitId}/result:
     post:
@@ -124,6 +133,7 @@ paths:
                 properties:
                   requeued: { type: integer, minimum: 0 }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '409':
           description: Lease expired or held by another node; result rejected
           content:
@@ -143,6 +153,7 @@ paths:
                 type: array
                 items: { $ref: '#/components/schemas/Node' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   /admin/v1/nodes/{nodeId}/approve:
     post:
@@ -203,6 +214,7 @@ paths:
               schema:
                 type: array
                 items: { $ref: '#/components/schemas/Pool' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   /admin/v1/jobs:
     post:
@@ -236,6 +248,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Job' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
 components:

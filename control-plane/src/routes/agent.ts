@@ -4,6 +4,7 @@ import type { Db } from '../lib/db.js'
 import { agentAuth } from '../lib/auth.js'
 import { POLICY, type WorkKind } from '../lib/policy.js'
 import { LeaseConflict, leaseWork, reportResult } from '../lib/work.js'
+import { clientIp, nodeNetworkAllowed } from '../lib/netacl.js'
 
 const KINDS: WorkKind[] = ['embed', 'generate', 'render']
 
@@ -47,6 +48,21 @@ export function agentRoutes(db: Db): Router {
   })
 
   r.use(agentAuth(db))
+
+  // Certificate pinning to a network. Runs after the certificate has identified
+  // the node, so it answers "is this node calling from where it should be"
+  // rather than "who is this". Catches key material used from somewhere else.
+  r.use(async (req, res, next) => {
+    if (await nodeNetworkAllowed(db, req.node!.id, clientIp(req))) {
+      next()
+      return
+    }
+    await db.query(
+      `INSERT INTO activity_log (node_id, event, detail) VALUES ($1,'auth.wrong_network',$2)`,
+      [req.node!.id, JSON.stringify({ ip: clientIp(req) })],
+    )
+    res.status(403).json({ error: 'forbidden', detail: 'node not permitted from this network' })
+  })
 
   r.get('/policy', (_req, res) => {
     res.json(POLICY)

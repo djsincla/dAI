@@ -55,12 +55,21 @@ configuration will miss.
 ## Operational requirements learned the hard way
 
 `orca` vanished twice during this work — once asleep, once from a flat battery —
-and a gang-scheduled job dies when any member goes. Cluster membership therefore
-requires, enforced at admission:
+and a gang-scheduled job dies when any member goes.
+
+**These are deliberately not enforced at admission for now.** On laptops in
+active use, requiring AC power and disabled sleep would make the tier unusable,
+and this is a development fleet. Recorded as a production consideration:
 
 - **AC power**, with battery state health-checked before a job is scheduled
 - **Sleep disabled** (`caffeinate -dimsu` or `pmset` policy)
 - Health checks that fail a pool *before* work is dispatched onto it, not after
+
+Not enforcing them creates an obligation instead: the gang scheduler must handle
+node loss cleanly — detect the member going away, fail the job with a specific
+reason rather than hanging, release the pool, and requeue rather than strand.
+`caffeinate -dimsu -t <seconds>` remains available as an opt-in for a specific
+run without making it a standing rule.
 
 The harvest tier already handles the power case through its on-battery policy
 gate. Notably, the node that drained its battery was running the older

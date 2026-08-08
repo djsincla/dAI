@@ -372,13 +372,27 @@ Order of work:
 
 ## 11. Open questions
 
-- **Cluster nodes must not sleep or run on battery.** A gang-scheduled job dies
-  when any member vanishes, and during this work `orca` did exactly that — twice,
-  once asleep and once from a flat battery. The harvest tier already handles this
-  through the on-battery policy gate, and the node that drained was running the
-  older worker with no presence logic at all. Cluster membership needs an
-  explicit AC-power and no-sleep requirement enforced at admission, plus health
-  checks that fail a pool before a job is scheduled onto it rather than after.
+- **Node loss is tolerated rather than prevented — deliberately, for now.**
+  `orca` vanished twice during this work, once asleep and once from a flat
+  battery, and a gang-scheduled job dies when any member goes.
+
+  Admission does **not** gate on AC power or disabled sleep. On laptops in active
+  use that requirement would make the cluster tier unusable, and this is a
+  development fleet. It is recorded here as a production consideration, not a
+  current rule.
+
+  The consequence is a design obligation, not a shrug: since node loss is not
+  prevented, the gang scheduler has to **handle it cleanly** — detect a member
+  going away, fail the job with a specific reason rather than hanging, release
+  the pool, and requeue rather than strand. That is stricter than what the spike
+  coordinator does today, where in-flight units are held in memory with no
+  timeout and a vanished node's work is lost permanently. Lease expiry (§2)
+  covers the harvest tier; the cluster tier needs the equivalent at job
+  granularity.
+
+  When this fleet moves to dedicated hardware, revisit: AC power and no-sleep as
+  admission requirements, plus health checks that fail a pool *before* work is
+  dispatched onto it.
 - **Model distribution.** Every node needs weights before it can work. Not
   designed. On a large fleet this is the dominant network cost and probably wants
   peer-to-peer distribution rather than N pulls from a store.

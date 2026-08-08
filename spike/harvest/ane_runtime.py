@@ -15,7 +15,7 @@ This runtime is what turns those three dead states into working ones.
 The safety property is placement verification. Core ML treats `CPU_AND_NE` as a
 *preference*: unsupported ops, dtypes or shapes fall back to CPU silently. A
 harvest worker that believed it was running on the ANE while actually running on
-the CPU would be disturbing the very user it is trying to avoid — and it would
+the CPU would be disturbing the very user it is trying to avoid - and it would
 look fine in every log. So placement is checked with MLComputePlan at load and
 the runtime refuses to start below a threshold.
 """
@@ -87,7 +87,7 @@ class ANERuntime:
     def _verify_placement(self):
         """Report which compute device each operation actually landed on.
 
-        MLComputePlan needs a compiled .mlmodelc, not the .mlpackage — handed the
+        MLComputePlan needs a compiled .mlmodelc, not the .mlpackage - handed the
         package it aborts the process at the C++ level rather than raising. The
         compiled artifact lives in a temp directory owned by the MLModel, so that
         reference must stay alive while the plan is read.
@@ -131,7 +131,7 @@ class ANERuntime:
 
         The payload shape is fixed by the model, so an item supplies data rather
         than a prompt. Text arrives as `text` and is hashed into the input
-        tensor — a stand-in until a real embedding model is converted. The
+        tensor - a stand-in until a real embedding model is converted. The
         mechanism, placement verification and policy integration are what this
         exercises; swapping in a converted embedding model changes only this
         method.

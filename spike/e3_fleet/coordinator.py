@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-E3 coordinator — hands out work units, collects results, reports scaling.
+E3 coordinator - hands out work units, collects results, reports scaling.
 
 Deliberately a prototype of the Phase 1 scheduler rather than a throwaway
 benchmark, because the interesting question is not "do two Macs go faster than
@@ -57,7 +57,7 @@ STATE = {
 MIN_BATCH, MAX_BATCH = 2, 32
 
 # Served at /bootstrap.sh so a machine joins with one command. The model is
-# pinned so every node runs identical work — a node quietly running a different
+# pinned so every node runs identical work - a node quietly running a different
 # quantisation would make the throughput comparison meaningless.
 BOOTSTRAP = """#!/bin/bash
 set -euo pipefail
@@ -79,7 +79,7 @@ def queue_len():
 
 
 def make_corpus(n):
-    """Synthetic but realistic batch-classification work — Tier 1 use case #3.
+    """Synthetic but realistic batch-classification work - Tier 1 use case #3.
 
     Prompts are varied so no worker gets a systematically easier slice, which
     would corrupt the throughput comparison the whole experiment rests on.
@@ -112,7 +112,7 @@ def next_batch_size(worker_id):
     """Capability-matched sizing.
 
     Round-robin hands every node the same batch, so on a heterogeneous fleet the
-    fast node finishes early and idles while the slow node is still working —
+    fast node finishes early and idles while the slow node is still working -
     the classic straggler. Weighted sizing scales each batch by the node's own
     measured throughput relative to the fleet mean.
     """

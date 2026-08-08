@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-E6 — what does splitting a model across this fleet actually cost?
+E6 - what does splitting a model across this fleet actually cost?
 
 Measures the fundamental quantity rather than the end result: the latency of a
 single all-reduce between two nodes. Everything about tensor-parallel inference
 follows from it.
 
 Why all-reduce specifically. mlx-lm's Qwen2 implements `shard(group)`, which is
-*tensor* parallelism — attention and MLP projections are split across nodes and
+*tensor* parallelism - attention and MLP projections are split across nodes and
 recombined with an all-reduce after each block. A 28-layer model therefore pays
 roughly 2 all-reduces per layer per token, or ~56 network round-trips for every
 single token generated. Pipeline parallelism would pay 1 per hop per token; the
@@ -22,7 +22,7 @@ single machine already achieves, splitting is strictly worse than not splitting,
 and the cluster tier does not belong on this interconnect.
 
 Tensor sizes match real activations: hidden_size 3584 for Qwen2.5-7B, batch 1,
-fp16 — the actual payload crossing the wire per all-reduce during generation.
+fp16 - the actual payload crossing the wire per all-reduce during generation.
 
     mlx.launch --backend ring --hostfile hosts.json allreduce_bench.py
 """
@@ -33,7 +33,7 @@ import time
 import mlx.core as mx
 
 # Qwen2.5-7B geometry. Payload per all-reduce during single-token generation is
-# tiny (one row of hidden state), so this measures latency, not bandwidth —
+# tiny (one row of hidden state), so this measures latency, not bandwidth -
 # which is the point. Tensor parallelism is a latency problem.
 HIDDEN = 3584
 LAYERS = 28

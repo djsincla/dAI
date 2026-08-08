@@ -1,4 +1,4 @@
-# Cluster tier — admission control
+# Cluster tier - admission control
 
 Measured on `rotorua` (M2 Max / 64 GB) + `orca` (M4 Pro / 48 GB) over the
 dedicated gigabit link, using `admit.py`.
@@ -22,7 +22,7 @@ interconnect measurement is more robust to system load than expected.
 
 Case 2 is the result worth keeping. A 110B model **fits** this pool and is still
 refused, because it has 80 layers and tensor parallelism pays ~2 all-reduces per
-layer per token — 160 round-trips per token against a 7B's 56.
+layer per token - 160 round-trips per token against a 7B's 56.
 
 Solving for the largest model depth that clears an 8 tok/s floor:
 
@@ -33,7 +33,7 @@ Solving for the largest model depth that clears an 8 tok/s floor:
 | Thunderbolt 4 (est. 0.1 ms) | ~0.1 ms | ~230 |
 
 **A 70B has 80 layers; a 110B has ~88.** At gigabit only 7B-13B class models
-clear the floor — and those fit on a single node, so they should never be
+clear the floor - and those fit on a single node, so they should never be
 sharded in the first place. The set of models that both *need* the cluster tier
 and *pass* admission at gigabit is empty.
 
@@ -54,7 +54,7 @@ configuration will miss.
 
 ## Operational requirements learned the hard way
 
-`orca` vanished twice during this work — once asleep, once from a flat battery —
+`orca` vanished twice during this work - once asleep, once from a flat battery -
 and a gang-scheduled job dies when any member goes.
 
 **These are deliberately not enforced at admission for now.** On laptops in
@@ -66,14 +66,14 @@ and this is a development fleet. Recorded as a production consideration:
 - Health checks that fail a pool *before* work is dispatched onto it, not after
 
 Not enforcing them creates an obligation instead: the gang scheduler must handle
-node loss cleanly — detect the member going away, fail the job with a specific
+node loss cleanly - detect the member going away, fail the job with a specific
 reason rather than hanging, release the pool, and requeue rather than strand.
 `caffeinate -dimsu -t <seconds>` remains available as an opt-in for a specific
 run without making it a standing rule.
 
 The harvest tier already handles the power case through its on-battery policy
 gate. Notably, the node that drained its battery was running the older
-`e3_fleet/worker.py`, which has no presence logic at all — the tier with the
+`e3_fleet/worker.py`, which has no presence logic at all - the tier with the
 safety mechanism survived, the one without it died.
 
 ## What admission checks, and why each threshold exists

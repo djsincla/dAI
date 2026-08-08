@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-User-presence detection — the harvest agent's primary control.
+User-presence detection - the harvest agent's primary control.
 
 E2 showed contention lands in the tail: a 25 GB background load moved median
 frame time 3% but p99 82%. That damage only matters while a human is watching.
 At 2am it is irrelevant. So the agent should not try to be simultaneously fast
-and invisible — it should detect presence and switch modes. Memory ceiling and
+and invisible - it should detect presence and switch modes. Memory ceiling and
 QoS are secondary dials applied *within* a mode.
 
 Every signal here is read through IOKit or power management rather than through
@@ -53,8 +53,8 @@ STATES = ["ACTIVE", "PASSIVE", "IDLE", "LOCKED", "ABSENT"]
 # estimates.
 #
 # E2 swept QoS x duty cycle against a Blender EEVEE viewport and found NO GPU
-# setting safe while a user is present. The gentlest tested — background QoS at
-# 25% duty — still cost 46% of viewport p95, against a generous 43% noise floor.
+# setting safe while a user is present. The gentlest tested - background QoS at
+# 25% duty - still cost 46% of viewport p95, against a generous 43% noise floor.
 # GPU harvesting therefore waits for LOCKED or ABSENT.
 #
 #   background/0.25  +46%    background/1.0  +140%
@@ -67,7 +67,7 @@ STATES = ["ACTIVE", "PASSIVE", "IDLE", "LOCKED", "ABSENT"]
 # does.
 #
 # duty_max is the lever E2 identified; it is monotonic and independent of QoS.
-# mem_frac is NOT a politeness dial and must never be used as one — E2 measured
+# mem_frac is NOT a politeness dial and must never be used as one - E2 measured
 # a 32 GB load disturbing *less* than an 8 GB one at identical duty (+90% vs
 # +190%), and E5 saw a 4 GB load cost 100% of p95. Footprint governs what fits.
 # Occupancy governs disturbance.
@@ -80,7 +80,7 @@ POLICY = {
     # GPU work was permitted here at background QoS / duty 0.25, the gentlest
     # setting E2 measured. Removed, for two reasons that compound:
     #
-    #   E2 found even that setting costs 46% of viewport p95 — the screen is
+    #   E2 found even that setting costs 46% of viewport p95 - the screen is
     #   still on and the user may be reading rather than typing.
     #
     #   Background QoS costs ~26x on the short bursty items a harvest worker
@@ -144,7 +144,7 @@ SYSTEM_ASSERTION_PROCS = {
     "powerd", "sharingd", "backupd", "mds", "mds_stores", "mDNSResponder",
     "softwareupdated", "nsurlsessiond", "cloudd", "bird", "AppleIDAuthAgent",
     "UpdateBrainService", "corespeechd", "photoanalysisd", "AMPDeviceDiscoveryAgent",
-    # coreaudiod holds assertions for device *context*, not playback — e.g.
+    # coreaudiod holds assertions for device *context*, not playback - e.g.
     # "BuiltInSpeakerDevice.context.pre" was observed on an idle machine with no
     # audio running. Actual media playback holds a display assertion instead,
     # which is the signal that matters for presence.
@@ -157,11 +157,11 @@ def _parse_assertions():
 
     These answer two different questions and conflating them is wrong:
 
-      PreventUserIdleDisplaySleep — something insists the *display* stay on.
+      PreventUserIdleDisplaySleep - something insists the *display* stay on.
         Video calls, playback, presentations. Strong evidence a human is
         looking at the screen right now.
 
-      PreventUserIdleSystemSleep — something insists the *machine* keep
+      PreventUserIdleSystemSleep - something insists the *machine* keep
         running. Renders and long jobs hold this, but so do a dozen background
         daemons permanently. Evidence the machine is busy, not that anyone is
         present.
@@ -247,7 +247,7 @@ def effective_policy(state, sig):
     # on the theory that a render or long job was running. In practice the
     # assertion means only "do not sleep": Safari, coreaudiod, music players,
     # downloads and `caffeinate` all hold it more or less permanently. Gating on
-    # it blocked harvesting entirely on a normally-used machine — the same
+    # it blocked harvesting entirely on a normally-used machine - the same
     # failure as the earlier sharingd/Handoff bug, one layer down.
     #
     # It carries no information about GPU contention, so it does not belong in
@@ -260,7 +260,7 @@ def effective_policy(state, sig):
 class PresenceMonitor:
     """Applies hysteresis so the agent does not flap between states.
 
-    Demotion (toward ACTIVE) is immediate — a returning user must be respected
+    Demotion (toward ACTIVE) is immediate - a returning user must be respected
     on the very first sample. Promotion (toward ABSENT) requires the condition
     to hold for IDLE_PROMOTE_SECONDS, so a momentary lull does not trigger an
     expensive model load that is about to be thrown away.

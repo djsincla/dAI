@@ -32,7 +32,7 @@ import bpy
 # interval. Two caps bite otherwise, and both silently produce a flat, useless
 # measurement:
 #   - Blender's scene frame rate (fixed above by raising render.fps)
-#   - display vsync — 8.33ms on a 120Hz ProMotion panel
+#   - display vsync - 8.33ms on a 120Hz ProMotion panel
 # If frame time lands suspiciously near 1/refresh with near-zero variance, the
 # scene is too light and the run is measuring vsync, not contention.
 # Target p50 of roughly 30-50ms. Heavier machines need a bigger grid, so these
@@ -94,7 +94,7 @@ def build_scene(grid, subsurf_levels, samples, shadow_lights, volumetrics):
 
     # Uncap playback. At Blender's default 24fps every frame interval pins to
     # exactly 41.67ms with near-zero variance, because the GPU finishes early
-    # and waits — the benchmark then measures the frame-rate cap, not render
+    # and waits - the benchmark then measures the frame-rate cap, not render
     # cost, and only detects contention severe enough to fall below 24fps.
     # A high target lets frame interval equal actual GPU time.
     scene.render.fps = 240
@@ -218,7 +218,7 @@ class Recorder:
                 "p99_ms": round(ordered[min(int(len(ordered) * 0.99), len(ordered) - 1)], 2),
                 "max_ms": round(ordered[-1], 2),
                 "mean_fps": round(1000.0 / statistics.fmean(ordered), 1),
-                # A hitch is a frame taking >2x the median — the visible stutter
+                # A hitch is a frame taking >2x the median - the visible stutter
                 # that an average frame rate would completely conceal.
                 "hitches": sum(1 for v in intervals if v > 2 * median),
                 "hitch_pct": round(

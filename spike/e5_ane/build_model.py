@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-E5 step 1 — build an ANE-resident Core ML model, and prove it is ANE-resident.
+E5 step 1 - build an ANE-resident Core ML model, and prove it is ANE-resident.
 
 The hypothesis worth testing: the Neural Engine is separate silicon from the
 GPU, so ANE work should not compete with an artist's viewport the way MLX does.
@@ -32,7 +32,7 @@ from coremltools.converters.mil import Builder as mb
 
 
 def build(layers, channels, size):
-    """A deep fp16 convolution stack — the shape the ANE is happiest with.
+    """A deep fp16 convolution stack - the shape the ANE is happiest with.
 
     Conv/ReLU is chosen deliberately: it is the most reliably ANE-mappable
     pattern available. Something more exotic risks measuring CPU fallback and
@@ -119,7 +119,7 @@ def main():
     print("\nVerifying compute placement (MLComputePlan)...")
     counts, total = verify_placement(out)
     if not total:
-        print("  Could not read a compute plan. Placement is UNVERIFIED — do not")
+        print("  Could not read a compute plan. Placement is UNVERIFIED - do not")
         print("  trust any contention result produced with this model.")
         return 1
 

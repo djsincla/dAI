@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-E2 — At what memory ceiling and QoS does the interactive user notice?
+E2 - At what memory ceiling and QoS does the interactive user notice?
 
 Sweeps background MLX load across two axes and measures the cost to a clean
 Xcode build:
@@ -15,7 +15,7 @@ build, harvesting can run during the working day instead of overnight only,
 which roughly doubles usable fleet hours.
 
 An Xcode build is CPU and memory-bandwidth bound while MLX is GPU and
-memory-bandwidth bound, so this measures *bandwidth* contention — the real
+memory-bandwidth bound, so this measures *bandwidth* contention - the real
 mechanism on unified memory. It does not measure GPU-vs-GPU contention; a
 Blender or Resolve workload is needed for that.
 
@@ -83,7 +83,7 @@ def thermal_pressure():
 
 
 def timed_build(build_cmd):
-    """Clean build, wall time. Cleaning every rep is the point — incremental
+    """Clean build, wall time. Cleaning every rep is the point - incremental
     builds would hide the contention under a warm cache."""
     clean()
     t0 = time.perf_counter()
@@ -159,7 +159,7 @@ def main():
         t = timed_build(build_cmd)
         print(f"clean build: {t:.1f}s")
         if t < 20:
-            print("  Too short — variance will swamp the signal.")
+            print("  Too short - variance will swamp the signal.")
             print("  Regenerate with more modules: python3 gen_workload.py --modules 120")
         elif t > 120:
             print("  Longer than needed; the full sweep will take a while.")
@@ -196,7 +196,7 @@ def main():
                             cond["resident_gb"] = load.info["resident_gb"]
                         times.append(timed_build(build_cmd))
             except Exception as e:
-                print(f"  {cond['label']} rep {rep}: FAILED — {e}")
+                print(f"  {cond['label']} rep {rep}: FAILED - {e}")
         if not times:
             continue
         cond["times"] = [round(t, 2) for t in times]
@@ -223,7 +223,7 @@ def main():
 
     print("\nInterpretation: the threshold that matters is where slowdown becomes")
     print("perceptible to a person, not where it becomes measurable. Treat >10%")
-    print("as the danger zone for daytime harvesting — a build that takes 10%")
+    print("as the danger zone for daytime harvesting - a build that takes 10%")
     print("longer is a build an engineer will notice and complain about.")
     return 0
 

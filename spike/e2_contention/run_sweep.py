@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-E2 rerun — what settings keep a harvest agent below the perception threshold?
+E2 rerun - what settings keep a harvest agent below the perception threshold?
 
 Supersedes run_e2.py, which swept memory ceiling against an Xcode build with a
 single leading baseline. Three things were wrong with that:
@@ -16,7 +16,7 @@ single leading baseline. Three things were wrong with that:
 
   Wrong baseline discipline. Viewport p95 moved 36% between runs with nothing
   loaded. Measured once at the start, that drift is silently attributed to
-  whichever condition follows — it manufactured a finding in E5 that had to be
+  whichever condition follows - it manufactured a finding in E5 that had to be
   retracted. Baselines are interleaved here and the spread becomes the noise
   floor that every result is judged against.
 

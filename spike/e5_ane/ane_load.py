@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-E5 step 2 — sustained ANE load, the counterpart to e2_contention/load.py.
+E5 step 2 - sustained ANE load, the counterpart to e2_contention/load.py.
 
 Runs the verified ANE-resident model in a loop so the viewport benchmark can be
 measured against Neural Engine pressure instead of GPU pressure. If the ANE is

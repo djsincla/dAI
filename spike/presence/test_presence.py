@@ -4,7 +4,7 @@ Regression suite for the presence policy core.
 Every test here corresponds to a bug that actually shipped into the spike and
 had to be found by running the system. The policy core is three pure functions
 over a signal dictionary, so all of them reproduce from recorded data with no
-hardware involved — which is exactly why that purity is worth protecting.
+hardware involved - which is exactly why that purity is worth protecting.
 
 The spike's failure mode was consistent: six separate measurements were wrong in
 the *flattering* direction. These tests are written to fail closed.

@@ -1,4 +1,4 @@
-# E4 — Preemption economics
+# E4 - Preemption economics
 
 **Test machine:** MacBook Pro, Apple M2 Max, 64 GB unified, macOS 26.3
 **Runtime:** MLX 0.32.0 / mlx-lm 0.31.3, 4-bit quantized models
@@ -22,14 +22,14 @@ The plan asserted model load would be "30-60s" and concluded: *"If you preempt o
 user activity you throw that away. This single constraint dictates your
 work-unit sizing."*
 
-It is **1.4 s warm and 2.8 s cold for a 14B model** — roughly 20x cheaper than
+It is **1.4 s warm and 2.8 s cold for a 14B model** - roughly 20x cheaper than
 assumed. Extrapolating to a 70B 4-bit (~40 GB) gives ~9 s of device read plus
 ~7 s of parse and allocate, so ~16 s cold and a ~2.5 minute minimum work unit.
 Still entirely tractable.
 
 The reason is unified memory. On a discrete-GPU machine, loading weights means
 reading from disk *and then* transferring host→device across PCIe. On Apple
-Silicon that second step does not exist — weights land directly in memory the GPU
+Silicon that second step does not exist - weights land directly in memory the GPU
 already addresses. The architectural property that makes contention hard (shared
 memory, shared bandwidth) is the same one that makes preemption cheap.
 
@@ -52,7 +52,7 @@ memory, shared bandwidth) is the same one that makes preemption cheap.
 With release at ~20 ms and reload at ~1-3 s, the dominant term in end-to-end
 yield latency is now **how often presence is sampled**. `presence.py` polls at
 2 s by default, so up to 2 s of work continues after a user touches the keyboard
-— roughly 100x the cost of the memory release it triggers.
+- roughly 100x the cost of the memory release it triggers.
 
 That inverts the optimization target. The thing to tune is the presence polling
 interval, not the release path. Sub-second polling is cheap (the signals are
@@ -65,7 +65,7 @@ interval, not the release path. Sub-second polling is cheap (the signals are
   on top, unmeasured here. The shipping `mlx-swift` agent avoids most of it.
 - Only up to 14B was measured. The 70B figure above is an extrapolation from the
   measured read rate and load scaling, not a measurement.
-- Load time did not scale cleanly with size — 7B loaded faster warm (0.692 s)
+- Load time did not scale cleanly with size - 7B loaded faster warm (0.692 s)
   than 3B (0.812 s), suggesting parallel file reads and run-to-run variance
   dominate at these small durations. The cold estimates are monotonic and are
   the safer basis for planning.
@@ -82,7 +82,7 @@ Three attempts produced confidently optimistic numbers before the fourth worked:
    `mx.eval(model.parameters())` is required.
 2. **Reading back a just-written file** measures the page cache, not the device
    (9.83 GB/s on hardware that does ~4.4).
-3. **`F_NOCACHE` on a file of zeros** measures nothing at all — APFS stores it
+3. **`F_NOCACHE` on a file of zeros** measures nothing at all - APFS stores it
    sparsely, so the read never reaches the device and the number went *up* to
    15.35 GB/s.
 

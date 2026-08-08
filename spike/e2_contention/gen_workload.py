@@ -6,8 +6,8 @@ Using a generated package rather than a real project matters: build time has to
 be stable across runs and reproducible on any node, otherwise the contention
 delta we're measuring is buried in variance from someone's dirty derived data.
 
-The generated code is deliberately type-inference heavy — generics, protocol
-conformances, and chained collection operations — because that is what makes
+The generated code is deliberately type-inference heavy - generics, protocol
+conformances, and chained collection operations - because that is what makes
 real Swift builds slow, and it is CPU and memory-bandwidth bound, which is the
 resource MLX inference actually contends with on unified memory.
 """
@@ -30,7 +30,7 @@ let package = Package(
 
 MODULE_TEMPLATE = """import Foundation
 
-// Module {n} — generic and protocol-heavy by design so the type checker, not
+// Module {n} - generic and protocol-heavy by design so the type checker, not
 // codegen, dominates build time.
 
 protocol Transformable{n} {{

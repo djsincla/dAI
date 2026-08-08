@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Harvest worker — pulls work, runs it, and gets out of the way when someone sits
+Harvest worker - pulls work, runs it, and gets out of the way when someone sits
 down.
 
 This is the intersection nothing had tested. E3 measured a fleet with nobody at
@@ -13,7 +13,7 @@ Every constant here traces to a measurement:
   E1  ProcessType/QoS is the politeness control and costs ~2.4x throughput, so
       it is switched dynamically rather than pinned. Metal caps itself at ~81%
       of unified memory, so ceilings are fractions of that, not of installed RAM.
-  E2  No GPU setting is imperceptible while a user is present — even background
+  E2  No GPU setting is imperceptible while a user is present - even background
       QoS at 25% duty costs 46% of viewport p95. GPU work therefore waits for
       LOCKED or ABSENT, and duty cycling is a real second lever.
   E4  Model load is 1-3s and release is ~20ms, so preemption is cheap and the
@@ -25,7 +25,7 @@ Every constant here traces to a measurement:
 The yield point is *between items*, not between work units. A unit is a batch;
 checking presence only at unit boundaries would mean up to a full unit of
 continued work after someone returns. Checking between items bounds that to one
-item, and completed items are reported rather than discarded — a preemption
+item, and completed items are reported rather than discarded - a preemption
 costs at most the item in flight.
 """
 
@@ -46,7 +46,7 @@ from ane_runtime import ANERuntime, ANEPlacementError  # noqa: E402
 
 MAX_TOKENS = 24
 
-# setpriority(2) with Darwin extensions — the same mechanism `taskpolicy -b`
+# setpriority(2) with Darwin extensions - the same mechanism `taskpolicy -b`
 # uses, callable on self so QoS can follow presence state at runtime rather than
 # being fixed at launch by a plist.
 PRIO_DARWIN_PROCESS = 4
@@ -140,7 +140,7 @@ class HarvestWorker:
 
         read_signals() costs ~116ms (six subprocess calls: ioreg, pmset x3,
         stat). An ANE item costs ~27ms, so polling per item spent 81% of the
-        worker's time asking whether the user was back — the check cost 4x the
+        worker's time asking whether the user was back - the check cost 4x the
         work it was guarding.
 
         Caching for POLL_INTERVAL_ACTIVE costs nothing in responsiveness,
@@ -165,7 +165,7 @@ class HarvestWorker:
         indistinguishable from no load, so there is nothing to be polite about,
         while background QoS costs ~26x on bursty items. Running ANE work under
         background priority pays a large throughput tax to buy politeness that
-        is already free — and ANE work is all a logged-in machine may do, so the
+        is already free - and ANE work is all a logged-in machine may do, so the
         tax lands on the majority of presence states.
         """
         want_bg = policy["qos"] == "background" and kind != "embed"
@@ -184,7 +184,7 @@ class HarvestWorker:
         if policy["gpu"] and policy["duty_max"] > 0:
             kinds.append("generate")
         # E5: ANE work is indistinguishable from no load, so it stays permitted
-        # wherever the policy allows it — including states where a user is
+        # wherever the policy allows it - including states where a user is
         # present and GPU work is not.
         if policy["ane"] and self.ane is not None:
             kinds.append("embed")
@@ -275,7 +275,7 @@ class HarvestWorker:
 
             # E2: duty cycle is a real, monotonic lever independent of QoS.
             # Sleeping proportionally yields the GPU back in gaps. ANE work is
-            # exempt — E5 measured it as invisible, so throttling it would cost
+            # exempt - E5 measured it as invisible, so throttling it would cost
             # throughput to buy politeness that is already free.
             duty = 1.0 if kind == "embed" else policy["duty_max"]
             if 0 < duty < 1.0:

@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-E1 — Can MLX reach the Metal GPU from a launchd context with no user session?
+E1 - Can MLX reach the Metal GPU from a launchd context with no user session?
 
 This is the existential gate for the harvest tier. If GPU compute requires an
 active GUI session, we can only ever harvest logged-in-but-idle machines, which
 is a materially weaker product.
 
 Run the same probe in four contexts and diff the results:
-  1. interactive   — normal shell, user logged in at the GUI
-  2. agent         — LaunchAgent (runs inside the user's GUI session)
-  3. daemon        — LaunchDaemon (session 0, root, no user context)
-  4. daemon-locked — LaunchDaemon with the screen locked / user logged out
+  1. interactive   - normal shell, user logged in at the GUI
+  2. agent         - LaunchAgent (runs inside the user's GUI session)
+  3. daemon        - LaunchDaemon (session 0, root, no user context)
+  4. daemon-locked - LaunchDaemon with the screen locked / user logged out
 
 Writes a JSON result so it can be collected from a daemon that has no stdout.
 """
@@ -136,7 +136,7 @@ def gpu_probe():
                 break
 
     # If Metal never allocated, the counters stay at zero even though the
-    # matmul "succeeded" on CPU — this is the real fallback detector.
+    # matmul "succeeded" on CPU - this is the real fallback detector.
     result["gpu_memory_moved"] = bool(result.get("peak_memory_bytes", 0) > 0)
     return result
 

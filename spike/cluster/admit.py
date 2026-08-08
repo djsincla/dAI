@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Cluster-tier admission control — verify a pool before serving on it.
+Cluster-tier admission control - verify a pool before serving on it.
 
 The cluster tier exists for one reason: running a model no single node can hold.
-E6 measured the cost of that — 11.69 tok/s sharded across two nodes against
-77.46 tok/s for the same model on one — so splitting is never a speed decision
+E6 measured the cost of that - 11.69 tok/s sharded across two nodes against
+77.46 tok/s for the same model on one - so splitting is never a speed decision
 and a pool should be refused rather than silently deliver something unusable.
 
 Two properties are checked, both of which E6 showed decide viability:
@@ -22,7 +22,7 @@ Two properties are checked, both of which E6 showed decide viability:
 
 Projected throughput deliberately applies an empirical correction. The
 comm-only ceiling from all-reduce latency alone predicted 31.72 tok/s where
-reality delivered 11.69 — a tight benchmark loop pays neither synchronisation
+reality delivered 11.69 - a tight benchmark loop pays neither synchronisation
 nor per-op overhead. Admission uses the measured 0.37 realisation factor rather
 than the raw ceiling, because promising a number 2.7x above what the pool will
 actually serve is worse than refusing it.

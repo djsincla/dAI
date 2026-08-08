@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-E6 part 2 — end-to-end sharded generation, to test the all-reduce ceiling.
+E6 part 2 - end-to-end sharded generation, to test the all-reduce ceiling.
 
 `allreduce_bench.py` derived a 31.72 tok/s ceiling over gigabit Ethernet from
 communication latency alone. That number assumes infinitely fast GPUs and counts
@@ -14,7 +14,7 @@ Two modes against the same model and prompt:
 
 mlx-lm's Qwen2 `shard()` splits attention and MLP projections across ranks and
 all-reduces after each block. Every rank loads full weights and then keeps its
-slice, so peak memory during load is the whole model on every node — fine at 7B,
+slice, so peak memory during load is the whole model on every node - fine at 7B,
 and worth remembering before assuming sharding lets a fleet hold a model no
 single node could load.
 

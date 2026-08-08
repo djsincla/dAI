@@ -15,6 +15,18 @@ export interface StatePolicy {
   qos: 'background' | 'standard'
   dutyMax: number
   memFrac: number
+  /**
+   * Largest completion a harvest node may accept, in tokens.
+   *
+   * Batch work yields between items and hands back the remainder. A single
+   * interactive request has no such seam, so a user returning mid-completion
+   * either waits for it or loses it. Capping the completion bounds that wait:
+   * at ~40 tok/s a 256-token cap is a worst case of a few seconds.
+   *
+   * The cluster tier has no cap because it is never preempted, which is another
+   * reason interactive serving belongs there.
+   */
+  maxCompletionTokens: number
 }
 
 /**
@@ -31,11 +43,11 @@ export interface StatePolicy {
  * fits; occupancy governs disturbance.
  */
 export const POLICY: Record<PresenceState, StatePolicy> = {
-  ACTIVE: { gpu: false, ane: true, qos: 'background', dutyMax: 0.0, memFrac: 0.0 },
-  PASSIVE: { gpu: false, ane: true, qos: 'background', dutyMax: 0.0, memFrac: 0.15 },
-  IDLE: { gpu: false, ane: true, qos: 'background', dutyMax: 0.0, memFrac: 0.35 },
-  LOCKED: { gpu: true, ane: true, qos: 'standard', dutyMax: 1.0, memFrac: 0.7 },
-  ABSENT: { gpu: true, ane: true, qos: 'standard', dutyMax: 1.0, memFrac: 0.85 },
+  ACTIVE: { gpu: false, ane: true, qos: 'background', dutyMax: 0.0, memFrac: 0.0, maxCompletionTokens: 256 },
+  PASSIVE: { gpu: false, ane: true, qos: 'background', dutyMax: 0.0, memFrac: 0.15, maxCompletionTokens: 256 },
+  IDLE: { gpu: false, ane: true, qos: 'background', dutyMax: 0.0, memFrac: 0.35, maxCompletionTokens: 256 },
+  LOCKED: { gpu: true, ane: true, qos: 'standard', dutyMax: 1.0, memFrac: 0.7, maxCompletionTokens: 2048 },
+  ABSENT: { gpu: true, ane: true, qos: 'standard', dutyMax: 1.0, memFrac: 0.85, maxCompletionTokens: 4096 },
 }
 
 const GPU_KINDS: WorkKind[] = ['generate', 'render']

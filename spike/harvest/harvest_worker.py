@@ -35,6 +35,7 @@ import json
 import platform
 import subprocess
 import sys
+import threading
 import time
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent / "presence"))
@@ -131,6 +132,11 @@ class HarvestWorker:
         # scheduler derives capability from completed work rather than from the
         # chip, because the newer machine of the measured pair is the slower one.
         self._samples = {}
+        # The runtimes are shared with the interactive dispatch thread, which
+        # may generate while the batch loop is between units. One model, one
+        # user of it at a time.
+        self._runtime_lock = threading.Lock()
+        self._serving = False
         self.machine = machine_label()
         # Two runtimes, chosen by what policy permits rather than by what work
         # exists. GPU work is forbidden in three of five presence states, so
@@ -210,6 +216,83 @@ class HarvestWorker:
                 freed += rt.unload()
         return freed
 
+    def resident_models(self):
+        """What this node currently holds in memory, for the router.
+
+        Reported rather than assumed: the model is released whenever policy
+        stops permitting the work, so residency changes with presence and the
+        scheduler needs the current answer, not the configured one.
+        """
+        out = {}
+        if self.runtime.loaded:
+            out[self.runtime.model_name] = round(self.runtime_resident_gb(), 2)
+        if self.ane is not None and self.ane.loaded:
+            out[f"ane:{self.ane.model_path.name}"] = 0.3
+        return out
+
+    def runtime_resident_gb(self):
+        try:
+            import mlx.core as mx
+            return mx.get_active_memory() / (1 << 30)
+        except Exception:
+            return 0.0
+
+    def serve_loop(self):
+        """Hold the reverse channel open and answer interactive requests.
+
+        Separate from the batch loop because the two have different shapes: a
+        batch unit is leased and can be handed back half done, an interactive
+        request is pushed and must be answered or refused. They share the
+        runtime under a lock.
+
+        The control plane already checks policy before routing here, but this
+        checks again. A scheduler that is buggy, compromised, or simply newer
+        than this agent must not be able to start GPU work on a machine someone
+        is using.
+        """
+        from mlx_lm import stream_generate
+
+        while self._serving:
+            try:
+                work = self.cp.poll_dispatch()
+            except ControlPlaneError as exc:
+                self.log(f"  dispatch poll failed: {exc}")
+                time.sleep(3)
+                continue
+            if not work:
+                continue
+
+            body = work.get("body") or {}
+            policy = self.presence()["policy"]
+            if "generate" not in self.available_kinds(policy):
+                # Refuse rather than serve. The request goes back as an error
+                # and the control plane can route it elsewhere.
+                self.cp.report_dispatch(work["dispatchId"],
+                                        error="node no longer permits GPU work")
+                continue
+
+            try:
+                with self._runtime_lock:
+                    if not self.runtime.loaded:
+                        self.runtime.load()
+                    tok = self.runtime.tokenizer
+                    prompt = tok.apply_chat_template(body.get("messages", []),
+                                                     add_generation_prompt=True)
+                    max_tokens = int(body.get("max_tokens", 256))
+                    pieces = []
+                    for resp in stream_generate(self.runtime.model, tok, prompt,
+                                                max_tokens=max_tokens,
+                                                sampler=self.runtime.sampler):
+                        pieces.append(resp.text)
+                    text = "".join(pieces)
+                self.cp.report_dispatch(work["dispatchId"], result={
+                    "text": text,
+                    "promptTokens": len(prompt),
+                    "completionTokens": len(tok.encode(text)),
+                })
+            except Exception as exc:
+                self.cp.report_dispatch(work["dispatchId"], error=repr(exc))
+
     def poll_interval(self, state):
         # E4: yield latency is dominated by sampling frequency, not by releasing
         # memory. Sample fast when a user could plausibly be about to return.
@@ -232,6 +315,7 @@ class HarvestWorker:
                     on_ac_power=sig.get("on_ac_power"),
                     thermal_ok=sig.get("thermal_ok"),
                     capability_samples=self._samples or None,
+                    resident_models=self.resident_models(),
                 )
                 self._last_heartbeat = now
             except ControlPlaneError as exc:
@@ -329,6 +413,10 @@ class HarvestWorker:
         except ControlPlaneError as exc:
             # Starting on the local table is correct: it is the conservative one.
             self.log(f"  could not fetch policy, using local table: {exc}")
+
+        if self._serving:
+            threading.Thread(target=self.serve_loop, daemon=True).start()
+            self.log("  reverse channel open for interactive requests")
         if self.ane is not None:
             try:
                 load_s = self.ane.load()
@@ -425,6 +513,9 @@ def main():
                     help="Core ML .mlpackage for ANE 'embed' work. Without it "
                          "the worker can only run in LOCKED and ABSENT.")
     ap.add_argument("--name", default=platform.node().split(".")[0])
+    ap.add_argument("--serve", action="store_true",
+                    help="hold the reverse channel open and answer interactive "
+                         "requests as well as batch work")
     ap.add_argument("--promote-after", type=float,
                     default=presence.IDLE_PROMOTE_SECONDS,
                     help="seconds a more-permissive state must hold before the "
@@ -435,9 +526,11 @@ def main():
     cp = ControlPlane(args.control_plane,
                       client_cert=args.client_cert, client_key=args.client_key,
                       ca_cert=args.ca_cert, dev_fingerprint=args.dev_fingerprint)
-    return HarvestWorker(cp, args.name, args.model,
-                         ane_model=args.ane_model,
-                         promote_after=args.promote_after).run()
+    worker = HarvestWorker(cp, args.name, args.model,
+                           ane_model=args.ane_model,
+                           promote_after=args.promote_after)
+    worker._serving = args.serve
+    return worker.run()
 
 
 if __name__ == "__main__":

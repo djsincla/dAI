@@ -120,8 +120,13 @@ class ControlPlane:
     # -- work ---------------------------------------------------------------
 
     def heartbeat(self, presence_state, on_ac_power=None, thermal_ok=None,
-                  capability_samples=None):
+                  capability_samples=None, resident_models=None):
         body = {"presenceState": presence_state}
+        if resident_models is not None:
+            # Sent every time, replacing rather than merging: a model released
+            # on a yield is no longer resident, and routing to a node that has
+            # to reload it defeats the point of tracking residency at all.
+            body["residentModels"] = resident_models
         if on_ac_power is not None:
             body["onAcPower"] = on_ac_power
         if thermal_ok is not None:
@@ -140,6 +145,35 @@ class ControlPlane:
         if not kinds:
             return {"reason": "none-of-these-kinds"}
         return self._request("GET", f"/agent/v1/work?kinds={','.join(kinds)}")
+
+    def poll_dispatch(self, timeout=40):
+        """Hold the reverse channel open, waiting for an interactive request.
+
+        Returns None on a 204, which is a normal timeout rather than an error:
+        the connection is closed and reopened so a node notices a control plane
+        restart instead of waiting on a socket nobody is listening to.
+        """
+        req = urllib.request.Request(f"{self.base}/agent/v1/dispatch", method="GET")
+        if self.dev_fingerprint:
+            req.add_header("x-node-fingerprint", self.dev_fingerprint)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout,
+                                        context=self.ssl_context) as resp:
+                if resp.status == 204:
+                    return None
+                raw = resp.read()
+                return json.loads(raw) if raw else None
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                raise NotEnrolled(str(exc.code)) from exc
+            raise ControlPlaneError(f"dispatch poll -> {exc.code}") from exc
+        except urllib.error.URLError as exc:
+            raise ControlPlaneError(f"dispatch poll unreachable: {exc.reason}") from exc
+
+    def report_dispatch(self, dispatch_id, result=None, error=None):
+        body = {"result": result} if error is None else {"error": error}
+        return self._request("POST", f"/agent/v1/dispatch/{dispatch_id}/result", body,
+                             expect=(200, 409))
 
     def report(self, unit_id, completed, unfinished, seconds, failed=False):
         return self._request("POST", f"/agent/v1/work/{unit_id}/result", {

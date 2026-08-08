@@ -130,6 +130,61 @@ default rather than a guess. Worth noting the cluster tier does not have this
 problem at all, since it is never preempted, which is another reason interactive
 serving belongs there.
 
+## Built
+
+All five recommendations below are implemented and tested. 66 control plane
+tests, plus a live run against the Python agent.
+
+| Piece | Where |
+|---|---|
+| Reverse channel | `src/lib/broker.ts`, `GET /agent/v1/dispatch` |
+| Routing | `src/lib/router.ts` |
+| Model residency | `nodes.resident_models`, reported on heartbeat |
+| OpenAI surface | `src/routes/serving.ts`, `POST /v1/chat/completions` |
+| Yield cap | `StatePolicy.maxCompletionTokens` |
+
+### The property that matters, demonstrated live
+
+Two independent refusals, with the agent connected and healthy throughout:
+
+```
+request while a user is at the keyboard
+  -> 503 all-in-use: "every node has a user present; GPU work runs
+     only when a machine is locked or logged out"
+
+presence_state forced to LOCKED in the database, so the scheduler
+believes the machine is free
+  -> control plane routes the request
+  -> agent refuses anyway: "node no longer permits GPU work"
+```
+
+The second case is the point. The scheduler's view of the machine was
+falsified and the agent still declined, because it re-derives presence locally
+rather than trusting what it is told. A control plane that is compromised,
+misconfigured, or merely stale cannot start GPU work on a machine someone is
+using.
+
+### Refusing well is a feature
+
+`503` with a reason, not a hang. During working hours every harvest node has a
+user present, so "no capacity" is the expected answer rather than an error
+condition, and a caller is far better served by hearing it immediately.
+
+Codes are specific enough to act on: `all-in-use` means try later or use the
+cluster tier, `no-nodes` means the fleet is not connected, `node-unreachable`
+means retry now.
+
+### What was deliberately not built
+
+**Streaming.** A completion is dispatched to a node as one unit so a yield has a
+bounded worst case. Streaming would mean holding a node mid-generation with no
+way to bound how long a returning user waits. Rejected with a message saying so
+rather than silently ignored.
+
+**Multi-instance dispatch.** The broker holds waiters in process. A second
+control plane instance needs this in Postgres with LISTEN/NOTIFY or a shared
+queue. Worth knowing before scaling out rather than after.
+
 ## Recommendation
 
 1. **Reverse channel** for push dispatch, keeping pull for batch.

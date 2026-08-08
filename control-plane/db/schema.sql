@@ -76,6 +76,11 @@ CREATE TABLE nodes (
     -- enrollment so a copied certificate presented from elsewhere is refused
     -- even though the certificate itself is valid. NULL means unpinned.
     allowed_cidrs         text,
+    -- Model hashes currently held in memory, hash -> resident GB. Routing
+    -- prefers a node that already has the model, because E4 puts load at 1-3s
+    -- and putting that on an interactive request path is the difference between
+    -- a service and a curiosity.
+    resident_models       jsonb NOT NULL DEFAULT '{}'::jsonb,
     created_at            timestamptz NOT NULL DEFAULT now()
 );
 

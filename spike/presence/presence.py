@@ -144,6 +144,11 @@ SYSTEM_ASSERTION_PROCS = {
     "powerd", "sharingd", "backupd", "mds", "mds_stores", "mDNSResponder",
     "softwareupdated", "nsurlsessiond", "cloudd", "bird", "AppleIDAuthAgent",
     "UpdateBrainService", "corespeechd", "photoanalysisd", "AMPDeviceDiscoveryAgent",
+    # coreaudiod holds assertions for device *context*, not playback — e.g.
+    # "BuiltInSpeakerDevice.context.pre" was observed on an idle machine with no
+    # audio running. Actual media playback holds a display assertion instead,
+    # which is the signal that matters for presence.
+    "coreaudiod",
 }
 
 

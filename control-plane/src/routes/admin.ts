@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import type { Db } from '../lib/db.js'
 import { mayPauseNode, requireRole, userAuth } from '../lib/auth.js'
+import { POLICY, type PresenceState } from '../lib/policy.js'
 
 export function adminRoutes(db: Db): Router {
   const r = Router()
@@ -79,6 +80,139 @@ export function adminRoutes(db: Db): Router {
     await db.query(`INSERT INTO activity_log (node_id, event, detail) VALUES ($1,'node.paused',$2)`,
       [req.params.nodeId, JSON.stringify({ by: req.user!.id, until })])
     res.json(rows[0])
+  })
+
+  /**
+   * Fleet capacity, now and over the last 24 hours.
+   *
+   * Split by GPU and ANE because they are not interchangeable: GPU work is
+   * confined to LOCKED and ABSENT, while ANE work runs in every state. The
+   * overnight GPU swell as machines lock is the value proposition made visible,
+   * and the flat ANE band underneath it is the daytime capacity E5 bought.
+   *
+   * Capacity is memFrac of each node's Metal working set, not of installed RAM:
+   * Metal caps itself around 81% of unified memory.
+   */
+  r.get('/fleet/summary', async (_req, res) => {
+    const { rows: nodes } = await db.query(
+      `SELECT id, hostname, state, presence_state, metal_working_set_gb,
+              on_ac_power, thermal_ok
+         FROM nodes WHERE state <> 'pending'`,
+    )
+
+    let gpuGb = 0
+    let aneGb = 0
+    let eligible = 0
+    for (const n of nodes as any[]) {
+      const usable = n.state === 'active' && n.on_ac_power !== false && n.thermal_ok !== false
+      if (!usable || !n.presence_state) continue
+      const p = POLICY[n.presence_state as PresenceState]
+      if (!p) continue
+      const gb = Number(n.metal_working_set_gb ?? 0) * p.memFrac
+      if (p.gpu && p.dutyMax > 0) { gpuGb += gb; eligible += 1 }
+      if (p.ane) aneGb += gb
+    }
+
+    // Hourly buckets. A node counts toward GPU capacity in an hour if its
+    // sampled state permitted GPU work then, which is what "can I schedule
+    // tonight" actually depends on.
+    const { rows: series } = await db.query(
+      `SELECT date_trunc('hour', ps.at) AS hour,
+              ps.presence_state,
+              count(DISTINCT ps.node_id)::int AS nodes,
+              COALESCE(sum(DISTINCT n.metal_working_set_gb), 0) AS gb
+         FROM presence_samples ps
+         JOIN nodes n ON n.id = ps.node_id
+        WHERE ps.at > now() - interval '24 hours'
+        GROUP BY 1, 2
+        ORDER BY 1`,
+    )
+
+    const buckets = new Map<string, { hour: string; gpuGb: number; aneGb: number }>()
+    for (const row of series as any[]) {
+      const key = (row.hour as Date).toISOString()
+      const b = buckets.get(key) ?? { hour: key, gpuGb: 0, aneGb: 0 }
+      const p = POLICY[row.presence_state as PresenceState]
+      if (p) {
+        const gb = Number(row.gb) * p.memFrac
+        if (p.gpu && p.dutyMax > 0) b.gpuGb += gb
+        if (p.ane) b.aneGb += gb
+      }
+      buckets.set(key, b)
+    }
+
+    const { rows: queues } = await db.query(
+      `SELECT kind, state, count(*)::int AS n FROM work_units GROUP BY 1,2`)
+
+    res.json({
+      nodes: nodes.length,
+      eligibleForGpu: eligible,
+      gpuCapacityGb: Math.round(gpuGb * 10) / 10,
+      aneCapacityGb: Math.round(aneGb * 10) / 10,
+      series: [...buckets.values()].map((b) => ({
+        hour: b.hour,
+        gpuGb: Math.round(b.gpuGb * 10) / 10,
+        aneGb: Math.round(b.aneGb * 10) / 10,
+      })),
+      queues,
+    })
+  })
+
+  /**
+   * Per-node detail: the idle pattern and yield count a wrangler actually asks
+   * about. "Can I count on this box tonight" and "how often does it interrupt",
+   * the latter being the early warning that a policy is too aggressive.
+   */
+  r.get('/nodes/:nodeId/detail', async (req, res) => {
+    const nodeId = req.params.nodeId!
+    const { rows } = await db.query(
+      `SELECT id, hostname, chip, memory_gb, metal_working_set_gb, tier, state,
+              owner_user_id, presence_state, on_ac_power, thermal_ok,
+              last_heartbeat, capability_profiles, allowed_cidrs
+         FROM nodes WHERE id = $1`, [nodeId])
+    if (rows.length === 0) { res.status(404).json({ error: 'not_found' }); return }
+    const n = rows[0] as any
+
+    const { rows: pattern } = await db.query(
+      `SELECT EXTRACT(hour FROM at)::int AS hour, presence_state, count(*)::int AS n
+         FROM presence_samples WHERE node_id = $1 AND at > now() - interval '7 days'
+        GROUP BY 1,2 ORDER BY 1`, [nodeId])
+
+    const { rows: yields } = await db.query(
+      `SELECT count(*)::int AS n FROM activity_log
+        WHERE node_id = $1 AND event = 'work.result'
+          AND (detail->>'requeued')::int > 0
+          AND at > now() - interval '7 days'`, [nodeId])
+
+    const { rows: log } = await db.query(
+      `SELECT at, event, detail FROM activity_log
+        WHERE node_id = $1 ORDER BY at DESC LIMIT 50`, [nodeId])
+
+    const policy = n.presence_state ? POLICY[n.presence_state as PresenceState] : null
+
+    res.json({
+      id: n.id, hostname: n.hostname, chip: n.chip,
+      memoryGb: n.memory_gb === null ? null : Number(n.memory_gb),
+      metalWorkingSetGb: n.metal_working_set_gb === null ? null : Number(n.metal_working_set_gb),
+      tier: n.tier, state: n.state, ownerUserId: n.owner_user_id,
+      presenceState: n.presence_state, onAcPower: n.on_ac_power, thermalOk: n.thermal_ok,
+      lastHeartbeat: n.last_heartbeat, capabilityProfiles: n.capability_profiles,
+      allowedCidrs: n.allowed_cidrs,
+      // Headroom is what is takeable right now under policy, which is not the
+      // same as the machine's total memory.
+      headroomGb: policy
+        ? Math.round(Number(n.metal_working_set_gb ?? 0) * policy.memFrac * 10) / 10
+        : 0,
+      policy,
+      idlePattern: pattern,
+      yields7d: (yields[0] as any)?.n ?? 0,
+      // pg returns timestamptz as a Date. The schema declares strings, and a
+      // generated client would deserialize accordingly, so serialize here
+      // rather than letting JSON.stringify decide.
+      activity: (log as any[]).map((e) => ({
+        at: (e.at as Date).toISOString(), event: e.event, detail: e.detail,
+      })),
+    })
   })
 
   r.get('/pools', async (_req, res) => {

@@ -202,6 +202,43 @@ paths:
               schema: { $ref: '#/components/schemas/Node' }
         '403': { $ref: '#/components/responses/Forbidden' }
 
+  /admin/v1/fleet/summary:
+    get:
+      tags: [admin]
+      summary: Fleet capacity now and over the last 24 hours
+      description: |
+        Split by GPU and ANE because they are not interchangeable: GPU work is
+        confined to LOCKED and ABSENT while ANE work runs in every state. The
+        overnight GPU swell as machines lock is the value proposition made
+        visible; the flat ANE band underneath is daytime capacity.
+      responses:
+        '200':
+          description: Fleet summary
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FleetSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/v1/nodes/{nodeId}/detail:
+    get:
+      tags: [admin]
+      summary: Node detail, idle pattern, yields and activity log
+      parameters:
+        - name: nodeId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Node detail
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NodeDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /admin/v1/pools:
     get:
       tags: [admin]
@@ -450,6 +487,79 @@ components:
             leased: { type: integer }
             done: { type: integer }
             failed: { type: integer }
+
+    FleetSummary:
+      type: object
+      required: [nodes, eligibleForGpu, gpuCapacityGb, aneCapacityGb, series, queues]
+      properties:
+        nodes: { type: integer }
+        eligibleForGpu: { type: integer }
+        gpuCapacityGb: { type: number }
+        aneCapacityGb: { type: number }
+        series:
+          type: array
+          items:
+            type: object
+            required: [hour, gpuGb, aneGb]
+            properties:
+              hour: { type: string, format: date-time }
+              gpuGb: { type: number }
+              aneGb: { type: number }
+        queues:
+          type: array
+          items:
+            type: object
+            properties:
+              kind: { type: string }
+              state: { type: string }
+              n: { type: integer }
+
+    NodeDetail:
+      type: object
+      required: [id, hostname, state, headroomGb, idlePattern, yields7d, activity]
+      properties:
+        id: { type: string, format: uuid }
+        hostname: { type: string }
+        chip: { type: string, nullable: true }
+        memoryGb: { type: number, nullable: true }
+        metalWorkingSetGb: { type: number, nullable: true }
+        tier: { type: string }
+        state: { type: string }
+        ownerUserId: { type: string, nullable: true }
+        presenceState: { type: string, nullable: true }
+        onAcPower: { type: boolean, nullable: true }
+        thermalOk: { type: boolean, nullable: true }
+        lastHeartbeat: { type: string, nullable: true }
+        capabilityProfiles: { type: object, additionalProperties: { type: number } }
+        allowedCidrs: { type: string, nullable: true }
+        headroomGb:
+          type: number
+          description: What is takeable right now under policy, not total memory.
+        policy:
+          nullable: true
+          type: object
+          additionalProperties: true
+        idlePattern:
+          type: array
+          items:
+            type: object
+            properties:
+              hour: { type: integer }
+              presence_state: { type: string }
+              n: { type: integer }
+        yields7d:
+          type: integer
+          description: |
+            How often this node interrupted work in the last week. The early
+            warning that a policy is too aggressive for this machine.
+        activity:
+          type: array
+          items:
+            type: object
+            properties:
+              at: { type: string }
+              event: { type: string }
+              detail: { type: object, additionalProperties: true }
 
     Policy:
       type: object

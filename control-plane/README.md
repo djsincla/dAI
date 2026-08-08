@@ -36,6 +36,44 @@ incorrectly in exactly the places that matter.
 instead of a client certificate. It is off by default: a deployment that
 silently accepts a header as node identity has no authentication at all.
 
+## UI
+
+`/` redirects to the fleet view; `/docs` renders the API from the served
+contract; `/openapi.yaml` is that contract.
+
+No build step and no framework, so the UI runs anywhere the control plane runs
+and can be read without tooling. The API is the contract and this is one client
+of it, deliberately not the only possible one.
+
+The columns come from the spike rather than convention: **working set** rather
+than installed RAM, because Metal caps itself near 81% of unified memory;
+**headroom** rather than free memory, because what matters is what policy
+permits right now; **yields per week**, because that is the early warning a
+policy is too aggressive for a particular machine.
+
+The headline graph stacks ANE capacity under GPU capacity over 24 hours. The
+upper band appears only as machines lock, so its shape across a day is the
+argument for harvesting; the flat band beneath it is the daytime capacity the
+ANE path provides.
+
+```bash
+DATABASE_URL=postgres://dai:dai@localhost:5433/dai npx tsx scripts/seed-demo.mjs
+```
+
+Seeds two nodes with 24 hours of presence history so the graph has its real
+shape. It resets the database, so do not point it at anything that matters.
+
+## Surfaces
+
+The agent and admin APIs are separable at the listener, not only by path.
+Workers poll continuously and their dispatch must not stop because the
+human-facing side is restarting or being scaled independently.
+
+```bash
+PORT=8443 npm start                 # one process, both surfaces
+PORT=8443 AGENT_PORT=8444 npm start # worker API on its own listener
+```
+
 ## Network access control
 
 Two optional layers, both defence in depth and neither a substitute for

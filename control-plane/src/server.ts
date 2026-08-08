@@ -1,5 +1,6 @@
 import express, { type Express, type NextFunction, type Request, type Response } from 'express'
 import * as OpenApiValidator from 'express-openapi-validator'
+import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createPool, type Db } from './lib/db.js'
@@ -11,13 +12,25 @@ import { Acl, aclMiddleware, describeAcls } from './lib/netacl.js'
 const here = dirname(fileURLToPath(import.meta.url))
 export const OPENAPI_PATH = join(here, '..', 'openapi', 'dai.yaml')
 
+/** Browsable contract, rendered from the served document rather than a copy. */
+const DOCS_HTML = `<!doctype html>
+<html><head><meta charset="utf-8"><title>dAI control plane API</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{margin:0}</style></head>
+<body><rapi-doc spec-url="/openapi.yaml" render-style="read" theme="dark"
+  bg-color="#12151a" text-color="#e6e6e6" primary-color="#7cc4ff"
+  show-header="false" allow-try="false"></rapi-doc>
+<script type="module" src="/ui/vendor/rapidoc-min.js"></script></body></html>`
+
 /**
  * API first: the OpenAPI document is the source of truth and every request is
  * validated against it before a handler runs. The agent is Swift and this is
  * TypeScript, so the schema is the only artifact they share and the only place
  * a mismatch can be caught before deployment.
  */
-export function createApp(db: Db): Express {
+export type Surface = 'agent' | 'admin' | 'both'
+
+export function createApp(db: Db, surface: Surface = 'both'): Express {
   const app = express()
 
   // Off unless a proxy is actually in front. With this unset, req.ip is the
@@ -27,7 +40,24 @@ export function createApp(db: Db): Express {
 
   app.use(express.json({ limit: '32mb' }))
 
-  app.get('/healthz', (_req, res) => { res.json({ ok: true }) })
+  app.get('/healthz', (_req, res) => { res.json({ ok: true, surface }) })
+
+  // The control node serves the contract. Agents and generated clients fetch it
+  // from the authority rather than carrying a copy that can drift, and the
+  // version they fetched is the version the server validates against.
+  app.get('/openapi.yaml', (_req, res) => {
+    res.type('application/yaml').send(readFileSync(OPENAPI_PATH, 'utf8'))
+  })
+  app.get('/docs', (_req, res) => {
+    res.type('html').send(DOCS_HTML)
+  })
+
+  // Registered ahead of the validator: the UI is not part of the API contract,
+  // and the validator rejects paths the spec does not declare.
+  if (surface !== 'agent') {
+    app.get('/', (_req, res) => { res.redirect('/ui/') })
+    app.use('/ui', express.static(join(here, '..', 'ui')))
+  }
 
   app.use(
     OpenApiValidator.middleware({
@@ -37,7 +67,8 @@ export function createApp(db: Db): Express {
       // fail a build, not a production request that is otherwise fine.
       validateResponses: process.env.NODE_ENV !== 'production',
       validateSecurity: false, // handled per-surface; the two differ
-      ignorePaths: (p: string) => p === '/healthz',
+      ignorePaths: (p: string) => p === '/healthz' || p === '/openapi.yaml' || p === '/docs'
+        || p.startsWith('/ui'),
     }),
   )
 
@@ -47,8 +78,16 @@ export function createApp(db: Db): Express {
   const agentAcl = new Acl(process.env.DAI_AGENT_CIDRS)
   const adminAcl = new Acl(process.env.DAI_ADMIN_CIDRS)
 
-  app.use('/agent/v1', aclMiddleware(agentAcl, 'agent'), agentRoutes(db))
-  app.use('/admin/v1', aclMiddleware(adminAcl, 'admin'), adminRoutes(db))
+  // The two surfaces are separable at the listener, not only by path. Workers
+  // poll continuously and their dispatch must not stop because the human-facing
+  // side is restarting, misbehaving or being scaled independently. Running them
+  // as one process is the convenient default, not a requirement.
+  if (surface !== 'admin') {
+    app.use('/agent/v1', aclMiddleware(agentAcl, 'agent'), agentRoutes(db))
+  }
+  if (surface !== 'agent') {
+    app.use('/admin/v1', aclMiddleware(adminAcl, 'admin'), adminRoutes(db))
+  }
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status ?? 500
@@ -64,7 +103,6 @@ export function createApp(db: Db): Express {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const db = createPool()
-  const app = createApp(db)
   startReaper(db)
 
   for (const note of describeAcls(new Acl(process.env.DAI_AGENT_CIDRS),
@@ -72,15 +110,21 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.warn(note)
   }
 
-  const port = Number(process.env.PORT ?? 8443)
-  // TLS from the first deployment, including locally. A local plaintext start
-  // grows an unauthenticated dispatch endpoint that is hard to close later.
-  const { readFileSync, existsSync } = await import('node:fs')
+  const { existsSync } = await import('node:fs')
   const certPath = process.env.TLS_CERT ?? join(here, '..', 'certs', 'server.crt')
   const keyPath = process.env.TLS_KEY ?? join(here, '..', 'certs', 'server.key')
   const caPath = process.env.TLS_CA ?? join(here, '..', 'certs', 'ca.crt')
+  const tls = existsSync(certPath) && existsSync(keyPath)
 
-  if (existsSync(certPath) && existsSync(keyPath)) {
+  async function listen(surface: Surface, port: number) {
+    const app = createApp(db, surface)
+    if (!tls) {
+      // Local development only. A deployment that starts on plaintext grows an
+      // unauthenticated dispatch endpoint that is hard to close later.
+      app.listen(port, () =>
+        console.warn(`[${surface}] HTTP on :${port} (no TLS material at ${certPath})`))
+      return
+    }
     const https = await import('node:https')
     https
       .createServer(
@@ -88,19 +132,25 @@ if (import.meta.url === `file://${process.argv[1]}`) {
           cert: readFileSync(certPath),
           key: readFileSync(keyPath),
           ca: existsSync(caPath) ? readFileSync(caPath) : undefined,
-          // Nodes present certificates; humans do not, so a missing client cert
-          // is rejected by the agent surface rather than by TLS.
-          requestCert: true,
+          // Nodes present certificates; humans do not. A missing client cert is
+          // therefore rejected by the agent surface rather than by TLS itself.
+          requestCert: surface !== 'admin',
           rejectUnauthorized: false,
         },
         app,
       )
-      .listen(port, () => console.log(`dai control plane (mTLS) on https://localhost:${port}`))
+      .listen(port, () => console.log(`[${surface}] mTLS on https://localhost:${port}`))
+  }
+
+  // One process by default. Set AGENT_PORT to run the worker API on its own
+  // listener so it can be firewalled separately and kept up while the
+  // human-facing side restarts.
+  const port = Number(process.env.PORT ?? 8443)
+  const agentPort = process.env.AGENT_PORT ? Number(process.env.AGENT_PORT) : null
+  if (agentPort) {
+    await listen('admin', port)
+    await listen('agent', agentPort)
   } else {
-    console.warn(
-      `no TLS material at ${certPath}; starting HTTP. Run scripts/make-certs.sh before ` +
-        `anything but local development.`,
-    )
-    app.listen(port, () => console.log(`dai control plane (HTTP) on http://localhost:${port}`))
+    await listen('both', port)
   }
 }

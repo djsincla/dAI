@@ -181,21 +181,39 @@ class Handler(BaseHTTPRequestHandler):
 
         if self.path == "/result":
             worker_id = payload["worker"]
+            # A harvest worker that yields mid-unit returns what it did not
+            # reach. Requeuing at the head keeps those items near the front so a
+            # partially-served unit is not stranded behind the whole backlog.
+            # Without this a yield would cost the entire batch, which is exactly
+            # the expense E4's economics exist to avoid.
+            unfinished = payload.get("unfinished") or []
             with STATE["lock"]:
                 STATE["in_flight"].pop(payload["unit_id"], None)
                 STATE["done"].append(payload)
+                if unfinished:
+                    STATE["units"][:0] = unfinished
+                    STATE["requeued"] = STATE.get("requeued", 0) + len(unfinished)
                 w = STATE["workers"].setdefault(
-                    worker_id, {"units": 0, "items": 0, "seconds": 0.0, "machine": payload.get("machine")})
+                    worker_id, {"units": 0, "items": 0, "seconds": 0.0,
+                                "yields": 0, "machine": payload.get("machine")})
                 w["units"] += 1
                 w["items"] += payload["count"]
                 w["seconds"] += payload["seconds"]
+                if unfinished:
+                    w["yields"] = w.get("yields", 0) + 1
                 # Throughput is observed, never declared. This is the running
                 # capability probe the Phase 1 scheduler needs.
-                w["throughput"] = w["items"] / w["seconds"] if w["seconds"] else None
+                # Only update the capability estimate from units that actually
+                # completed work. A yield with zero items done would otherwise
+                # register as zero throughput and poison the node's profile.
+                if w["items"] > 0 and w["seconds"] > 0:
+                    w["throughput"] = w["items"] / w["seconds"]
                 remaining = len(STATE["units"])
+            rate = payload["count"] / payload["seconds"] if payload["seconds"] else 0
+            tag = f"  YIELD +{len(unfinished)} requeued" if unfinished else ""
             print(f"  {worker_id:<22} {payload['count']:>3} items in "
-                  f"{payload['seconds']:>6.2f}s  ({payload['count']/payload['seconds']:>5.2f}/s)"
-                  f"   {remaining} left", flush=True)
+                  f"{payload['seconds']:>6.2f}s  ({rate:>5.2f}/s)"
+                  f"   {remaining} left{tag}", flush=True)
             return self._send({"ok": True})
 
         self._send({"error": "not found"}, 404)
@@ -209,6 +227,7 @@ def summary():
             "machine": w.get("machine"),
             "units": w["units"],
             "items": w["items"],
+            "yields": w.get("yields", 0),
             "busy_s": round(w["seconds"], 2),
             "throughput_items_s": round(w["throughput"], 3) if w.get("throughput") else None,
         }
@@ -229,6 +248,7 @@ def summary():
         "elapsed_s": round(elapsed, 2),
         "items_done": total_items,
         "items_remaining": len(STATE["units"]),
+        "items_requeued": STATE.get("requeued", 0),
         "aggregate_items_s": round(aggregate, 3),
         "sum_of_solo_rates": round(ideal, 3) if ideal else None,
         "scaling_efficiency": round(aggregate / ideal, 3) if ideal else None,

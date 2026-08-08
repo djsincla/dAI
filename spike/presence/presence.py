@@ -76,10 +76,23 @@ POLICY = {
     "ACTIVE":  {"gpu": False, "ane": True,  "qos": "background", "duty_max": 0.00, "mem_frac": 0.00},
     "PASSIVE": {"gpu": False, "ane": True,  "qos": "background", "duty_max": 0.00, "mem_frac": 0.15},
     # No input for ACTIVE_IDLE_THRESHOLD and nothing holding the display awake.
-    # GPU work is allowed at the gentlest measured setting only: the screen is
-    # still on and the user may be reading, and E4 puts yield at ~20ms plus the
-    # poll interval, so a return is absorbed quickly.
-    "IDLE":    {"gpu": True,  "ane": True,  "qos": "background", "duty_max": 0.25, "mem_frac": 0.35},
+    #
+    # GPU work was permitted here at background QoS / duty 0.25, the gentlest
+    # setting E2 measured. Removed, for two reasons that compound:
+    #
+    #   E2 found even that setting costs 46% of viewport p95 — the screen is
+    #   still on and the user may be reading rather than typing.
+    #
+    #   Background QoS costs ~26x on the short bursty items a harvest worker
+    #   actually runs (0.136s -> 3.528s measured), not the ~2.4x E1 saw on a
+    #   sustained matmul stream. macOS deschedules the process between GPU
+    #   submissions, so fine-grained work is punished far harder than a
+    #   continuous one. Stacking that with duty 0.25 made IDLE throughput
+    #   negligible while still being visible to a user.
+    #
+    # So IDLE is ANE-only like the states above it. GPU harvesting starts at
+    # LOCKED, where standard QoS applies and neither penalty exists.
+    "IDLE":    {"gpu": False, "ane": True,  "qos": "background", "duty_max": 0.00, "mem_frac": 0.35},
     # Nobody can see the screen. Full occupancy, and promote QoS for the ~2.4x
     # throughput E1 measured.
     "LOCKED":  {"gpu": True,  "ane": True,  "qos": "standard",   "duty_max": 1.00, "mem_frac": 0.70},
@@ -223,13 +236,18 @@ def effective_policy(state, sig):
     if not sig["thermal_ok"]:
         policy.update(gpu=False, duty_max=0.0, mem_frac=0.0)
         reasons.append("thermal pressure")
-    if sig["busy_assertions"]:
-        # A render or long job is running even though nobody is typing. Not a
-        # presence signal, but competing with it wastes both workloads.
-        policy["mem_frac"] = min(policy["mem_frac"], 0.15)
-        policy["duty_max"] = 0.0
-        policy["gpu"] = False
-        reasons.append(f"machine busy ({len(sig['busy_assertions'])} assertion/s)")
+    # PreventUserIdleSystemSleep is deliberately NOT a gate.
+    #
+    # An earlier version blocked GPU work whenever any such assertion was held,
+    # on the theory that a render or long job was running. In practice the
+    # assertion means only "do not sleep": Safari, coreaudiod, music players,
+    # downloads and `caffeinate` all hold it more or less permanently. Gating on
+    # it blocked harvesting entirely on a normally-used machine — the same
+    # failure as the earlier sharingd/Handoff bug, one layer down.
+    #
+    # It carries no information about GPU contention, so it does not belong in
+    # the policy. A genuine contention signal would have to measure utilisation.
+    # The signal is still surfaced for observability.
     policy["blocked_by"] = reasons
     return policy
 

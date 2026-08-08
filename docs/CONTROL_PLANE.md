@@ -151,10 +151,81 @@ Every node's activity log - what ran, when, how much memory, when it yielded -
 is readable by its owner regardless of role bindings. Without it, every unrelated
 slowdown gets blamed on the agent and there is no way to disprove it.
 
+## 4a. Node security
+
+### Threat model
+
+| Threat | Consequence | Control |
+|---|---|---|
+| Rogue node joins the fleet | Sees work sent to it; data exfiltration | Enrollment approval, per-node certificate |
+| Node certificate copied to another machine | Impersonation, work redirected | Secure Enclave key binding, short-lived certs |
+| **Rogue control plane** | **Arbitrary work dispatched to every Mac in the building** | **mTLS both directions, pinned CA** |
+| Work or results tampered in transit | Corrupted output, poisoned capability data | TLS, signed work units |
+
+The third row is the one that matters most and it is the one certificates alone
+do not solve. A node that authenticates *itself* but does not verify *the server*
+will accept work from anything that can reach it on the network. Since a work
+unit tells a node what to execute, that is remote code execution across the
+fleet. **Authentication has to be mutual, and the node has to pin the CA.**
+
+### Certificates
+
+- Issued at enrollment **approval**, never on token presentation. A joining node
+  lands in `pending` with its hardware fingerprint and receives nothing until an
+  admin promotes it.
+- **Private keys generated on-device and stored in the Secure Enclave**, marked
+  non-exportable. A certificate copied off the disk is then useless without the
+  hardware that holds the key, which is what turns "stole a file" into "stole the
+  machine".
+- **Short-lived, automatically rotated.** Long-lived credentials on laptops that
+  leave the building are the wrong default. Rotation failure should degrade to
+  "stops getting work", not "keeps working forever".
+- **Revocation is immediate and checked on every lease**, not cached. A stolen
+  laptop must stop receiving work the moment it is reported, and node identity is
+  cheap to check because the agent is already talking to the control plane.
+
+### Work units must not be able to carry code
+
+This is the containment that matters if the control plane is ever compromised. A
+work unit references a model by **content hash** from a signed catalogue and
+carries **data only**. It cannot name an interpreter, a path, or a shell command.
+
+The blast radius of a compromised control plane then becomes "runs an approved
+model over attacker-supplied data" rather than "executes arbitrary code as the
+logged-in user on every Mac in the building". That is a large difference and it
+costs nothing to design in now, whereas retrofitting it means changing the
+protocol after agents are deployed.
+
+Models are verified by hash before load. A catalogue entry that does not match
+its hash is refused, so a compromised model store cannot substitute weights.
+
+### TLS everywhere, including locally
+
+The agent talks to a configured endpoint over TLS from the first deployment, even
+when that endpoint is on the same machine. A local deployment that starts on
+plaintext HTTP grows an unauthenticated agent API that is then hard to close, and
+"we will add TLS later" is how the fleet ends up with a permanently open
+dispatch endpoint.
+
+### What the owner keeps regardless
+
+None of the above can be used to override the local pause control (§4). The
+agent's menu bar stop must work with the control plane unreachable, with an
+expired certificate, and against an admin who wants the machine working. A
+security model that lets the fleet operator overrule the machine's owner is the
+one that ends the programme.
+
 ## 5. Agent API
 
 Separate surface from the human API: different auth (mTLS vs session), different
 rate limits, different availability requirements.
+
+**API first.** The OpenAPI document is the source of truth, not a description
+written after the fact. Server handlers, the TypeScript client, and the Swift
+agent client are all generated from it, and the contract tests in §8 run against
+the schema. That matters more than usual here because the two ends are written in
+different languages by different toolchains: the schema is the only artifact they
+share, so it is the only place a mismatch can be caught before deployment.
 
 ```
 POST /agent/v1/enroll                 join token  -> pending node

@@ -1,5 +1,5 @@
-# Python
-.venv/
+# Python — .venv (3.14, MLX) and .venv-coreml (3.12, coremltools)
+.venv*/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -25,3 +25,8 @@ xcuserdata/
 
 # macOS
 .DS_Store
+
+# Core ML build artifacts (regenerable via e5_ane/build_model.py)
+*.mlpackage/
+*.mlmodelc/
+spike/e5_ane/results*/

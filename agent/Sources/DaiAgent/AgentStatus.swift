@@ -28,6 +28,14 @@ public struct AgentStatus: Codable, Sendable, Equatable {
     /// capable of.
     public var permitted: [String]
     public var activity: String
+    /// What the current work actually is, and where it came from.
+    ///
+    /// "embed" describes a compute unit, not a purpose. Somebody looking at
+    /// their own machine deserves to know whether it is indexing the document
+    /// archive or running somebody's load test, and those should not look the
+    /// same.
+    public var jobLabel: String?
+    public var jobSource: String?
     public var controlPlaneReachable: Bool
 
     /// Cumulative, and the point of the whole panel.
@@ -45,6 +53,7 @@ public struct AgentStatus: Codable, Sendable, Equatable {
                 paused: Bool = false, pauseReason: String? = nil,
                 pausedByFleet: Bool = false,
                 permitted: [String] = [], activity: String = "starting",
+                jobLabel: String? = nil, jobSource: String? = nil,
                 controlPlaneReachable: Bool = false,
                 itemsCompleted: Int = 0, unitsCompleted: Int = 0, yields: Int = 0,
                 residentGb: Double = 0, lastYield: Date? = nil) {
@@ -55,6 +64,8 @@ public struct AgentStatus: Codable, Sendable, Equatable {
         self.pausedByFleet = pausedByFleet
         self.permitted = permitted
         self.activity = activity
+        self.jobLabel = jobLabel
+        self.jobSource = jobSource
         self.controlPlaneReachable = controlPlaneReachable
         self.itemsCompleted = itemsCompleted
         self.unitsCompleted = unitsCompleted

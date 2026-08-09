@@ -34,7 +34,11 @@ for (let h = 23; h >= 0; h--) {
       VALUES ($1, now() - ($2||' hours')::interval, $3, true) ON CONFLICT DO NOTHING`, [id, h, st])
   }
 }
-const job = await db.query(`INSERT INTO jobs (pool_id,kind) VALUES ($1,'embed') RETURNING id`,[pool.rows[0].id])
+// Labelled as fabricated, like the demo machines. Seed work that looks like
+// real work makes every figure derived from it quietly wrong.
+const job = await db.query(
+  `INSERT INTO jobs (pool_id,kind,label,source) VALUES ($1,'embed',$2,'demo-seed') RETURNING id`,
+  [pool.rows[0].id, 'Example corpus index (demo data)'])
 for (let i=0;i<6;i++) await db.query(
   `INSERT INTO work_units (job_id,kind,payload,position) VALUES ($1,'embed',$2,$3)`,
   [job.rows[0].id, JSON.stringify([{id:i}]), i*1000])

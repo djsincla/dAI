@@ -270,6 +270,44 @@ describe('work dispatch over HTTP', () => {
 })
 
 describe('authorization', () => {
+  it('records what work is and where it came from, and lists it', async () => {
+    // A fleet view that can say a machine is busy but not what with is not an
+    // answer for an operator, and is a worse one for the person whose machine
+    // is running it. Synthetic work especially has to be visible as synthetic,
+    // or its throughput reads as real activity.
+    const r = await fetch(`${base}/admin/v1/jobs`, {
+      method: 'POST', headers: asUser(fx.operatorId),
+      body: JSON.stringify({
+        poolId: fx.poolId, kind: 'embed', batchSize: 2,
+        label: 'Nightly corpus reindex', source: 'test-harness',
+        items: [{ id: 1 }, { id: 2 }, { id: 3 }],
+      }),
+    })
+    expect(r.status).toBe(201)
+    const created = await r.json() as any
+    expect(created.label).toBe('Nightly corpus reindex')
+    expect(created.source).toBe('test-harness')
+    // Taken from the authenticated session, not from anything the caller says.
+    expect(created.submittedBy).toBeTruthy()
+
+    const list = await (await fetch(`${base}/admin/v1/jobs`,
+      { headers: asUser(fx.operatorId) })).json() as any[]
+    const found = list.find((j) => j.id === created.id)
+    expect(found.label).toBe('Nightly corpus reindex')
+    expect(found.source).toBe('test-harness')
+
+    // And it reaches the node, so the machine's owner can be told something
+    // more useful than "embed".
+    await fetch(`${base}/agent/v1/heartbeat`, {
+      method: 'POST', headers: asNode(fx.fingerprint),
+      body: JSON.stringify({ presenceState: 'LOCKED', onACPower: true, thermalOk: true }),
+    })
+    const lease = await (await fetch(`${base}/agent/v1/work?kinds=embed`,
+      { headers: asNode(fx.fingerprint) })).json() as any
+    expect(lease.jobLabel).toBe('Nightly corpus reindex')
+    expect(lease.jobSource).toBe('test-harness')
+  })
+
   it('requires operator on the pool to submit a job', async () => {
     const r = await fetch(`${base}/admin/v1/jobs`, {
       method: 'POST',

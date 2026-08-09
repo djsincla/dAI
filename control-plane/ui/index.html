@@ -65,6 +65,26 @@
     <div class="panel-head"><h2>Queues</h2></div>
     <div id="queues" class="queues"></div>
   </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Work</h2></div>
+    <div class="table-wrap">
+      <table id="jobs">
+        <thead>
+          <tr>
+            <th>What</th>
+            <th>Kind</th>
+            <th title="Claimed by whoever submitted it. Synthetic work must say so.">Source</th>
+            <th>Submitted by</th>
+            <th class="num">Progress</th>
+            <th>State</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <p id="jobs-empty" class="empty">Nothing has been submitted yet.</p>
+    </div>
+  </section>
 </main>
 
 <div id="drawer" class="drawer" hidden>

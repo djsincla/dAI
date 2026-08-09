@@ -142,3 +142,12 @@ button:hover { border-color: var(--muted); }
   border-color: #55557a;
 }
 .muted { color: #8b8ba7; font-size: 0.85em; }
+
+/* Synthetic work, marked so it cannot be read as real activity. Amber rather
+   than red: a load test is not an error, it just must not be mistaken for the
+   studio's actual workload. */
+.pill.synthetic {
+  background: #4a3a1e;
+  color: #f0d090;
+  border-color: #6b5426;
+}

@@ -42,3 +42,8 @@ agent/.build/
 # packaging build products
 agent/packaging/.staging/
 agent/packaging/dist/
+
+# xcodebuild derived data (the GPU-capable build lives here)
+agent/.xcbuild/
+# profiling output, from before coverage was disabled in the build
+*.profraw

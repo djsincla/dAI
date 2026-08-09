@@ -58,12 +58,24 @@ if ! security find-identity -v -p codesigning | grep -qF "$APP_ID"; then
 fi
 
 echo "==> building release"
-(cd "$ROOT" && swift build -c release)
+# xcodebuild rather than swift build: SwiftPM's command line cannot compile
+# MLX's Metal shaders, so a package built that way ships a binary that aborts on
+# the first GPU work unit.
+# Coverage off explicitly. The SwiftPM-generated scheme leaves profiling
+# instrumentation in a Release build, and the shipped binary then tries to write
+# default.profraw next to wherever it is running. As a daemon under a service
+# account that is a permission error on every start, for a file nobody wants.
+(cd "$ROOT" && xcodebuild build -scheme dai-agent -destination 'platform=OS X' \
+   -configuration Release -derivedDataPath .xcbuild \
+   ENABLE_CODE_COVERAGE=NO CLANG_ENABLE_CODE_COVERAGE=NO SWIFT_ENABLE_CODE_COVERAGE=NO)
 
 echo "==> staging"
 rm -rf "$STAGING" && mkdir -p "$STAGING/usr/local/libexec/dai"
-cp "$ROOT/.build/release/dai-agent" "$STAGING/usr/local/libexec/dai/"
-for bundle in "$ROOT"/.build/release/*.bundle; do
+PRODUCTS="$ROOT/.xcbuild/Build/Products/Release"
+cp "$PRODUCTS/dai-agent" "$STAGING/usr/local/libexec/dai/"
+# Includes mlx-swift_Cmlx.bundle, which carries the Metal shader library. Ship
+# the binary without it and GPU work aborts at runtime.
+for bundle in "$PRODUCTS"/*.bundle; do
   [[ -e "$bundle" ]] && cp -R "$bundle" "$STAGING/usr/local/libexec/dai/"
 done
 cp "$HERE/com.dai.agent.plist.in" "$HERE/install.sh" "$HERE/uninstall.sh" \

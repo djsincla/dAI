@@ -314,6 +314,44 @@ case "lease-probe":
         await cp.shutdown()
     } catch { print("lease probe failed: \(error)"); exit(1) }
 
+case "serve":
+    // Holds the reverse channel open for interactive requests, alongside the
+    // batch loop rather than inside it: a conversation must not wait for a
+    // batch unit to finish, and folding them together would make interactive
+    // latency depend on the batch size.
+    guard args.count > 3 else {
+        print("usage: dai-agent serve <url> <model-id> [seconds]"); exit(2)
+    }
+    do {
+        let dir = Enroll.identityDir()
+        let identity = try NodeIdentity.load(
+            certificate: dir.appendingPathComponent("node.crt"),
+            enclaveKey: Enroll.keyPath(dir))
+        let ca = try String(contentsOf: dir.appendingPathComponent("ca.crt"), encoding: .utf8)
+        let cp = try ControlPlane(base: URL(string: args[2])!, identity: identity, serverCAPEM: ca)
+
+        guard MLXProbe.isAvailable() else {
+            print("no GPU runtime: this node cannot serve completions."); exit(1)
+        }
+        let channel = ReverseChannel(controlPlane: cp, gpu: MLXRuntime(modelId: args[3]),
+                                     promoteAfter: ProcessInfo.processInfo
+                                        .environment["DAI_PROMOTE_SECONDS"]
+                                        .flatMap(Double.init) ?? idlePromoteSeconds)
+        if let served = try? await cp.fetchPolicy() {
+            await channel.setPolicy(mergePolicy(local: defaultPolicy, served: served))
+        }
+        if let me = try? await cp.whoami() {
+            await channel.setCluster(me.isCluster)
+            print("serving as \(me.hostname) (\(me.tier) tier)"
+                + (me.isCluster
+                   ? ": never preempted, so presence does not gate this node"
+                   : ": harvested, so this node only serves when nobody is using it"))
+        }
+        let seconds = args.count > 4 ? Double(args[4]) ?? .infinity : .infinity
+        await channel.run(maxSeconds: seconds)
+        await cp.shutdown()
+    } catch { print("serve failed: \(error)"); exit(1) }
+
 case "qos":
     // Demonstrates the control that E1 measured at 2.4x on sustained work and
     // the worker at ~26x on bursty work.
@@ -321,6 +359,6 @@ case "qos":
     print("leave background: \(ProcessQoS.setBackground(false))")
 
 default:
-    print("usage: dai-agent [pause|resume|preflight|presence|verify-ane <model>|generate|enroll|status|timing|lease-probe|work|qos]")
+    print("usage: dai-agent [pause|resume|preflight|presence|verify-ane <model>|generate|enroll|status|timing|lease-probe|work|serve|qos]")
     exit(2)
 }

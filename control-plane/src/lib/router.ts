@@ -18,6 +18,8 @@ import { POLICY, type PresenceState, type WorkKind } from './policy.js'
 export interface Candidate {
   id: string
   hostname: string
+  /// Cluster nodes are never preempted, so they are not presence-gated.
+  tier?: 'harvest' | 'cluster'
   presence_state: PresenceState | null
   resident_models: Record<string, number>
   capability_profiles: Record<string, number>
@@ -64,7 +66,19 @@ export function selectNode(
     return { refused: 'no-nodes', detail: 'no active nodes are connected' }
   }
 
-  const eligible = candidates.filter((c) => permits(c.presence_state, kind))
+  // Cluster nodes are not presence-gated.
+  //
+  // The gate exists to keep work off a machine somebody is using, and a cluster
+  // node is a dedicated box with nobody at it: its whole definition is that it
+  // is never preempted. Applying presence there would make an interactive
+  // session depend on whether anyone had touched a keyboard attached to a
+  // server, which is not a question with a useful answer.
+  //
+  // This is also the only way interactive serving works at all. A conversation
+  // needs a model that is still resident a minute from now, and the harvest
+  // tier cannot promise that by design.
+  const eligible = candidates.filter(
+    (c) => c.tier === 'cluster' || permits(c.presence_state, kind))
   if (eligible.length === 0) {
     const anyPresent = candidates.some((c) => c.presence_state !== null)
     return GPU_KINDS.includes(kind)
@@ -72,7 +86,8 @@ export function selectNode(
           refused: 'all-in-use',
           detail: anyPresent
             ? 'every node has a user present; GPU work runs only when a machine ' +
-              'is locked or logged out'
+              'is locked or logged out. Interactive serving needs a cluster-tier ' +
+              'node, which is never preempted.'
             : 'no node has reported presence recently',
         }
       : { refused: 'no-capacity-for-kind', detail: `no node can currently run ${kind}` }
@@ -104,15 +119,17 @@ export function isRefusal(x: Candidate | Refusal): x is Refusal {
 /** Nodes that could plausibly take an interactive request right now. */
 export async function candidatesFor(db: Db, inFlight: Map<string, number>): Promise<Candidate[]> {
   const { rows } = await db.query(
-    `SELECT id, hostname, presence_state, resident_models, capability_profiles
+    `SELECT id, hostname, tier, presence_state, resident_models, capability_profiles
        FROM nodes
       WHERE state = 'active'
+        AND NOT user_paused
         AND (paused_until IS NULL OR paused_until < now())
         AND last_heartbeat > now() - interval '2 minutes'`,
   )
   return (rows as any[]).map((n) => ({
     id: n.id,
     hostname: n.hostname,
+    tier: n.tier as 'harvest' | 'cluster',
     presence_state: n.presence_state,
     resident_models: n.resident_models ?? {},
     capability_profiles: n.capability_profiles ?? {},

@@ -106,8 +106,12 @@ export function agentAuth(db: Db) {
 /** Session auth. A real deployment swaps this for OIDC against the IdP. */
 export function userAuth(db: Db) {
   return async (req: Request, res: Response, next: NextFunction) => {
+    // x-api-key as well as Bearer, because that is the header every Anthropic
+    // client sends and the serving surface exists to be pointed at by tools
+    // people already use. Same credential either way.
     const header = req.header('authorization')
-    const token = header?.startsWith('Bearer ') ? header.slice(7) : null
+    const token = header?.startsWith('Bearer ') ? header.slice(7)
+      : req.header('x-api-key') ?? null
     if (!token) {
       res.status(401).json({ error: 'unauthorized', detail: 'no session' })
       return

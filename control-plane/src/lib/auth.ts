@@ -13,6 +13,10 @@ export interface NodeIdentity {
   state: string
   presence_state: string | null
   paused_until: Date | null
+  // Carried on the identity because the scheduler checks it on every lease. A
+  // machine whose owner has paused it must be refused work on the same request
+  // that authenticates it, not on a later lookup somebody can forget to make.
+  user_paused: boolean
   owner_user_id: string | null
 }
 
@@ -66,8 +70,8 @@ export function agentAuth(db: Db) {
       return
     }
     const { rows } = await db.query(
-      `SELECT id, hostname, state, presence_state, paused_until, owner_user_id,
-              revoked_at, cert_not_after
+      `SELECT id, hostname, state, presence_state, paused_until, user_paused,
+              owner_user_id, revoked_at, cert_not_after
          FROM nodes WHERE cert_fingerprint = $1`,
       [fingerprint],
     )

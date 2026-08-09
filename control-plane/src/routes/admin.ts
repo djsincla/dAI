@@ -11,7 +11,8 @@ export function adminRoutes(db: Db, ca: Ca): Router {
   r.get('/nodes', async (_req, res) => {
     const { rows } = await db.query(
       `SELECT id, hostname, chip, memory_gb, metal_working_set_gb, tier, state,
-              owner_user_id, presence_state, last_heartbeat, capability_profiles
+              owner_user_id, presence_state, last_heartbeat, capability_profiles,
+              user_paused, user_paused_at
          FROM nodes ORDER BY hostname`,
     )
     res.json(rows.map((n) => ({
@@ -24,6 +25,8 @@ export function adminRoutes(db: Db, ca: Ca): Router {
       state: n.state,
       ownerUserId: n.owner_user_id,
       presenceState: n.presence_state,
+      userPaused: n.user_paused ?? false,
+      userPausedAt: n.user_paused_at ? new Date(n.user_paused_at).toISOString() : null,
       lastHeartbeat: n.last_heartbeat,
       capabilityProfiles: n.capability_profiles,
     })))
@@ -115,7 +118,7 @@ export function adminRoutes(db: Db, ca: Ca): Router {
    */
   r.get('/fleet/summary', async (_req, res) => {
     const { rows: nodes } = await db.query(
-      `SELECT id, hostname, state, presence_state, metal_working_set_gb,
+      `SELECT id, hostname, state, presence_state, metal_working_set_gb, user_paused,
               on_ac_power, thermal_ok
          FROM nodes WHERE state <> 'pending'`,
     )
@@ -125,7 +128,10 @@ export function adminRoutes(db: Db, ca: Ca): Router {
     let eligible = 0
     for (const n of nodes as any[]) {
       const usable = n.state === 'active' && n.on_ac_power !== false && n.thermal_ok !== false
-      if (!usable || !n.presence_state) continue
+      // A paused machine is not capacity. Counting it would overstate the
+      // fleet by exactly the machines whose owners have opted out, which is the
+      // number most worth being honest about.
+      if (!usable || !n.presence_state || n.user_paused) continue
       const p = POLICY[n.presence_state as PresenceState]
       if (!p) continue
       const gb = Number(n.metal_working_set_gb ?? 0) * p.memFrac
@@ -188,7 +194,8 @@ export function adminRoutes(db: Db, ca: Ca): Router {
     const { rows } = await db.query(
       `SELECT id, hostname, chip, memory_gb, metal_working_set_gb, tier, state,
               owner_user_id, presence_state, on_ac_power, thermal_ok,
-              last_heartbeat, capability_profiles, allowed_cidrs
+              last_heartbeat, capability_profiles, allowed_cidrs,
+              user_paused, user_paused_at
          FROM nodes WHERE id = $1`, [nodeId])
     if (rows.length === 0) { res.status(404).json({ error: 'not_found' }); return }
     const n = rows[0] as any
@@ -215,7 +222,10 @@ export function adminRoutes(db: Db, ca: Ca): Router {
       memoryGb: n.memory_gb === null ? null : Number(n.memory_gb),
       metalWorkingSetGb: n.metal_working_set_gb === null ? null : Number(n.metal_working_set_gb),
       tier: n.tier, state: n.state, ownerUserId: n.owner_user_id,
-      presenceState: n.presence_state, onAcPower: n.on_ac_power, thermalOk: n.thermal_ok,
+      presenceState: n.presence_state,
+      userPaused: n.user_paused ?? false,
+      userPausedAt: n.user_paused_at ? new Date(n.user_paused_at).toISOString() : null,
+      onAcPower: n.on_ac_power, thermalOk: n.thermal_ok,
       lastHeartbeat: n.last_heartbeat, capabilityProfiles: n.capability_profiles,
       allowedCidrs: n.allowed_cidrs,
       // Headroom is what is takeable right now under policy, which is not the

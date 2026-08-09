@@ -29,6 +29,7 @@ public actor Worker {
     private let controlPlane: ControlPlane
     private let source: SignalSource
     private let monitor: PresenceMonitor
+    private let pauseSwitch: PauseSwitch
     /// Optional because a machine can be a useful fleet member without a
     /// working GPU runtime. MLX needs a Metal shader library built by a
     /// toolchain that is a separate Xcode download, and a machine missing it
@@ -48,6 +49,8 @@ public actor Worker {
     /// rather than every poll.
     private var lastKinds: [WorkKind]?
     private var lastReason: String?
+    private var wasPaused = false
+    private var status = AgentStatus()
 
     public struct Stats: Sendable {
         public var items = 0
@@ -63,6 +66,7 @@ public actor Worker {
         self.controlPlane = controlPlane
         self.source = source
         self.monitor = PresenceMonitor(promoteAfter: promoteAfter)
+        self.pauseSwitch = PauseSwitch()
         self.gpu = gpu
         self.ane = ane
     }
@@ -115,12 +119,14 @@ public actor Worker {
         let now = Date().timeIntervalSince1970
         guard now - lastHeartbeat >= 30 else { return }
         lastHeartbeat = now
+        let paused = pauseSwitch.read().paused
         do {
-            log("heartbeat: \(reading.state.rawValue)")
+            log("heartbeat: \(reading.state.rawValue)\(paused ? " (user paused)" : "")")
             try await controlPlane.heartbeat(
                 state: reading.state,
                 onACPower: reading.signals.onACPower,
                 thermalOK: reading.signals.thermalOK,
+                userPaused: paused,
                 capability: capability,
                 residentModels: await residentModels())
         } catch {
@@ -128,6 +134,26 @@ public actor Worker {
             // the agent will do, so a failed heartbeat is simply dropped.
             log("heartbeat failed: \(error)")
         }
+    }
+
+    /// Publish what the machine's owner should be able to see.
+    ///
+    /// Called on every loop rather than on change, so a stale file means the
+    /// daemon stopped rather than that nothing is happening. Those look
+    /// identical in the menu bar otherwise, and mean opposite things.
+    private func publish(_ reading: PresenceMonitor.Reading, permitted: [WorkKind],
+                         activity: String, pause: PauseSwitch.State) async {
+        status.updated = Date()
+        status.presenceState = reading.state.rawValue
+        status.paused = pause.paused
+        status.pauseReason = pause.reason
+        status.permitted = permitted.map(\.rawValue)
+        status.activity = activity
+        status.itemsCompleted = stats.items
+        status.unitsCompleted = stats.units
+        status.yields = stats.yields
+        status.residentGb = await (gpu?.isLoaded ?? false) ? (await gpu?.residentGb ?? 0) : 0
+        status.write()
     }
 
     private func log(_ message: String) {
@@ -142,6 +168,7 @@ public actor Worker {
         do {
             let served = try await controlPlane.fetchPolicy()
             policy = mergePolicy(local: defaultPolicy, served: served)
+            status.controlPlaneReachable = true
             log("policy merged with control plane (stricter of the two wins)")
         } catch {
             // The local table is the conservative one, so starting on it is
@@ -154,6 +181,37 @@ public actor Worker {
             let reading = presence()
             let statePolicy = policy[reading.state] ?? reading.policy
             await syncIfDue(reading)
+
+            // Checked here, before anything else, and locally: the machine
+            // owner's pause has to work with the control plane unreachable.
+            // Waiting for the server to agree would make the button fail in
+            // exactly the situation where someone is reaching for it.
+            let pause = pauseSwitch.read()
+            await publish(reading, permitted: pause.paused ? [] : availableKinds(statePolicy),
+                          activity: pause.paused ? "paused by you" : "waiting", pause: pause)
+            if pause.paused {
+                if !wasPaused {
+                    wasPaused = true
+                    lastKinds = nil
+                    log("PAUSED by the machine owner"
+                        + (pause.reason.map { ": \($0)" } ?? "")
+                        + "; releasing everything and standing down")
+                    if let gpu, await gpu.isLoaded { _ = await gpu.unload() }
+                    // Reported immediately rather than at the next heartbeat, so
+                    // the fleet view stops offering this machine within seconds
+                    // of someone asking it to stop.
+                    lastHeartbeat = 0
+                    await syncIfDue(reading)
+                }
+                try? await Task.sleep(for: .seconds(monitor.pollInterval))
+                continue
+            }
+            if wasPaused {
+                wasPaused = false
+                lastHeartbeat = 0
+                log("resumed by the machine owner")
+                await syncIfDue(reading)
+            }
 
             let kinds = availableKinds(statePolicy)
             // The single most useful line in this log. Without it, a node doing
@@ -251,6 +309,7 @@ public actor Worker {
             guard availableKinds(current).contains(lease.kind) else {
                 let unfinished = Array(lease.items[index...])
                 stats.yields += 1
+                status.lastYield = Date()
                 log("YIELD -> \(now.state.rawValue); \(completed.count) done, "
                     + "\(unfinished.count) returned")
                 try? await controlPlane.report(unitId: lease.unitId, completed: completed,
@@ -298,6 +357,7 @@ public actor Worker {
         }
         try? await controlPlane.report(unitId: lease.unitId, completed: completed,
                                        unfinished: [], seconds: seconds)
+        status.controlPlaneReachable = true
         log("\(lease.kind.rawValue): \(completed.count) items in "
             + String(format: "%.2fs", seconds)
             + " (\(String(format: "%.2f", Double(completed.count) / max(seconds, 0.001)))/s) "

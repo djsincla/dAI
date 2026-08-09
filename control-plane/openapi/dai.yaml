@@ -620,6 +620,13 @@ components:
       type: object
       required: [presenceState]
       properties:
+        userPaused:
+          type: boolean
+          description: |
+            The machine owner has paused this node locally. Reported, not
+            requested: the control plane records it and refuses to dispatch
+            work, and has no way to clear it. Only the person at the machine
+            can.
         presenceState: { $ref: '#/components/schemas/PresenceState' }
         onAcPower: { type: boolean }
         thermalOk: { type: boolean }
@@ -669,7 +676,10 @@ components:
       properties:
         reason:
           type: string
-          enum: [empty, none-of-these-kinds, node-paused]
+          enum: [empty, none-of-these-kinds, node-paused, user-paused]
+          description: |
+            `node-paused` is administrative and an operator can lift it.
+            `user-paused` is the machine owner's own pause and nobody else can.
 
     WorkResult:
       type: object
@@ -705,6 +715,12 @@ components:
             - $ref: '#/components/schemas/PresenceState'
             - type: 'null'
         lastHeartbeat: { type: string, format: date-time, nullable: true }
+        userPaused:
+          type: boolean
+          description: |
+            Paused by the person at the machine. Distinct from state=paused,
+            which is administrative: this one no role can lift.
+        userPausedAt: { type: string, format: date-time, nullable: true }
         capabilityProfiles:
           type: object
           additionalProperties: { type: number }

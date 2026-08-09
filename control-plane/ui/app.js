@@ -116,8 +116,8 @@ function renderNodes(nodes, details) {
   // poll destroys hover state and swallows clicks that land mid-refresh, which
   // is exactly what happened the first time this was driven by hand.
   const signature = JSON.stringify(nodes.map((n) => [
-    n.id, n.hostname, n.presenceState, n.state, details.get(n.id)?.headroomGb,
-    details.get(n.id)?.yields7d,
+    n.id, n.hostname, n.presenceState, n.state, n.userPaused,
+    details.get(n.id)?.headroomGb, details.get(n.id)?.yields7d,
   ]))
   if (signature === lastNodeSignature) return
   lastNodeSignature = signature
@@ -128,7 +128,10 @@ function renderNodes(nodes, details) {
 
   for (const n of nodes) {
     const d = details.get(n.id)
-    const gpu = n.state === 'active' && GPU_STATES.has(n.presenceState)
+    // A machine its owner paused runs nothing, whatever its presence says, so
+    // showing it as available capacity would be a lie the fleet view tells
+    // about a decision somebody made deliberately.
+    const gpu = n.state === 'active' && GPU_STATES.has(n.presenceState) && !n.userPaused
     const tr = document.createElement('tr')
     tr.innerHTML = `
       <td><b>${escape(n.hostname)}</b></td>
@@ -137,12 +140,18 @@ function renderNodes(nodes, details) {
       <td class="num">${d ? `${fmt(d.headroomGb)} GB` : '&mdash;'}</td>
       <td><span class="pill ${escape(n.presenceState ?? '')}">${escape(n.presenceState ?? 'unknown')}</span></td>
       <td><span class="kinds">
+        ${n.userPaused ? '<span class="kind paused-by-user">paused by owner</span>' : `
         <span class="kind on-ane">embed</span>
-        ${gpu ? '<span class="kind on-gpu">generate</span><span class="kind on-gpu">render</span>' : ''}
+        ${gpu ? '<span class="kind on-gpu">generate</span><span class="kind on-gpu">render</span>' : ''}`}
       </span></td>
       <td class="num">${d ? d.yields7d : '&mdash;'}</td>
       <td><span class="pill ${n.state === 'paused' ? 'paused' : ''}">${escape(n.state)}</span></td>
-      <td><button data-pause="${n.id}">Pause</button></td>`
+      ${n.userPaused
+        // No admin control offered, because there is none. The button would
+        // have to either lie or fail, and a disabled control at least says the
+        // truth: this is not yours to lift.
+        ? '<td><span class="muted" title="Only the person at that machine can resume it">owner paused</span></td>'
+        : `<td><button data-pause="${n.id}">Pause</button></td>`}`
     tr.addEventListener('click', (ev) => {
       if (ev.target.closest('button')) return
       openNode(n.id)
@@ -174,6 +183,9 @@ async function openNode(id) {
         <dt>Metal working set</dt><dd>${fmt(d.metalWorkingSetGb)} GB</dd>
         <dt>Headroom now</dt><dd>${fmt(d.headroomGb)} GB</dd>
         <dt>Presence</dt><dd>${escape(d.presenceState ?? 'unknown')}</dd>
+        ${d.userPaused ? `<dt>Owner</dt><dd class="paused-by-user">paused this machine${
+          d.userPausedAt ? ` ${new Date(d.userPausedAt).toLocaleString()}` : ''
+        }</dd>` : ''}
         <dt>On AC power</dt><dd>${d.onAcPower === null ? '&mdash;' : d.onAcPower}</dd>
         <dt>Yields (7d)</dt><dd>${d.yields7d}</dd>
         <dt>Pinned networks</dt><dd>${escape(d.allowedCidrs ?? 'unpinned')}</dd>

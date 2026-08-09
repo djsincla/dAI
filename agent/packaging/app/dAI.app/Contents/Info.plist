@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>dAI</string>
+  <key>CFBundleDisplayName</key><string>dAI</string>
+  <key>CFBundleIdentifier</key><string>com.dai.menubar</string>
+  <key>CFBundleExecutable</key><string>dai-menubar</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>LSMinimumSystemVersion</key><string>15.0</string>
+  <!--
+    Menu bar only: no Dock icon, no app switcher entry. An agent that takes a
+    Dock slot on someone's machine reads as an application they have to manage
+    rather than a background arrangement they can check on.
+  -->
+  <key>LSUIElement</key><true/>
+</dict>
+</plist>

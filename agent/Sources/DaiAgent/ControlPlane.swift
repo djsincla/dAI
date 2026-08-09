@@ -229,6 +229,7 @@ public actor ControlPlane {
     // MARK: - Work
 
     public func heartbeat(state: PresenceState, onACPower: Bool?, thermalOK: Bool?,
+                          userPaused: Bool = false,
                           capability: [String: Double] = [:],
                           residentModels: [String: Double] = [:]) async throws {
         var body: [String: JSONValue] = [
@@ -238,6 +239,11 @@ public actor ControlPlane {
             // the point of tracking residency.
             "residentModels": .object(residentModels.mapValues { .number($0) }),
         ]
+        // Always sent, including when false, so that resuming is reported as
+        // positively as pausing. Omitting it would leave the control plane
+        // holding a stale pause with no way to learn otherwise, and a fleet
+        // view that under-reports capacity is a fleet view people stop reading.
+        body["userPaused"] = .bool(userPaused)
         if let onACPower { body["onAcPower"] = .bool(onACPower) }
         if let thermalOK { body["thermalOk"] = .bool(thermalOK) }
         if !capability.isEmpty {

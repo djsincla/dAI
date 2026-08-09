@@ -24,6 +24,8 @@ STATE_DIR=/var/db/dai
 LOG_DIR=/var/log/dai
 MODEL_DIR=/var/db/dai/models
 PLIST=/Library/LaunchDaemons/com.dai.agent.plist
+MENUBAR_APP=/Applications/dAI.app
+MENUBAR_PLIST=/Library/LaunchAgents/com.dai.menubar.plist
 LABEL=com.dai.agent
 
 URL=""; TOKEN=""; CA=""; MODEL=""; ANE="-"; WAIT=600; SVC_USER="_dai"; PROMOTE=300; GPU_MODEL_CACHE=""
@@ -182,6 +184,28 @@ chmod 644 "$PLIST"
 # already-loaded label.
 launchctl bootout "system/$LABEL" 2>/dev/null || true
 launchctl bootstrap system "$PLIST"
+
+# The menu bar app, if it was built. Not fatal if absent: the daemon works
+# without it. But a machine running this with no way for its owner to see or
+# stop it is the arrangement the whole programme depends on not being, so the
+# absence is called out rather than passed over.
+if [[ -d "$BUILD/dAI.app" ]]; then
+  echo "==> installing the menu bar app"
+  rm -rf "$MENUBAR_APP"
+  cp -R "$BUILD/dAI.app" "$MENUBAR_APP"
+  sed -e "s|@APP@|$MENUBAR_APP|g" "$HERE/com.dai.menubar.plist.in" > "$MENUBAR_PLIST"
+  chown root:wheel "$MENUBAR_PLIST"; chmod 644 "$MENUBAR_PLIST"
+  # Loaded into the console user's session rather than system, since a
+  # LaunchAgent belongs to a login session and there may not be one yet.
+  CONSOLE_UID=$(stat -f%u /dev/console)
+  if [[ "$CONSOLE_UID" != "0" ]]; then
+    launchctl bootout "gui/$CONSOLE_UID/com.dai.menubar" 2>/dev/null || true
+    launchctl bootstrap "gui/$CONSOLE_UID" "$MENUBAR_PLIST" 2>/dev/null || true
+  fi
+else
+  echo "WARNING: no menu bar app was built, so this machine's owner has no" >&2
+  echo "         visible way to see or stop what runs on it." >&2
+fi
 
 echo
 echo "Installed. Runs as a system daemon under $SVC_USER, and survives logout."

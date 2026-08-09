@@ -10,6 +10,9 @@ let package = Package(
     platforms: [.macOS(.v15)],
     products: [
         .executable(name: "dai-agent", targets: ["DaiAgentCLI"]),
+        // The artist-side app. Separate from the daemon on purpose: it runs in
+        // the user's session with no privilege, and can only ask.
+        .executable(name: "dai-menubar", targets: ["DaiMenuBar"]),
         .library(name: "DaiAgent", targets: ["DaiAgent"]),
     ],
     dependencies: [
@@ -53,6 +56,7 @@ let package = Package(
             name: "DaiAgentCLI",
             dependencies: ["DaiAgent", "DaiWorker"]
         ),
+        .executableTarget(name: "DaiMenuBar", dependencies: ["DaiAgent"]),
         .testTarget(name: "DaiAgentTests", dependencies: ["DaiAgent"]),
     ]
 )

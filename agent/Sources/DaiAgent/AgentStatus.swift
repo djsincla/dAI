@@ -15,8 +15,15 @@ import Foundation
 public struct AgentStatus: Codable, Sendable, Equatable {
     public var updated: Date
     public var presenceState: String
+    /// Paused here, by the person at the machine.
     public var paused: Bool
     public var pauseReason: String?
+    /// Paused by an operator, which the agent only learns by being refused
+    /// work. Kept separate from `paused` because they are different facts with
+    /// different remedies: one the person at the machine can undo and the other
+    /// they cannot, and showing them the same way would be misleading in both
+    /// directions.
+    public var pausedByFleet: Bool
     /// What this machine is permitted to run right now, which is not what it is
     /// capable of.
     public var permitted: [String]
@@ -36,6 +43,7 @@ public struct AgentStatus: Codable, Sendable, Equatable {
 
     public init(updated: Date = Date(), presenceState: String = "unknown",
                 paused: Bool = false, pauseReason: String? = nil,
+                pausedByFleet: Bool = false,
                 permitted: [String] = [], activity: String = "starting",
                 controlPlaneReachable: Bool = false,
                 itemsCompleted: Int = 0, unitsCompleted: Int = 0, yields: Int = 0,
@@ -44,6 +52,7 @@ public struct AgentStatus: Codable, Sendable, Equatable {
         self.presenceState = presenceState
         self.paused = paused
         self.pauseReason = pauseReason
+        self.pausedByFleet = pausedByFleet
         self.permitted = permitted
         self.activity = activity
         self.controlPlaneReachable = controlPlaneReachable

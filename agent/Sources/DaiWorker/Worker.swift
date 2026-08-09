@@ -188,7 +188,9 @@ public actor Worker {
             // exactly the situation where someone is reaching for it.
             let pause = pauseSwitch.read()
             await publish(reading, permitted: pause.paused ? [] : availableKinds(statePolicy),
-                          activity: pause.paused ? "paused by you" : "waiting", pause: pause)
+                          activity: pause.paused ? "paused by you"
+                                    : status.pausedByFleet ? "paused by the fleet" : "waiting",
+                          pause: pause)
             if pause.paused {
                 if !wasPaused {
                     wasPaused = true
@@ -263,6 +265,13 @@ public actor Worker {
                 // Keyed on the kinds too. Keying on the message alone meant that
                 // asking for something different and being refused for the same
                 // stated reason logged nothing at all.
+                // The agent has no other way to know it has been paused
+                // centrally: nothing pushes that down, and the refusal on a
+                // lease is the first and only sign. Without this the machine
+                // sat reporting "waiting for work" to its owner while the fleet
+                // was refusing it, which reads as the agent being broken.
+                status.pausedByFleet = failure?.contains("node-paused") ?? false
+
                 let key = kinds.map(\.rawValue).joined(separator: ",") + "|" + (failure ?? "")
                 if key != lastReason {
                     lastReason = key
@@ -273,6 +282,7 @@ public actor Worker {
                 continue
             }
             lastReason = nil
+            status.pausedByFleet = false
 
             await process(lease, statePolicy: statePolicy, state: reading.state)
         }

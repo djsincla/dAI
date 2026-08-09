@@ -20,6 +20,9 @@ import SwiftUI
 /// It runs as a LaunchAgent in the user's session, separately from the daemon,
 /// and shares nothing with it but two files under `/Users/Shared`. That
 /// separation is the point: this process has no privilege and can only ask.
+///
+/// Not in a file called `main.swift`: `@main` and top-level code cannot coexist,
+/// and SwiftPM's debug build tolerated what a Release build rejects outright.
 @main
 struct DaiMenuBarApp: App {
     @StateObject private var model = StatusModel()
@@ -91,6 +94,7 @@ final class StatusModel: ObservableObject {
 
     var symbolName: String {
         if paused { return "pause.circle" }
+        if status?.pausedByFleet == true, running { return "pause.circle.fill" }
         if running { return status!.activity.hasPrefix("running") ? "bolt.fill" : "bolt" }
         return installed ? "exclamationmark.triangle" : "bolt.slash"
     }
@@ -103,6 +107,7 @@ final class StatusModel: ObservableObject {
             if !installed { return "Not installed" }
             return status == nil ? "Starting up" : "Not responding"
         }
+        if status.pausedByFleet { return "Paused by the studio" }
         if status.permitted.isEmpty { return "Standing by" }
         if status.activity.hasPrefix("running") { return "Working" }
         return "Waiting for work"
@@ -120,6 +125,13 @@ final class StatusModel: ObservableObject {
             // distinguishable from ordinary idleness at a glance.
             return "Installed, but no update since \(Self.relative(status.updated)). "
                 + "It has probably stopped."
+        }
+        if status.pausedByFleet {
+            // Says who, and says plainly that this one is not theirs to undo.
+            // Offering no explanation would leave someone pressing a button
+            // that cannot work.
+            return "An administrator has paused this machine. Your own pause "
+                + "button is unaffected, but resuming has to happen centrally."
         }
         if status.permitted.isEmpty {
             return "You are using this machine, so nothing is running."

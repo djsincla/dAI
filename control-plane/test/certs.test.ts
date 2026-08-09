@@ -1,6 +1,6 @@
 import { execSync } from 'node:child_process'
 import type { Server } from 'node:http'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -8,9 +8,18 @@ import type { Db } from '../src/lib/db.js'
 import { Ca, fingerprintOfPem, loadOrCreateCa } from '../src/lib/ca.js'
 import { type Fixtures, appFor, freshDb, seed } from './helpers.js'
 
-function makeCsr(cn = 'whatever-the-node-asked-for'): { csr: string; dir: string } {
+/**
+ * `algorithm` exists because the Secure Enclave only generates P-256, so EC is
+ * the algorithm the agent actually uses. RSA stays covered because certificates
+ * already issued against RSA keys have to keep working.
+ */
+function makeCsr(cn = 'whatever-the-node-asked-for',
+                 algorithm: 'rsa' | 'ec' = 'rsa'): { csr: string; dir: string } {
   const dir = mkdtempSync(join(tmpdir(), 'dai-csr-'))
-  execSync(`openssl req -newkey rsa:2048 -nodes -keyout ${dir}/k.pem ` +
+  const keyspec = algorithm === 'ec'
+    ? '-newkey ec -pkeyopt ec_paramgen_curve:prime256v1'
+    : '-newkey rsa:2048'
+  execSync(`openssl req ${keyspec} -nodes -keyout ${dir}/k.pem ` +
            `-out ${dir}/r.csr -subj "/CN=${cn}" 2>/dev/null`)
   return { csr: readFileSync(`${dir}/r.csr`, 'utf8'), dir }
 }
@@ -19,17 +28,17 @@ describe('certificate authority', () => {
   let caDir: string
   let ca: Ca
 
-  beforeEach(() => {
+  beforeEach(async () => {
     caDir = mkdtempSync(join(tmpdir(), 'dai-ca-'))
-    ca = new Ca(loadOrCreateCa(join(caDir, 'ca.crt'), join(caDir, 'ca.key')))
+    ca = new Ca(await loadOrCreateCa(join(caDir, 'ca.crt'), join(caDir, 'ca.key')))
   })
   afterEach(() => rmSync(caDir, { recursive: true, force: true }))
 
-  it('produces a fingerprint in the exact form Node TLS reports', () => {
+  it('produces a fingerprint in the exact form Node TLS reports', async () => {
     // If these differ, every mTLS lookup silently misses and the failure looks
     // like "unknown certificate" rather than a formatting bug.
     const { csr, dir } = makeCsr()
-    const signed = ca.sign(csr, 'node-1', 'orca')
+    const signed = await ca.sign(csr, 'node-1', 'orca')
     const viaOpenssl = execSync(
       `echo '${signed.certPem}' | openssl x509 -noout -fingerprint -sha256`,
     ).toString().split('=')[1]!.trim()
@@ -38,22 +47,22 @@ describe('certificate authority', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  it('names the certificate after the node record, not the CSR', () => {
+  it('names the certificate after the node record, not the CSR', async () => {
     // A node does not choose the name it is known by. Otherwise a machine could
     // request an identity belonging to another node record.
     const { csr, dir } = makeCsr('i-am-the-admin-box')
-    const signed = ca.sign(csr, 'node-42', 'orca')
+    const signed = await ca.sign(csr, 'node-42', 'orca')
     const subject = execSync(`echo '${signed.certPem}' | openssl x509 -noout -subject`).toString()
     expect(subject).toContain('CN=node-42')
     expect(subject).not.toContain('i-am-the-admin-box')
     rmSync(dir, { recursive: true, force: true })
   })
 
-  it('issues client-auth-only certificates', () => {
+  it('issues client-auth-only certificates', async () => {
     // A node certificate must not be usable to impersonate the control plane to
     // another node.
     const { csr, dir } = makeCsr()
-    const signed = ca.sign(csr, 'node-1', 'orca')
+    const signed = await ca.sign(csr, 'node-1', 'orca')
     const text = execSync(`echo '${signed.certPem}' | openssl x509 -noout -text`).toString()
     expect(text).toContain('TLS Web Client Authentication')
     expect(text).not.toContain('TLS Web Server Authentication')
@@ -61,20 +70,79 @@ describe('certificate authority', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  it('issues short-lived certificates', () => {
+  it('issues short-lived certificates', async () => {
     // These live on laptops that leave the building, so a stolen machine should
     // stop being a fleet member on its own.
     const { csr, dir } = makeCsr()
-    const signed = ca.sign(csr, 'node-1', 'orca')
+    const signed = await ca.sign(csr, 'node-1', 'orca')
     const days = (signed.notAfter.getTime() - Date.now()) / 86_400_000
     expect(days).toBeGreaterThan(1)
     expect(days).toBeLessThanOrEqual(31)
     rmSync(dir, { recursive: true, force: true })
   })
 
-  it('refuses anything that is not a valid CSR', () => {
-    expect(() => ca.sign('not a csr', 'n', 'h')).toThrow()
-    expect(() => ca.sign('', 'n', 'h')).toThrow()
+  it('refuses anything that is not a valid CSR', async () => {
+    await expect(ca.sign('not a csr', 'n', 'h')).rejects.toThrow()
+    await expect(ca.sign('', 'n', 'h')).rejects.toThrow()
+  })
+
+  it('signs the elliptic-curve CSR the Secure Enclave produces', async () => {
+    // The reason this CA moved off node-forge. A P-256 key is the only kind the
+    // Enclave will generate, and forge cannot sign one at all.
+    const { csr, dir } = makeCsr('enclave-node', 'ec')
+    const signed = await ca.sign(csr, 'node-se', 'orca')
+    const text = execSync(`echo '${signed.certPem}' | openssl x509 -noout -text`).toString()
+    expect(text).toContain('id-ecPublicKey')
+    expect(text).toContain('prime256v1')
+    expect(text).toContain('CN=node-se')
+    // keyEncipherment describes RSA key transport; claiming it for a key that
+    // can only sign is a promise the key cannot keep.
+    expect(text).not.toContain('Key Encipherment')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('rejects a CSR whose signature does not match its own key', async () => {
+    // Signing this would bind an identity to a key the requester does not hold.
+    const { csr, dir } = makeCsr('tampered', 'ec')
+    const lines = csr.trim().split('\n')
+    const body = lines.slice(1, -1).join('')
+    const bytes = Buffer.from(body, 'base64')
+    bytes[bytes.length - 1] = bytes[bytes.length - 1]! ^ 0xff  // corrupt the signature
+    const tampered = `-----BEGIN CERTIFICATE REQUEST-----\n${
+      bytes.toString('base64').replace(/(.{64})/g, '$1\n')}\n-----END CERTIFICATE REQUEST-----\n`
+    await expect(ca.sign(tampered, 'node-1', 'orca')).rejects.toThrow()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('keeps issuing under an RSA CA created before the move off node-forge', async () => {
+    // The fleet's existing CA is RSA. Rotating it would invalidate every
+    // certificate under it and mean re-approving every node by hand, so an RSA
+    // CA has to keep signing - including EC CSRs, which is the combination that
+    // did not exist before.
+    const dir = mkdtempSync(join(tmpdir(), 'dai-rsa-ca-'))
+    execSync(`openssl req -x509 -newkey rsa:2048 -nodes -keyout ${dir}/ca.key ` +
+             `-out ${dir}/ca.crt -days 365 -subj "/CN=legacy dAI node CA" ` +
+             `-addext "keyUsage=critical,keyCertSign,cRLSign" 2>/dev/null`)
+    const legacy = new Ca({
+      certPem: readFileSync(`${dir}/ca.crt`, 'utf8'),
+      keyPem: readFileSync(`${dir}/ca.key`, 'utf8'),
+    })
+
+    const { csr, dir: csrDir } = makeCsr('enclave-node', 'ec')
+    const signed = await legacy.sign(csr, 'node-se', 'orca')
+    const text = execSync(`echo '${signed.certPem}' | openssl x509 -noout -text`).toString()
+    expect(text).toContain('prime256v1')                    // EC leaf
+    expect(text).toContain('sha256WithRSAEncryption')       // RSA issuer signature
+
+    // Chain verification is the claim that matters: a leaf that parses but does
+    // not verify against its issuer would fail at TLS handshake time instead.
+    writeFileSync(`${dir}/leaf.crt`, signed.certPem)
+    const verify = execSync(
+      `openssl verify -CAfile ${dir}/ca.crt -purpose sslclient ${dir}/leaf.crt`).toString()
+    expect(verify).toContain('OK')
+
+    rmSync(dir, { recursive: true, force: true })
+    rmSync(csrDir, { recursive: true, force: true })
   })
 
   it('never writes the CA key world-readable', () => {

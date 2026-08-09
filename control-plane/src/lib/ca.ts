@@ -1,7 +1,14 @@
-import { createHash, randomBytes } from 'node:crypto'
+// @peculiar/x509 resolves its ASN.1 converters through tsyringe, which needs
+// this loaded before the library is imported. It has to be the first import in
+// the file or the decorators run against a missing Reflect.metadata.
+import 'reflect-metadata'
+import { createHash, createPrivateKey, randomBytes, webcrypto } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import forge from 'node-forge'
+import * as x509 from '@peculiar/x509'
+
+const crypto = webcrypto as unknown as Crypto
+x509.cryptoProvider.set(crypto)
 
 /**
  * Certificate authority for node identity.
@@ -24,6 +31,14 @@ import forge from 'node-forge'
  * **The CA private key never goes in the database.** It is read from disk at a
  * path the process is given, so a database compromise does not mint node
  * identities. In production that path is a mounted secret.
+ *
+ * This runs on WebCrypto rather than node-forge because forge cannot sign
+ * elliptic-curve CSRs, and the agent's key has to be EC: the Secure Enclave
+ * generates P-256 and nothing else. That is not a preference. A key held in the
+ * Enclave cannot be copied off the disk it lives on, which is the difference
+ * between a certificate being an identity and a certificate being a file
+ * somebody can take. RSA CSRs still sign, because certificates already issued
+ * against RSA keys must keep working through their remaining validity.
  */
 
 export const DEFAULT_CERT_DAYS = 30
@@ -41,30 +56,34 @@ export interface CaMaterial {
  * never turning it back on. A real deployment supplies its own and never lets
  * this branch run.
  */
-export function loadOrCreateCa(certPath: string, keyPath: string): CaMaterial {
+export async function loadOrCreateCa(certPath: string, keyPath: string): Promise<CaMaterial> {
   if (existsSync(certPath) && existsSync(keyPath)) {
     return { certPem: readFileSync(certPath, 'utf8'), keyPem: readFileSync(keyPath, 'utf8') }
   }
 
-  const keys = forge.pki.rsa.generateKeyPair(2048)
-  const cert = forge.pki.createCertificate()
-  cert.publicKey = keys.publicKey
-  cert.serialNumber = '01'
-  cert.validity.notBefore = new Date()
-  cert.validity.notAfter = new Date(Date.now() + 365 * 24 * 3600 * 1000)
+  const alg = { name: 'ECDSA', namedCurve: 'P-256', hash: 'SHA-256' }
+  const keys = await crypto.subtle.generateKey(alg, true, ['sign', 'verify'])
+  const cert = await x509.X509CertificateGenerator.createSelfSigned({
+    serialNumber: randomBytes(16).toString('hex'),
+    name: 'CN=dAI node CA',
+    notBefore: new Date(),
+    notAfter: new Date(Date.now() + 365 * 24 * 3600 * 1000),
+    keys,
+    signingAlgorithm: alg,
+    extensions: [
+      new x509.BasicConstraintsExtension(true, undefined, true),
+      // Without keyUsage, Python's ssl module rejects the chain outright with
+      // "CA cert does not include key usage extension". Browsers do not care,
+      // which is how it survived until an agent tried to verify against it.
+      new x509.KeyUsagesExtension(
+        x509.KeyUsageFlags.keyCertSign | x509.KeyUsageFlags.cRLSign, true),
+    ],
+  })
 
-  const attrs = [{ name: 'commonName', value: 'dAI node CA' }]
-  cert.setSubject(attrs)
-  cert.setIssuer(attrs)
-  cert.setExtensions([
-    { name: 'basicConstraints', cA: true, critical: true },
-    { name: 'keyUsage', keyCertSign: true, cRLSign: true, critical: true },
-  ])
-  cert.sign(keys.privateKey, forge.md.sha256.create())
-
+  const pkcs8 = await crypto.subtle.exportKey('pkcs8', keys.privateKey)
   const material = {
-    certPem: forge.pki.certificateToPem(cert),
-    keyPem: forge.pki.privateKeyToPem(keys.privateKey),
+    certPem: cert.toString('pem'),
+    keyPem: x509.PemConverter.encode(pkcs8, 'PRIVATE KEY'),
   }
   for (const p of [certPath, keyPath]) mkdirSync(dirname(p), { recursive: true })
   writeFileSync(certPath, material.certPem)
@@ -72,20 +91,40 @@ export function loadOrCreateCa(certPath: string, keyPath: string): CaMaterial {
   return material
 }
 
+/**
+ * Import the CA private key for signing, whichever algorithm it happens to be.
+ *
+ * A CA generated before this change is RSA and a fresh one is EC, and both must
+ * keep issuing: rotating a CA invalidates every certificate under it, which
+ * would mean re-approving the whole fleet by hand.
+ */
+async function importCaKey(keyPem: string): Promise<{ key: CryptoKey, algorithm: Algorithm }> {
+  const parsed = createPrivateKey(keyPem)
+  const pkcs8 = parsed.export({ type: 'pkcs8', format: 'der' }) as Buffer
+  const algorithm = parsed.asymmetricKeyType === 'ec'
+    ? { name: 'ECDSA', hash: 'SHA-256' }
+    : { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }
+  const importAlg = parsed.asymmetricKeyType === 'ec'
+    ? { name: 'ECDSA', namedCurve: 'P-256' }
+    : { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }
+  const key = await crypto.subtle.importKey('pkcs8', new Uint8Array(pkcs8), importAlg, false, ['sign'])
+  return { key, algorithm }
+}
+
 export class Ca {
-  private readonly caCert: forge.pki.Certificate
-  private readonly caKey: forge.pki.rsa.PrivateKey
+  private readonly caCert: x509.X509Certificate
+  private readonly caKeyPem: string
   readonly certPem: string
 
   constructor(material: CaMaterial) {
     this.certPem = material.certPem
-    this.caCert = forge.pki.certificateFromPem(material.certPem)
-    this.caKey = forge.pki.privateKeyFromPem(material.keyPem) as forge.pki.rsa.PrivateKey
+    this.caCert = new x509.X509Certificate(material.certPem)
+    this.caKeyPem = material.keyPem
   }
 
-  static fromEnv(): Ca {
+  static async fromEnv(): Promise<Ca> {
     const dir = process.env.CA_DIR ?? join(process.cwd(), 'certs')
-    return new Ca(loadOrCreateCa(
+    return new Ca(await loadOrCreateCa(
       process.env.CA_CERT ?? join(dir, 'ca.crt'),
       process.env.CA_KEY ?? join(dir, 'ca.key'),
     ))
@@ -99,44 +138,58 @@ export class Ca {
    * certificate cannot be quietly reused for a different node record even if the
    * same key is presented again.
    */
-  sign(csrPem: string, nodeId: string, hostname: string, days = DEFAULT_CERT_DAYS): {
+  async sign(csrPem: string, nodeId: string, hostname: string, days = DEFAULT_CERT_DAYS): Promise<{
     certPem: string
     fingerprint: string
     notAfter: Date
-  } {
-    let csr: forge.pki.CertificateSigningRequest
+  }> {
+    let csr: x509.Pkcs10CertificateRequest
     try {
-      csr = forge.pki.certificationRequestFromPem(csrPem)
+      csr = new x509.Pkcs10CertificateRequest(csrPem)
     } catch (err) {
       throw new Error(`unparseable CSR: ${(err as Error).message}`)
     }
     // A CSR is self-signed by definition; if that check fails the key does not
     // match the request and signing it would bind an identity to a key its
     // holder does not control.
-    if (!csr.verify()) throw new Error('CSR signature does not verify')
-    if (!csr.publicKey) throw new Error('CSR carries no public key')
+    if (!(await csr.verify())) throw new Error('CSR signature does not verify')
 
-    const cert = forge.pki.createCertificate()
-    cert.publicKey = csr.publicKey
-    cert.serialNumber = randomBytes(16).toString('hex')
-    cert.validity.notBefore = new Date(Date.now() - 60_000) // clock skew
-    cert.validity.notAfter = new Date(Date.now() + days * 24 * 3600 * 1000)
-    cert.setSubject([
-      { name: 'commonName', value: nodeId },
-      { name: 'organizationalUnitName', value: hostname },
-    ])
-    cert.setIssuer(this.caCert.subject.attributes)
-    cert.setExtensions([
-      { name: 'basicConstraints', cA: false, critical: true },
-      { name: 'keyUsage', digitalSignature: true, keyEncipherment: true, critical: true },
-      // Client auth only. A node certificate must not be usable to impersonate
-      // the control plane to another node.
-      { name: 'extKeyUsage', clientAuth: true },
-    ])
-    cert.sign(this.caKey, forge.md.sha256.create())
+    const publicKey = await csr.publicKey.export(crypto)
+    const isEC = publicKey.algorithm.name.startsWith('EC')
 
-    const certPem = forge.pki.certificateToPem(cert)
-    return { certPem, fingerprint: fingerprintOfPem(certPem), notAfter: cert.validity.notAfter }
+    // keyEncipherment describes RSA key transport and means nothing for an EC
+    // key, which can only sign. Asserting it anyway would be a claim the key
+    // cannot honour, and some verifiers check.
+    const usages = x509.KeyUsageFlags.digitalSignature
+      | (isEC ? 0 : x509.KeyUsageFlags.keyEncipherment)
+
+    const notBefore = new Date(Date.now() - 60_000) // clock skew
+    const notAfter = new Date(Date.now() + days * 24 * 3600 * 1000)
+    const { key: signingKey, algorithm: signingAlgorithm } = await importCaKey(this.caKeyPem)
+
+    const cert = await x509.X509CertificateGenerator.create({
+      serialNumber: randomBytes(16).toString('hex'),
+      // Built from parts rather than a formatted string: a hostname containing
+      // a comma or an equals sign would otherwise inject an extra RDN and let a
+      // node influence the name it is known by.
+      subject: new x509.Name([{ CN: [nodeId] }, { OU: [hostname] }]),
+      issuer: this.caCert.subjectName,
+      notBefore,
+      notAfter,
+      publicKey,
+      signingKey,
+      signingAlgorithm,
+      extensions: [
+        new x509.BasicConstraintsExtension(false, undefined, true),
+        new x509.KeyUsagesExtension(usages, true),
+        // Client auth only. A node certificate must not be usable to
+        // impersonate the control plane to another node.
+        new x509.ExtendedKeyUsageExtension([x509.ExtendedKeyUsage.clientAuth]),
+      ],
+    })
+
+    const certPem = cert.toString('pem')
+    return { certPem, fingerprint: fingerprintOfPem(certPem), notAfter }
   }
 }
 
@@ -148,10 +201,9 @@ export class Ca {
  * this exists to keep the two ends in the same shape.
  */
 export function fingerprintOfPem(certPem: string): string {
-  const der = forge.util.decode64(
-    certPem.replace(/-----(BEGIN|END) CERTIFICATE-----/g, '').replace(/\s/g, ''),
-  )
-  const hex = createHash('sha256').update(Buffer.from(der, 'binary')).digest('hex').toUpperCase()
+  const der = Buffer.from(
+    certPem.replace(/-----(BEGIN|END) CERTIFICATE-----/g, '').replace(/\s/g, ''), 'base64')
+  const hex = createHash('sha256').update(der).digest('hex').toUpperCase()
   return hex.match(/.{2}/g)!.join(':')
 }
 

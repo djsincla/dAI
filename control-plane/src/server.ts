@@ -44,7 +44,7 @@ export const broker = new Broker()
  * Node identity issuer. Its private key is read from disk rather than the
  * database, so a database compromise cannot mint fleet members.
  */
-export const ca = Ca.fromEnv()
+export const ca = await Ca.fromEnv()
 
 export function createApp(db: Db, surface: Surface = 'both'): Express {
   const app = express()

@@ -5,13 +5,23 @@ import Foundation
 /// middle: a join token gets a node into a queue, an admin decides whether it
 /// becomes a member.
 ///
-/// The private key is generated here and never sent anywhere. The production
-/// target is the Secure Enclave with the key marked non-exportable, so a
-/// certificate copied off disk is useless without the hardware; this writes a
-/// 0600 file, which is the weaker of the two and is why it is called out.
+/// The private key is generated in the Secure Enclave and never leaves it. What
+/// lands on disk is a blob the Enclave sealed to this machine, so a copy taken
+/// from a stolen laptop is inert: the certificate names a key the thief cannot
+/// use. That is the difference between an identity and a file.
 enum Enroll {
+    /// Where the node's identity lives.
+    ///
+    /// `DAI_IDENTITY_DIR` overrides it because `NSHomeDirectory()` reads the
+    /// password database rather than `HOME`, so a daemon running as a service
+    /// account cannot be pointed elsewhere by environment alone - and neither
+    /// can a test, which is how this was noticed.
     static func identityDir() -> URL {
-        URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".dai/identity")
+        if let override = ProcessInfo.processInfo.environment["DAI_IDENTITY_DIR"],
+           !override.isEmpty {
+            return URL(fileURLWithPath: override)
+        }
+        return URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".dai/identity")
     }
 
     static func hardware() -> (chip: String, memoryGb: Double) {
@@ -29,24 +39,30 @@ enum Enroll {
         return (String(cString: chipBuf), Double(bytes) / 1_073_741_824)
     }
 
+    /// Where the sealed Enclave blob lives. Deliberately not `node.key`: that
+    /// name held an RSA PEM in the previous scheme, and a node carrying one
+    /// should fail loudly and be re-enrolled rather than have the two confused.
+    static func keyPath(_ dir: URL) -> URL { dir.appendingPathComponent("node.enclave-key") }
+
     static func generateCSR(dir: URL, commonName: String) throws -> String {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let key = dir.appendingPathComponent("node.key")
-        let csr = dir.appendingPathComponent("node.csr")
+        let csrPath = dir.appendingPathComponent("node.csr")
 
-        if !FileManager.default.fileExists(atPath: key.path) {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/usr/bin/openssl")
-            // The CN here is ignored by the issuer: the control plane names the
-            // certificate after the node record, so a machine cannot request an
-            // identity belonging to another node.
-            p.arguments = ["req", "-newkey", "rsa:2048", "-nodes",
-                           "-keyout", key.path, "-out", csr.path, "-subj", "/CN=\(commonName)"]
-            p.standardError = FileHandle.nullDevice
-            try p.run(); p.waitUntilExit()
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: key.path)
+        // Reuse an outstanding request rather than making a new one. A fresh key
+        // would orphan the pending node record, which already holds the public
+        // half of the old one.
+        if let existing = try? String(contentsOf: csrPath, encoding: .utf8), !existing.isEmpty {
+            return existing
         }
-        return try String(contentsOf: csr, encoding: .utf8)
+
+        // The CN is ignored by the issuer: the control plane names the
+        // certificate after the node record, so a machine cannot request an
+        // identity belonging to another node. It goes in so a human reading the
+        // pending queue has something recognisable.
+        let key = try EnclaveKey.loadOrCreate(at: keyPath(dir))
+        let csr = try CSR.create(commonName: commonName, key: key)
+        try csr.write(to: csrPath, atomically: true, encoding: .utf8)
+        return csr
     }
 
     static func run(controlPlane: URL, joinToken: String, caPath: String?,

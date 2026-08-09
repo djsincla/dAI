@@ -103,6 +103,14 @@ export function agentAuth(db: Db) {
   }
 }
 
+/**
+ * Session tokens are uuids, and anything else is rejected before it is used as
+ * one. Not a security control - an attacker can send a well-formed uuid - but
+ * the difference between "your credential is wrong" and "the server fell over",
+ * which are different instructions to the client.
+ */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 /** Session auth. A real deployment swaps this for OIDC against the IdP. */
 export function userAuth(db: Db) {
   return async (req: Request, res: Response, next: NextFunction) => {
@@ -114,6 +122,15 @@ export function userAuth(db: Db) {
       : req.header('x-api-key') ?? null
     if (!token) {
       res.status(401).json({ error: 'unauthorized', detail: 'no session' })
+      return
+    }
+    // Checked before it reaches the database, because the column is a uuid and
+    // Postgres raises on a malformed one. That surfaced as a 500, which tells a
+    // client the server is broken and to try again: an invalid credential sent
+    // Claude Code into its retry loop instead of failing fast. A bad token is
+    // the caller's fault and has to say so.
+    if (!UUID.test(token)) {
+      res.status(401).json({ error: 'unauthorized', detail: 'malformed session token' })
       return
     }
     const { rows } = await db.query(`SELECT id, email FROM users WHERE id = $1`, [token])

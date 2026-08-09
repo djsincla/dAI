@@ -170,6 +170,7 @@ public actor ControlPlane {
     /// in `pending` until an admin approves it, so this is the start of the flow
     /// rather than the end.
     public func enroll(joinToken: String, hostname: String, chip: String,
+                       machineId: String? = nil,
                        memoryGb: Double, metalWorkingSetGb: Double,
                        osVersion: String, csrPEM: String) async throws -> Enrollment {
         let (_, data) = try await request("POST", "agent/v1/enroll", body: .object([
@@ -177,6 +178,9 @@ public actor ControlPlane {
             "chip": .string(chip), "memoryGb": .number(memoryGb),
             "metalWorkingSetGb": .number(metalWorkingSetGb),
             "osVersion": .string(osVersion), "csrPem": .string(csrPEM),
+            // Ties this record to the hardware, so re-enrolling a machine
+            // replaces its old record instead of adding a second one.
+            "machineId": machineId.map(JSONValue.string) ?? .null,
         ]))
         let d = json(data)
         guard let id = d["nodeId"]?.stringValue, let token = d["enrollmentToken"]?.stringValue else {

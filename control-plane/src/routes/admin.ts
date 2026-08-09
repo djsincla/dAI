@@ -13,7 +13,11 @@ export function adminRoutes(db: Db, ca: Ca): Router {
       `SELECT id, hostname, chip, memory_gb, metal_working_set_gb, tier, state,
               owner_user_id, presence_state, last_heartbeat, capability_profiles,
               user_paused, user_paused_at
-         FROM nodes ORDER BY hostname`,
+         -- Superseded records are history, not fleet. They are the previous
+         -- enrollment of a machine that is still here under a newer identity,
+         -- so listing them shows the same hardware twice, which is the problem
+         -- superseding them was meant to solve.
+         FROM nodes WHERE state <> 'superseded' ORDER BY hostname`,
     )
     res.json(rows.map((n) => ({
       id: n.id,
@@ -47,7 +51,7 @@ export function adminRoutes(db: Db, ca: Ca): Router {
     }
 
     const { rows: pending } = await db.query(
-      `SELECT id, hostname, csr_pem FROM nodes WHERE id=$1 AND state='pending'`,
+      `SELECT id, hostname, csr_pem, machine_id FROM nodes WHERE id=$1 AND state='pending'`,
       [req.params.nodeId],
     )
     if (pending.length === 0) {
@@ -75,6 +79,29 @@ export function adminRoutes(db: Db, ca: Ca): Router {
       RETURNING id, hostname, tier, state`,
       [node.id, signed.certPem, signed.fingerprint, signed.notAfter],
     )
+    // Retire any earlier record for the same hardware.
+    //
+    // A machine that is reinstalled or re-enrolled arrives as a new node with a
+    // new key, and without this the old record stayed active-looking forever:
+    // the fleet view showed two entries for one machine and counted its
+    // capacity twice. Superseded rather than deleted, because the old
+    // certificate was really issued and the history of what was signed is worth
+    // keeping.
+    if (node.machine_id) {
+      const { rows: retired } = await db.query(
+        `UPDATE nodes SET state='superseded'
+          WHERE machine_id = $1 AND id <> $2 AND state <> 'superseded'
+        RETURNING id`,
+        [node.machine_id, node.id],
+      )
+      for (const old of retired) {
+        await db.query(
+          `INSERT INTO activity_log (node_id, event, detail)
+           VALUES ($1,'node.superseded',$2)`,
+          [old.id, JSON.stringify({ by: req.user!.id, replacedBy: node.id })])
+      }
+    }
+
     await db.query(`INSERT INTO activity_log (node_id, event, detail) VALUES ($1,'node.approved',$2)`,
       [req.params.nodeId, JSON.stringify({ by: req.user!.id })])
     res.json(rows[0])
@@ -120,7 +147,10 @@ export function adminRoutes(db: Db, ca: Ca): Router {
     const { rows: nodes } = await db.query(
       `SELECT id, hostname, state, presence_state, metal_working_set_gb, user_paused,
               on_ac_power, thermal_ok
-         FROM nodes WHERE state <> 'pending'`,
+         -- Superseded excluded for the same reason as pending: it is not
+         -- capacity. Counting a retired record would inflate the fleet by
+         -- exactly the machines that were reinstalled.
+         FROM nodes WHERE state NOT IN ('pending', 'superseded')`,
     )
 
     let gpuGb = 0

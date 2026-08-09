@@ -58,7 +58,19 @@ CREATE TABLE nodes (
     tier                  text NOT NULL DEFAULT 'harvest'
                           CHECK (tier IN ('harvest', 'cluster')),
     state                 text NOT NULL DEFAULT 'pending'
-                          CHECK (state IN ('pending','active','cordoned','paused','offline')),
+                          CHECK (state IN ('pending','active','cordoned','paused',
+                                           'offline','superseded')),
+    -- IOPlatformUUID, which survives reinstalls and OS upgrades.
+    --
+    -- Enrollment mints a new key and a new record every time it runs, so
+    -- without this a reinstalled machine appeared as a second node and the old
+    -- record stayed active-looking forever, inflating the fleet view and the
+    -- capacity figures with hardware that no longer existed. Approving a node
+    -- supersedes any earlier record for the same machine.
+    --
+    -- Not a credential. It says which record to replace; authentication is
+    -- still the certificate.
+    machine_id            text,
     -- Drives the pause right that no role can override.
     owner_user_id         uuid REFERENCES users(id) ON DELETE SET NULL,
     cert_fingerprint      text UNIQUE,

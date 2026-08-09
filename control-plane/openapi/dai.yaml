@@ -132,6 +132,26 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /agent/v1/me:
+    get:
+      tags: [agent]
+      summary: What this node is, including its tier
+      responses:
+        '200':
+          description: The node's own record
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, hostname, tier, state]
+                properties:
+                  id: { type: string, format: uuid }
+                  hostname: { type: string }
+                  tier: { type: string, enum: [harvest, cluster] }
+                  state: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
   /agent/v1/policy:
     get:
       tags: [agent]
@@ -321,6 +341,68 @@ paths:
                         owned_by: { type: string }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+
+  /v1/messages:
+    post:
+      tags: [serving]
+      summary: Anthropic-compatible messages endpoint
+      description: |
+        The same routing, policy caps and reverse channel as
+        `/v1/chat/completions`; only the request and response shapes differ. It
+        exists because the clients people actually use speak this shape, and a
+        fleet nobody can point a tool at is a fleet nobody uses.
+
+        `stream: true` is answered as a single text delta rather than
+        incrementally. A completion is dispatched to a node as one unit so that
+        a preemption has a bounded worst case, so there is nothing to stream as
+        it is produced. The event sequence is real; the incremental display is
+        not.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, messages, max_tokens]
+              properties:
+                model: { type: string }
+                max_tokens: { type: integer, minimum: 1 }
+                stream: { type: boolean }
+                system: {}
+                temperature: { type: number }
+                top_p: { type: number }
+                stop_sequences: { type: array, items: { type: string } }
+                tools: { type: array, items: { type: object, additionalProperties: true } }
+                tool_choice: { type: object, additionalProperties: true }
+                metadata: { type: object, additionalProperties: true }
+                messages:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required: [role, content]
+                    properties:
+                      role: { type: string }
+                      content: {}
+      responses:
+        '200':
+          description: A completion, or an SSE stream when stream is true
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+            text/event-stream:
+              schema: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503':
+          description: No node can serve this right now
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
 
   /v1/chat/completions:
     post:

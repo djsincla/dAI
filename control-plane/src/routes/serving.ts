@@ -117,5 +117,122 @@ export function servingRoutes(db: Db, broker: Broker): Router {
     })
   })
 
+  /**
+   * Anthropic-native messages endpoint.
+   *
+   * Exists because the clients people actually use speak this shape, and a
+   * fleet nobody can point a tool at is a fleet nobody uses. Same routing,
+   * same policy caps, same reverse channel as the OpenAI surface: only the
+   * request and response shapes differ.
+   */
+  r.post('/messages', async (req, res) => {
+    const body = req.body as {
+      model?: string
+      messages: { role: string; content: unknown }[]
+      system?: unknown
+      max_tokens?: number
+      stream?: boolean
+    }
+
+    const modelHash = body.model ?? null
+    const candidates = await candidatesFor(db, broker.inFlightCounts)
+    const connected = candidates.filter((c) => broker.isConnected(c.id))
+    const choice = selectNode(connected, 'generate', modelHash)
+
+    if (isRefusal(choice)) {
+      // 503 with the Anthropic error shape. This is the normal daytime answer
+      // for a fleet of machines people are using, not a fault.
+      res.status(503).json({
+        type: 'error',
+        error: { type: 'overloaded_error', message: choice.detail },
+      })
+      return
+    }
+
+    const policy = POLICY[(choice.presence_state ?? 'ACTIVE') as PresenceState]
+    const requested = body.max_tokens ?? 512
+    const maxTokens = Math.min(requested, policy.maxCompletionTokens)
+
+    // The system prompt rides as a leading message. The runtime takes one
+    // string, and dropping it silently would change the model's behaviour in a
+    // way nobody could see from here.
+    const messages = body.system
+      ? [{ role: 'system', content: body.system }, ...body.messages]
+      : body.messages
+
+    const started = Date.now()
+    const out = await broker.dispatch(choice.id, 'generate', modelHash, {
+      messages, max_tokens: maxTokens, model: modelHash,
+    })
+
+    if (!out.ok) {
+      res.status(503).json({
+        type: 'error',
+        error: { type: 'api_error', message: out.error },
+      })
+      return
+    }
+
+    const result = out.body as { text: string; promptTokens?: number; completionTokens?: number }
+    const id = `msg_${started}`
+    const usage = {
+      input_tokens: result.promptTokens ?? 0,
+      output_tokens: result.completionTokens ?? 0,
+    }
+    const stopReason = (result.completionTokens ?? 0) >= maxTokens ? 'max_tokens' : 'end_turn'
+
+    if (body.stream) {
+      // Replayed as a stream rather than streamed as it is produced.
+      //
+      // A completion is dispatched to a node as one unit so that a preemption
+      // has a bounded worst case, and that decision is upstream of this. What
+      // this does is let clients that require SSE work at all - the whole
+      // answer arrives in one text delta. Honest about it here rather than in
+      // a comment nobody reads: the caller waits the same time and then gets
+      // everything, so there is no incremental display.
+      res.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive',
+      })
+      const send = (event: string, data: unknown) => {
+        res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+      }
+      send('message_start', { type: 'message_start', message: {
+        id, type: 'message', role: 'assistant', model: modelHash ?? 'default',
+        content: [], stop_reason: null, stop_sequence: null,
+        usage: { input_tokens: usage.input_tokens, output_tokens: 0 },
+      } })
+      send('content_block_start', {
+        type: 'content_block_start', index: 0,
+        content_block: { type: 'text', text: '' },
+      })
+      send('content_block_delta', {
+        type: 'content_block_delta', index: 0,
+        delta: { type: 'text_delta', text: result.text },
+      })
+      send('content_block_stop', { type: 'content_block_stop', index: 0 })
+      send('message_delta', {
+        type: 'message_delta',
+        delta: { stop_reason: stopReason, stop_sequence: null },
+        usage: { output_tokens: usage.output_tokens },
+      })
+      send('message_stop', { type: 'message_stop' })
+      res.end()
+      return
+    }
+
+    res.json({
+      id,
+      type: 'message',
+      role: 'assistant',
+      model: modelHash ?? 'default',
+      content: [{ type: 'text', text: result.text }],
+      stop_reason: stopReason,
+      stop_sequence: null,
+      usage,
+    })
+  })
+
   return r
 }

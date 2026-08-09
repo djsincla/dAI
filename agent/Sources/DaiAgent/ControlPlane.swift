@@ -145,6 +145,52 @@ public actor ControlPlane {
         }
     }
 
+    /// This node's own record, which is how it learns its tier.
+    public struct NodeSelf: Sendable {
+        public let hostname: String
+        public let tier: String
+        public var isCluster: Bool { tier == "cluster" }
+    }
+
+    public func whoami() async throws -> NodeSelf {
+        let (_, data) = try await request("GET", "agent/v1/me")
+        let d = json(data)
+        return NodeSelf(hostname: d["hostname"]?.stringValue ?? "",
+                        tier: d["tier"]?.stringValue ?? "harvest")
+    }
+
+    public struct Dispatch: Sendable {
+        public let id: String
+        public let kind: WorkKind
+        public let modelHash: String?
+        public let body: JSONValue
+    }
+
+    /// Park on the reverse channel until the control plane pushes something.
+    ///
+    /// Returns nil on a 204, which is the server saying "nothing yet, come
+    /// back": a timeout the node can see is far better than a socket it cannot
+    /// tell from a dead one.
+    public func awaitDispatch() async throws -> Dispatch? {
+        // Longer than the server's long-poll window, or the client gives up
+        // first and every idle period looks like an error.
+        let (code, data) = try await request("GET", "agent/v1/dispatch", timeout: 120)
+        guard code == 200 else { return nil }
+        let d = json(data)
+        guard let id = d["dispatchId"]?.stringValue,
+              let kind = WorkKind(rawValue: d["kind"]?.stringValue ?? "") else { return nil }
+        return Dispatch(id: id, kind: kind,
+                        modelHash: d["modelHash"]?.stringValue,
+                        body: d["body"] ?? .object([:]))
+    }
+
+    public func reportDispatch(id: String, text: String?, error: String?) async throws {
+        var body: [String: JSONValue] = [:]
+        if let text { body["result"] = .object(["text": .string(text)]) }
+        if let error { body["error"] = .string(error) }
+        _ = try await request("POST", "agent/v1/dispatch/\(id)/result", body: .object(body))
+    }
+
     /// Unauthenticated liveness check.
     ///
     /// Useful precisely because it needs no client certificate: if this works

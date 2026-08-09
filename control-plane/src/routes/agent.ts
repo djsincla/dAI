@@ -126,6 +126,20 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
     res.status(403).json({ error: 'forbidden', detail: 'node not permitted from this network' })
   })
 
+  /**
+   * What this node is, from the control plane's point of view.
+   *
+   * The agent needs its own tier to know whether presence gating applies: a
+   * cluster node is a dedicated box that is never preempted, and applying the
+   * harvest rules there would stop it serving the moment somebody touched a
+   * keyboard attached to a server.
+   */
+  r.get('/me', async (req, res) => {
+    const { rows } = await db.query(
+      `SELECT id, hostname, tier, state FROM nodes WHERE id = $1`, [req.node!.id])
+    res.json(rows[0])
+  })
+
   r.get('/policy', (_req, res) => {
     res.json(POLICY)
   })

@@ -2,6 +2,13 @@ import DaiAgent
 import DaiWorker
 import Foundation
 
+// Line buffering, because stdout to a file is block buffered by default and the
+// daemon's log stayed empty for the first 4 KB. A log that appears only in
+// arrears is worse than no log: the first thing anyone does when a machine
+// misbehaves is look at it, and finding it empty says the agent never ran.
+setvbuf(stdout, nil, _IOLBF, 0)
+setvbuf(stderr, nil, _IOLBF, 0)
+
 // Subcommands while the port proceeds. `presence` is the one worth having first:
 // if presence is wrong, everything downstream is wrong in a way that disturbs
 // somebody.

@@ -24,6 +24,18 @@
     <string>@ANE@</string>
   </array>
 
+  <!--
+    Drops to a service account. A daemon is needed because a LaunchAgent only
+    exists inside a GUI login session and would be absent at the login window,
+    which is exactly the overnight capacity this product is made of. Root is not
+    needed for any of that: the work is inference, the Enclave key is sealed to
+    the machine rather than gated on privilege, and presence comes from IOKit
+    reads any user can make. Running as root would give a process that executes
+    fleet-supplied payloads the whole machine.
+  -->
+  <key>UserName</key>
+  <string>@USER@</string>
+
   <key>RunAtLoad</key>
   <true/>
 
@@ -62,6 +74,15 @@
     -->
     <key>DAI_IDENTITY_DIR</key>
     <string>@IDENTITY_DIR@</string>
+    <!--
+      The service account's home is /var/empty, so anything defaulting to
+      ~/.cache writes nowhere. Model downloads have to be told where to land or
+      the first GPU work unit fails on a path the logs will not explain.
+    -->
+    <key>HF_HOME</key>
+    <string>@MODEL_DIR@</string>
+    <key>HUGGINGFACE_HUB_CACHE</key>
+    <string>@MODEL_DIR@</string>
   </dict>
 
   <key>WorkingDirectory</key>

@@ -100,31 +100,35 @@ The server CA is distinct from the node CA that signs agent identities, and
 pinning the wrong one fails every connection with an error that reads like a
 network problem.
 
-## Known blocker: client identity from PKCS#12
+## Why the client key is the awkward part
 
-`dai-agent status` and `work` reach the control plane but stall on the mutual-TLS
-handshake until the request times out. Isolated precisely:
+The agent authenticates with a certificate, and getting a `SecIdentity` out of
+the PEM files enrollment produces is the one place this fought back. Worth
+recording, because the symptom pointed nowhere near the cause:
 
 | | |
 |---|---|
-| `curl` with the same PEM files | works |
-| Swift, server trust only, no client cert | **0.01s** |
+| `curl` with the same PEM files | 0.00s |
+| Swift, server trust only, no client cert | 0.01s |
 | Swift, presenting the client identity | **61s timeout** |
-| Both TLS challenges answered | yes, confirmed by logging |
-| Identity import | succeeds in 0.09s |
 
-So it is not the network, the server, the delegate, or the certificate. It is
-the `SecIdentity` produced by `SecPKCS12Import`: its private key is not backed by
-an accessible keychain, and signing during the handshake blocks rather than
-failing. Python's `ssl.load_cert_chain` takes PEM directly and has no equivalent
-step, which is why the Python agent works over mTLS today and this does not.
+Not the network, the server, the delegate or the certificate. `SecPKCS12Import`
+imports the key under an ACL that asks the user to authorise each process that
+signs with it, and the handshake blocks on that prompt. Interactively it looks
+like a hang; the request is simply waiting for a click. Python's
+`ssl.load_cert_chain` reads PEM directly and never involves the keychain, which
+is why the Python agent never hit this.
 
-**The fix is the Secure Enclave path already identified as the security gap.**
-Generating the key in the Enclave, marked non-exportable, removes the readable
-key file, the dependency on whichever `openssl` the system ships, and this stall
-together. It requires the control plane CA to sign EC P-256 CSRs, which
-node-forge cannot do, so the server-side issuer moves to a WebCrypto-based
-library at the same time.
+Naming the process as a trusted application at import makes signing silent, and
+that is what the code does now - but it is a stopgap, not a fix. The trust binds
+to this binary, so a rebuild prompts again, and under `launchd` there is no user
+to prompt: the daemon would stall exactly as the first measurement did.
+
+**Which makes Secure Enclave generation load-bearing rather than a hardening
+nicety.** A key generated in the Enclave has no ACL to negotiate, cannot be
+copied off disk, and removes the dependency on whichever `openssl` the system
+ships. It needs the control plane CA to sign EC P-256 CSRs, which node-forge
+cannot do, so the server-side issuer moves at the same time.
 
 `dai-agent timing <url>` reports per-phase latency and is what located this.
 

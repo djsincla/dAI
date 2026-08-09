@@ -378,10 +378,26 @@ public enum ClientIdentity {
                 "could not build PKCS#12 from PEM: \(errorText.prefix(200))")
         }
 
+        // Without an explicit access object the imported key lands under an ACL
+        // that asks the user to authorise every process that tries to sign with
+        // it. Interactively that shows up as a keychain prompt per run, which is
+        // merely annoying; under launchd there is nobody to click it and the
+        // handshake stalls until the request times out. Naming this process as
+        // the trusted application makes signing silent.
+        //
+        // It is not a real fix, only a way to keep the agent usable while the
+        // Secure Enclave path is built: the trust is bound to this binary, so a
+        // rebuild or a resigned copy prompts again. A key that lives in the
+        // Enclave has no ACL to negotiate.
+        var access: SecAccess?
+        SecAccessCreate("dai-agent client identity" as CFString, nil, &access)
+
+        var options: [String: Any] = [kSecImportExportPassphrase as String: password]
+        if let access { options[kSecImportExportAccess as String] = access }
+
         var items: CFArray?
         let status = SecPKCS12Import(try Data(contentsOf: p12) as CFData,
-                                     [kSecImportExportPassphrase as String: password] as CFDictionary,
-                                     &items)
+                                     options as CFDictionary, &items)
         guard status == errSecSuccess,
               let array = items as? [[String: Any]],
               let identity = array.first?[kSecImportItemIdentity as String] else {

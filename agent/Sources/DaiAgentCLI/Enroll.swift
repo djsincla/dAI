@@ -80,8 +80,9 @@ enum Enroll {
         // The bootstrap bundle is three things: URL, join token, and the server
         // CA. A node must verify the control plane before it has an identity, so
         // the CA has to arrive out of band.
-        let ca = try caPath.map { try ClientIdentity.loadCA(pem: URL(fileURLWithPath: $0)) }
-        let cp = ControlPlane(base: controlPlane, identity: nil, serverCA: ca)
+        let ca = try caPath.map { try String(contentsOfFile: $0, encoding: .utf8) }
+        let cp = try ControlPlane(base: controlPlane, identity: nil, serverCAPEM: ca)
+        defer { Task { await cp.shutdown() } }
 
         let nodeFile = dir.appendingPathComponent("node-id")
         let tokenFile = dir.appendingPathComponent("enrollment-token")

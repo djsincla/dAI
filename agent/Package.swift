@@ -17,12 +17,28 @@ let package = Package(
         // Model loading, tokenisers and generation. mlx-swift itself is the
         // array framework; the LLM layer lives here.
         .package(url: "https://github.com/ml-explore/mlx-swift-examples", from: "2.29.1"),
+        // URLSession can only present a client certificate as a SecIdentity,
+        // which needs the private key as a SecKey. A key held in the Secure
+        // Enclave is not one, and cannot be made into one without the keychain
+        // entitlement that route was chosen to avoid. NIO's TLS stack accepts a
+        // signing callback instead, which is the whole reason for this
+        // dependency.
+        .package(url: "https://github.com/apple/swift-nio-ssl", from: "2.26.0"),
+        .package(url: "https://github.com/apple/swift-nio", from: "2.65.0"),
+        .package(url: "https://github.com/swift-server/async-http-client", from: "1.21.0"),
     ],
     targets: [
         // Presence, policy and the control plane client stay free of model
         // runtimes so they remain testable without hardware: every policy bug
         // found in the Python agent reproduced from a recorded signal struct.
-        .target(name: "DaiAgent"),
+        .target(
+            name: "DaiAgent",
+            dependencies: [
+                .product(name: "NIOSSL", package: "swift-nio-ssl"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "AsyncHTTPClient", package: "async-http-client"),
+            ]
+        ),
         // The runtimes and the worker loop, which need MLX and Core ML.
         .target(
             name: "DaiWorker",

@@ -100,37 +100,64 @@ The server CA is distinct from the node CA that signs agent identities, and
 pinning the wrong one fails every connection with an error that reads like a
 network problem.
 
-## Why the client key is the awkward part
+## The node key lives in the Secure Enclave
 
-The agent authenticates with a certificate, and getting a `SecIdentity` out of
-the PEM files enrollment produces is the one place this fought back. Worth
-recording, because the symptom pointed nowhere near the cause:
+The key is generated inside the Enclave and never exists outside it. On disk
+there are 284 bytes the Enclave sealed to this machine: copy them to another Mac
+and they are inert, so a certificate taken from a stolen laptop names a key the
+thief cannot use. That is the difference between an identity and a file.
+
+It arrived as hardening and turned out to be load-bearing. The previous scheme
+imported an RSA PEM through `SecPKCS12Import`, which places the key under a
+keychain ACL that asks the user to authorise every process that signs with it.
+The handshake blocks on that prompt:
 
 | | |
 |---|---|
 | `curl` with the same PEM files | 0.00s |
 | Swift, server trust only, no client cert | 0.01s |
-| Swift, presenting the client identity | **61s timeout** |
+| Swift, presenting the imported identity | **61s timeout** |
+| Swift, Enclave key | **0.03s** |
 
-Not the network, the server, the delegate or the certificate. `SecPKCS12Import`
-imports the key under an ACL that asks the user to authorise each process that
-signs with it, and the handshake blocks on that prompt. Interactively it looks
-like a hang; the request is simply waiting for a click. Python's
-`ssl.load_cert_chain` reads PEM directly and never involves the keychain, which
-is why the Python agent never hit this.
+Interactively the stall is a dialog waiting to be clicked. Under `launchd` there
+is nobody to click it, so the daemon would simply hang. An Enclave key has no
+ACL to negotiate.
 
-Naming the process as a trusted application at import makes signing silent, and
-that is what the code does now - but it is a stopgap, not a fix. The trust binds
-to this binary, so a rebuild prompts again, and under `launchd` there is no user
-to prompt: the daemon would stall exactly as the first measurement did.
+### What it cost
 
-**Which makes Secure Enclave generation load-bearing rather than a hardening
-nicety.** A key generated in the Enclave has no ACL to negotiate, cannot be
-copied off disk, and removes the dependency on whichever `openssl` the system
-ships. It needs the control plane CA to sign EC P-256 CSRs, which node-forge
-cannot do, so the server-side issuer moves at the same time.
+Three things had to move, and each is worth knowing before touching this code.
 
-`dai-agent timing <url>` reports per-phase latency and is what located this.
+**The CA.** node-forge cannot sign elliptic-curve CSRs and the Enclave generates
+nothing but P-256, so the control plane's issuer moved to WebCrypto. The
+existing RSA CA still issues, with a test that signs an EC leaf under it and
+runs `openssl verify -purpose sslclient`.
+
+**The CSR builder.** Swift has no PKCS#10 encoder. CryptoKit signs and Security
+parses, but nothing in the SDK produces the request between them, so `ASN1.swift`
+encodes just enough DER by hand. Its tests check the bytes against `openssl`
+rather than against the encoder that wrote them.
+
+**The HTTP client.** `URLSession` can only present a client certificate as a
+`SecIdentity`, which needs the key as a `SecKey`. A CryptoKit Enclave key is not
+one, and making it one means putting the key in the keychain - the entitlement
+this route exists to avoid. So the client is AsyncHTTPClient over NIOSSL, which
+takes a signing callback and does not care where the key lives. One trap: on
+macOS AsyncHTTPClient defaults to Network.framework, which rejects a client
+certificate chain outright, so the BSD sockets loop has to be selected
+explicitly.
+
+`dai-agent timing <url>` reports per-phase latency, which is what found the
+stall in the first place.
+
+### Not the keychain, and why
+
+`SecKeyCreateRandomKey` with `kSecAttrTokenIDSecureEnclave` is the more obvious
+API and does not work here. It stores the key in the keychain, which refuses
+with `errSecMissingEntitlement` (-34018) unless the binary carries a
+`keychain-access-groups` entitlement backed by a provisioning profile; signing
+one with the entitlement and no profile gets the process killed on launch.
+CryptoKit hands back a sealed blob to store wherever we like and needs neither,
+verified from an unsigned command line tool.
 
 ## Not yet ported
 

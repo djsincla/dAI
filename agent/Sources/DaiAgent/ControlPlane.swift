@@ -1,5 +1,8 @@
+import AsyncHTTPClient
 import Foundation
-import Security
+import NIOCore
+import NIOPosix
+import NIOSSL
 
 /// Client for the control plane, speaking `control-plane/openapi/dai.yaml`.
 ///
@@ -36,24 +39,52 @@ public actor ControlPlane {
     }
 
     private let base: URL
-    private let session: URLSession
-    private let delegate: TLSDelegate
+    private let client: HTTPClient
 
     /// - Parameters:
-    ///   - identity: client certificate and key, for mTLS.
-    ///   - serverCA: the CA that signs the *control plane's* certificate. Not
+    ///   - identity: the node's certificate and its Enclave key, for mTLS.
+    ///   - serverCAPEM: the CA that signs the *control plane's* certificate. Not
     ///     the node CA, which signs agent identities and which a node never
     ///     needs. Pinning the wrong one fails every connection with a
     ///     certificate error that reads like a network problem.
-    public init(base: URL, identity: SecIdentity?, serverCA: SecCertificate?) {
+    public init(base: URL, identity: NodeIdentity?, serverCAPEM: String?) throws {
         self.base = base
-        self.delegate = TLSDelegate(identity: identity, serverCA: serverCA)
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 60
-        // The reverse channel holds a request open, so this has to outlast the
-        // server's long-poll timeout rather than cutting it short.
-        config.timeoutIntervalForResource = 300
-        self.session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+
+        var tls = TLSConfiguration.makeClientConfiguration()
+        if let serverCAPEM {
+            // Only the pinned CA is acceptable. Leaving the system anchors in
+            // place would mean any publicly trusted certificate for this host
+            // also works, which is not what pinning is for.
+            tls.trustRoots = .certificates(
+                try NIOSSLCertificate.fromPEMBytes(Array(serverCAPEM.utf8)))
+        }
+        if let identity {
+            tls.certificateChain = try NIOSSLCertificate
+                .fromPEMBytes(Array(identity.certificatePEM.utf8))
+                .map { .certificate($0) }
+            // The key itself is never handed over, only the ability to sign with
+            // it. See EnclaveSigner for why this is not URLSession.
+            tls.privateKey = .privateKey(
+                NIOSSLPrivateKey(customPrivateKey: EnclaveSigner(key: identity.key)))
+        }
+
+        var config = HTTPClient.Configuration(tlsConfiguration: tls)
+        // The reverse channel holds a request open, so the read timeout has to
+        // outlast the server's long poll rather than cutting it short.
+        config.timeout = .init(connect: .seconds(10), read: .seconds(300))
+        // Explicitly the BSD sockets loop. AsyncHTTPClient defaults to
+        // Network.framework on macOS, which refuses a client certificate chain
+        // outright: "TLSConfiguration.certificateChain is not supported". The
+        // custom signing key needs the NIOSSL path, so that default has to go.
+        self.client = HTTPClient(eventLoopGroupProvider: .shared(MultiThreadedEventLoopGroup.singleton),
+                                 configuration: config)
+    }
+
+    /// AsyncHTTPClient traps if it is deallocated while still running, so this
+    /// is not optional politeness. A long-lived agent never calls it; a CLI
+    /// command does, on the way out.
+    public func shutdown() async {
+        try? await client.shutdown()
     }
 
     // MARK: - Transport
@@ -61,16 +92,20 @@ public actor ControlPlane {
     private func request(_ method: String, _ path: String, body: JSONValue? = nil,
                          headers: [String: String] = [:],
                          timeout: TimeInterval? = nil) async throws -> (Int, Data) {
-        var req = URLRequest(url: base.appendingPathComponent(path))
-        req.httpMethod = method
-        req.setValue("application/json", forHTTPHeaderField: "content-type")
-        for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
-        if let body { req.httpBody = try JSONEncoder().encode(body) }
-        if let timeout { req.timeoutInterval = timeout }
+        var req = HTTPClientRequest(url: base.appendingPathComponent(path).absoluteString)
+        req.method = .init(rawValue: method)
+        req.headers.add(name: "content-type", value: "application/json")
+        for (k, v) in headers { req.headers.add(name: k, value: v) }
+        if let body { req.body = .bytes(ByteBuffer(data: try JSONEncoder().encode(body))) }
 
         do {
-            let (data, response) = try await session.data(for: req)
-            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let response = try await client.execute(
+                req, timeout: .seconds(Int64(timeout ?? 60)))
+            let code = Int(response.status.code)
+            // Work units carry their payloads inline, so this ceiling is a real
+            // constraint rather than a formality.
+            let buffer = try await response.body.collect(upTo: 64 * 1024 * 1024)
+            let data = Data(buffer: buffer)
             if code == 401 || code == 403 {
                 throw Failure.notEnrolled(String(data: data, encoding: .utf8) ?? "")
             }
@@ -81,8 +116,18 @@ public actor ControlPlane {
         } catch let e as Failure {
             throw e
         } catch {
-            throw Failure.transport(error.localizedDescription)
+            throw Failure.transport(String(describing: error))
         }
+    }
+
+    /// Unauthenticated liveness check.
+    ///
+    /// Useful precisely because it needs no client certificate: if this works
+    /// and an authenticated call does not, the fault is in the identity rather
+    /// than the network.
+    public func healthz() async throws -> String {
+        let (_, data) = try await request("GET", "healthz")
+        return String(data: data, encoding: .utf8) ?? ""
     }
 
     private func json(_ data: Data) -> JSONValue {
@@ -254,168 +299,23 @@ public func mergePolicy(local: [PresenceState: StatePolicy],
 /// Pinning rather than trusting the system store: a node that verifies nothing
 /// accepts work from anything that can reach it on the network, and a work unit
 /// tells a node what to execute.
-final class TLSDelegate: NSObject, URLSessionDelegate, URLSessionTaskDelegate, @unchecked Sendable {
-    private let identity: SecIdentity?
-    private let serverCA: SecCertificate?
-
-    init(identity: SecIdentity?, serverCA: SecCertificate?) {
-        self.identity = identity
-        self.serverCA = serverCA
-    }
-
-    /// Server trust arrives as a *session*-level challenge.
-    func urlSession(
-        _ session: URLSession,
-        didReceive challenge: URLAuthenticationChallenge,
-        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
-    ) {
-        let (disposition, credential) = handle(challenge)
-        completionHandler(disposition, credential)
-    }
-
-    /// Client certificates arrive as a *task*-level challenge, and only
-    /// URLSessionTaskDelegate receives them.
-    ///
-    /// Implementing just the session-level method meant the certificate
-    /// challenge was never answered, and the request sat until it timed out.
-    /// The symptom reads like a network fault rather than a delegate that is
-    /// not being asked, which is what made it slow to find.
-    func urlSession(
-        _ session: URLSession,
-        task: URLSessionTask,
-        didReceive challenge: URLAuthenticationChallenge,
-        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
-    ) {
-        let (disposition, credential) = handle(challenge)
-        completionHandler(disposition, credential)
-    }
-
-    private func handle(_ challenge: URLAuthenticationChallenge)
-        -> (URLSession.AuthChallengeDisposition, URLCredential?) {
-
-        if ProcessInfo.processInfo.environment["DAI_TLS_DEBUG"] != nil {
-            FileHandle.standardError.write(
-                "TLS challenge: \(challenge.protectionSpace.authenticationMethod)\n"
-                    .data(using: .utf8)!)
-        }
-        switch challenge.protectionSpace.authenticationMethod {
-        case NSURLAuthenticationMethodClientCertificate:
-            guard let identity else { return (.performDefaultHandling, nil) }
-            return (.useCredential,
-                    URLCredential(identity: identity, certificates: nil, persistence: .forSession))
-
-        case NSURLAuthenticationMethodServerTrust:
-            guard let trust = challenge.protectionSpace.serverTrust else {
-                return (.cancelAuthenticationChallenge, nil)
-            }
-            guard let serverCA else { return (.performDefaultHandling, nil) }
-            SecTrustSetAnchorCertificates(trust, [serverCA] as CFArray)
-            // Only the pinned CA is acceptable. Leaving the system anchors in
-            // place would mean any publicly trusted certificate for this host
-            // also works, which is not what pinning is for.
-            SecTrustSetAnchorCertificatesOnly(trust, true)
-            var error: CFError?
-            guard SecTrustEvaluateWithError(trust, &error) else {
-                return (.cancelAuthenticationChallenge, nil)
-            }
-            return (.useCredential, URLCredential(trust: trust))
-
-        default:
-            return (.performDefaultHandling, nil)
-        }
-    }
-}
-
-/// Loads a client identity from PEM by way of a PKCS#12 bundle.
+/// The node's identity: the certificate the control plane issued, and the
+/// Enclave key it was issued against.
 ///
-/// **This path does not currently work and is the reason the Swift agent cannot
-/// yet replace the Python one.** The identity imports successfully and both TLS
-/// challenges are answered, but the handshake then stalls until the request
-/// times out. An otherwise identical request that presents no client
-/// certificate completes in 0.01s, and `curl` with the same PEM files succeeds,
-/// so the fault is specific to using a `SecIdentity` whose private key was
-/// imported this way: it is not backed by an accessible keychain, and signing
-/// blocks rather than failing.
-///
-/// The fix is the one already identified as the security gap: generate the key
-/// in the Secure Enclave, marked non-exportable, and never produce a PEM at
-/// all. That removes the readable key file, the dependency on whichever
-/// `openssl` the system ships, and this stall together. It requires the control
-/// plane CA to sign EC P-256 CSRs, which node-forge does not do, so the server
-/// side moves to a WebCrypto-based issuer at the same time.
-///
-/// The production target is a key generated in the Secure Enclave and marked
-/// non-exportable, so a certificate copied off disk is useless without the
-/// hardware. This path exists because the current enrollment flow produces PEM
-/// files, and it is the weaker of the two in two ways: a readable key file is a
-/// key that can be taken, and shelling out to `openssl` means depending on
-/// whichever implementation the system ships. macOS ships LibreSSL, whose
-/// `pkcs12` differs from OpenSSL's, which cost a debugging cycle here. Secure
-/// Enclave generation removes both problems by never producing a PEM at all.
-public enum ClientIdentity {
-    public static func load(certPEM: URL, keyPEM: URL) throws -> SecIdentity {
-        let p12 = FileManager.default.temporaryDirectory
-            .appendingPathComponent("dai-\(UUID().uuidString).p12")
-        defer { try? FileManager.default.removeItem(at: p12) }
+/// The key is a handle rather than key material. Nothing here can export it,
+/// which is the point.
+public struct NodeIdentity: Sendable {
+    public let certificatePEM: String
+    public let key: EnclaveKey
 
-        let password = UUID().uuidString
-        let openssl = Process()
-        openssl.executableURL = URL(fileURLWithPath: "/usr/bin/openssl")
-        // No -legacy: macOS ships LibreSSL, which does not have that flag. It
-        // is an OpenSSL 3 option and adding it fails with "unknown option",
-        // which surfaces here as an opaque identity error.
-        openssl.arguments = ["pkcs12", "-export",
-                             "-inkey", keyPEM.path, "-in", certPEM.path,
-                             "-out", p12.path, "-passout", "pass:\(password)"]
-        let stderr = Pipe()
-        openssl.standardError = stderr
-        try openssl.run()
-        let errorText = String(data: stderr.fileHandleForReading.readDataToEndOfFile(),
-                               encoding: .utf8) ?? ""
-        openssl.waitUntilExit()
-        guard openssl.terminationStatus == 0 else {
-            throw ControlPlane.Failure.identity(
-                "could not build PKCS#12 from PEM: \(errorText.prefix(200))")
-        }
-
-        // Without an explicit access object the imported key lands under an ACL
-        // that asks the user to authorise every process that tries to sign with
-        // it. Interactively that shows up as a keychain prompt per run, which is
-        // merely annoying; under launchd there is nobody to click it and the
-        // handshake stalls until the request times out. Naming this process as
-        // the trusted application makes signing silent.
-        //
-        // It is not a real fix, only a way to keep the agent usable while the
-        // Secure Enclave path is built: the trust is bound to this binary, so a
-        // rebuild or a resigned copy prompts again. A key that lives in the
-        // Enclave has no ACL to negotiate.
-        var access: SecAccess?
-        SecAccessCreate("dai-agent client identity" as CFString, nil, &access)
-
-        var options: [String: Any] = [kSecImportExportPassphrase as String: password]
-        if let access { options[kSecImportExportAccess as String] = access }
-
-        var items: CFArray?
-        let status = SecPKCS12Import(try Data(contentsOf: p12) as CFData,
-                                     options as CFDictionary, &items)
-        guard status == errSecSuccess,
-              let array = items as? [[String: Any]],
-              let identity = array.first?[kSecImportItemIdentity as String] else {
-            throw ControlPlane.Failure.identity("SecPKCS12Import failed (\(status))")
-        }
-        return identity as! SecIdentity
+    public init(certificatePEM: String, key: EnclaveKey) {
+        self.certificatePEM = certificatePEM
+        self.key = key
     }
 
-    public static func loadCA(pem: URL) throws -> SecCertificate {
-        let text = try String(contentsOf: pem, encoding: .utf8)
-        let body = text
-            .replacingOccurrences(of: "-----BEGIN CERTIFICATE-----", with: "")
-            .replacingOccurrences(of: "-----END CERTIFICATE-----", with: "")
-            .components(separatedBy: .whitespacesAndNewlines).joined()
-        guard let der = Data(base64Encoded: body),
-              let cert = SecCertificateCreateWithData(nil, der as CFData) else {
-            throw ControlPlane.Failure.identity("could not parse CA certificate")
-        }
-        return cert
+    /// Load from the files enrollment wrote.
+    public static func load(certificate: URL, enclaveKey: URL) throws -> NodeIdentity {
+        NodeIdentity(certificatePEM: try String(contentsOf: certificate, encoding: .utf8),
+                     key: try EnclaveKey.loadOrCreate(at: enclaveKey))
     }
 }

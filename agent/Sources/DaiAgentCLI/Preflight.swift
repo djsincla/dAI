@@ -82,7 +82,18 @@ enum Preflight {
             failures += 1
         }
 
-        // 5. QoS, the dial the agent turns when somebody sits down.
+        // 5. MLX, which is not a hard failure. A machine without it is still a
+        // useful fleet member: ANE work is the only thing three of the five
+        // presence states permit, so most of the fleet's hours do not involve
+        // the GPU runtime at all.
+        if MLXProbe.isAvailable() {
+            ok("MLX", "GPU runtime works; this node can serve generate work")
+        } else {
+            warn("MLX", "no GPU runtime (Metal shader library missing). ANE work "
+                + "still runs; for GPU work: xcodebuild -downloadComponent MetalToolchain")
+        }
+
+        // 6. QoS, the dial the agent turns when somebody sits down.
         ProcessQoS.setBackground(true)
         ProcessQoS.setBackground(false)
         ok("QoS", "background and standard both settable")

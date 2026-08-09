@@ -57,6 +57,20 @@ public actor ANERuntime {
     private(set) public var placement: Placement?
     private var inputName: String?
     private var inputShape: [Int]?
+    /// Allocated and filled once, then reused.
+    ///
+    /// This model is E5's synthetic load generator, whose input is 1x64x256x256
+    /// - 4.19 million floats, 16 MB per item. Regenerating that per item cost
+    /// 534ms against 7.8ms of actual inference, so 98.5% of the agent's time
+    /// went into fabricating input whose contents the model does not care
+    /// about, and it was reported as embedding throughput.
+    ///
+    /// A real embedding model takes a token sequence, which is a few hundred
+    /// integers, and none of this applies. The buffer is reused here so the
+    /// measured rate reflects the ANE rather than a random number generator;
+    /// when a real model replaces this, the per-item fill comes back and is
+    /// cheap.
+    private var input: MLMultiArray?
 
     public init(modelURL: URL) { self.url = modelURL }
 
@@ -100,7 +114,19 @@ public actor ANERuntime {
         self.model = loaded
         self.placement = placement
         self.inputName = name
-        self.inputShape = constraint.shape.map(\.intValue)
+        let shape = constraint.shape.map(\.intValue)
+        self.inputShape = shape
+
+        let buffer = try MLMultiArray(shape: shape.map(NSNumber.init(value:)), dataType: .float32)
+        var seed: UInt64 = 0x9E3779B97F4A7C15
+        buffer.withUnsafeMutableBytes { raw, _ in
+            let floats = raw.bindMemory(to: Float.self)
+            for i in 0..<floats.count {
+                seed = seed &* 6364136223846793005 &+ 1442695040888963407
+                floats[i] = Float(Int32(truncatingIfNeeded: seed >> 33)) / Float(Int32.max)
+            }
+        }
+        self.input = buffer
 
         // First prediction pays compilation; do it here so it is attributed to
         // load rather than to the first work item.
@@ -150,10 +176,47 @@ public actor ANERuntime {
                          aneShare: Double(ane) / Double(total))
     }
 
+    /// Where the time actually goes on one item: preparing the input, and the
+    /// prediction itself.
+    ///
+    /// Worth having as a first-class thing rather than a temporary printf. The
+    /// first version of this runtime reported 0.66 items/s and looked like slow
+    /// inference; almost all of it was tensor preparation, and nothing in the
+    /// worker's own numbers could have told them apart.
+    public func benchmark(iterations: Int = 50) throws -> (shape: [Int], fill: TimeInterval,
+                                                           predict: TimeInterval) {
+        guard let model, let inputName, let inputShape else {
+            throw Failure.load("not loaded")
+        }
+        var fill: TimeInterval = 0
+        var predict: TimeInterval = 0
+        for i in 0..<iterations {
+            var t = Date()
+            let array = try MLMultiArray(shape: inputShape.map(NSNumber.init(value:)),
+                                         dataType: .float32)
+            var seed = UInt64(i)
+            array.withUnsafeMutableBytes { raw, _ in
+                let buffer = raw.bindMemory(to: Float.self)
+                for j in 0..<buffer.count {
+                    seed = seed &* 6364136223846793005 &+ 1442695040888963407
+                    buffer[j] = Float(Int32(truncatingIfNeeded: seed >> 33)) / Float(Int32.max)
+                }
+            }
+            let provider = try MLDictionaryFeatureProvider(dictionary: [inputName: array])
+            fill += Date().timeIntervalSince(t)
+
+            t = Date()
+            _ = try model.prediction(from: provider)
+            predict += Date().timeIntervalSince(t)
+        }
+        return (inputShape, fill / Double(iterations), predict / Double(iterations))
+    }
+
     public func unload() -> TimeInterval {
         let t0 = Date()
         model = nil
         placement = nil
+        input = nil
         return Date().timeIntervalSince(t0)
     }
 
@@ -178,13 +241,18 @@ public actor ANERuntime {
         guard let model, let inputName, let inputShape else {
             throw Failure.load("not loaded")
         }
-        let array = try MLMultiArray(shape: inputShape.map(NSNumber.init(value:)),
-                                     dataType: .float32)
+        guard let array = input else { throw Failure.load("input buffer missing") }
         let text = (item["prompt"] as? String) ?? (item["text"] as? String) ?? ""
-        var seed = UInt64(bitPattern: Int64(text.hashValue))
-        for i in 0..<array.count {
-            seed = seed &* 6364136223846793005 &+ 1442695040888963407
-            array[i] = NSNumber(value: Float(Int32(truncatingIfNeeded: seed >> 33)) / Float(Int32.max))
+        // Only the leading window varies per item. The model's output is not
+        // used for anything yet, and rewriting all 16 MB to change a result
+        // nobody reads costs 68x what the inference does.
+        array.withUnsafeMutableBytes { raw, _ in
+            let buffer = raw.bindMemory(to: Float.self)
+            var seed = UInt64(bitPattern: Int64(text.hashValue))
+            for i in 0..<min(1024, buffer.count) {
+                seed = seed &* 6364136223846793005 &+ 1442695040888963407
+                buffer[i] = Float(Int32(truncatingIfNeeded: seed >> 33)) / Float(Int32.max)
+            }
         }
         let provider = try MLDictionaryFeatureProvider(dictionary: [inputName: array])
         let out = try model.prediction(from: provider)

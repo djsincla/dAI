@@ -88,7 +88,23 @@ public actor MLXRuntime {
     /// yields per token, which is what a mid-generation stop will need: a single
     /// request has no seam to yield at, and `maxCompletionTokens` bounds the
     /// worst case only because the loop can be cut short here.
+    /// A completion and what it cost.
+    ///
+    /// The counts are not decoration. An interactive client drives its context
+    /// gauge and its compaction from them, so reporting zero tells it the
+    /// conversation is never filling up, and it will happily run past what the
+    /// model accepts.
+    public struct Completion: Sendable {
+        public let text: String
+        public let promptTokens: Int
+        public let completionTokens: Int
+    }
+
     public func generate(prompt: String, maxTokens: Int) async throws -> String {
+        try await complete(prompt: prompt, maxTokens: maxTokens).text
+    }
+
+    public func complete(prompt: String, maxTokens: Int) async throws -> Completion {
         guard let container else { throw Failure.notLoaded }
         return try await container.perform { context in
             let input = try await context.processor.prepare(
@@ -102,11 +118,53 @@ public actor MLXRuntime {
                 context: context)
 
             var text = ""
+            var promptTokens = 0
+            var completionTokens = 0
             for await item in stream {
-                if case let .chunk(chunk) = item { text += chunk }
+                switch item {
+                case let .chunk(chunk):
+                    text += chunk
+                case let .info(info):
+                    // Reported by MLX at the end of the stream rather than
+                    // estimated from the text, so the numbers are the model's
+                    // own rather than a guess about its tokeniser.
+                    promptTokens = info.promptTokenCount
+                    completionTokens = info.generationTokenCount
+                default:
+                    break
+                }
             }
-            return text
+            return Completion(text: text, promptTokens: promptTokens,
+                              completionTokens: completionTokens)
         }
+    }
+
+    /// The model's context window, read from its own configuration.
+    ///
+    /// Advertised so a client does not have to assume. A client guessing high
+    /// runs a conversation past what the model accepts; guessing low wastes
+    /// most of the window it paid for.
+    /// Read from the model's own config.json rather than the loaded object,
+    /// which does not expose it. That file is the source of truth every runtime
+    /// reads, and it is on disk next to the weights whether or not the model is
+    /// currently loaded.
+    public var contextLength: Int? {
+        let config = Self.modelDirectory
+            .appendingPathComponent(modelId)
+            .appendingPathComponent("config.json")
+        guard let data = try? Data(contentsOf: config),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+
+        // Ordered by how much they can be trusted. text_config appears on
+        // multimodal models, where the top level describes the wrapper rather
+        // than the language model doing the generating.
+        if let text = json["text_config"] as? [String: Any],
+           let n = text["max_position_embeddings"] as? Int { return n }
+        for key in ["max_position_embeddings", "max_sequence_length", "n_positions"] {
+            if let n = json[key] as? Int { return n }
+        }
+        return nil
     }
 
     public enum Failure: Error, CustomStringConvertible {

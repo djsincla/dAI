@@ -112,6 +112,10 @@ export function createApp(db: Db, surface: Surface = 'both'): Express {
     // exist, which reads as a decision already taken rather than one still
     // open. Anyone who can reach the subnet can use the fleet.
     app.use('/v1', aclMiddleware(adminAcl, 'serving'), servingRoutes(db, broker))
+    // The same router under /api, so /api/v0/models resolves. Tools written
+    // against LM Studio probe that path for the context window, and the point
+    // of serving their shape is that they work without being patched.
+    app.use('/api', aclMiddleware(adminAcl, 'serving'), servingRoutes(db, broker))
   }
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {

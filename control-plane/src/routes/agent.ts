@@ -148,6 +148,7 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
     const b = req.body as {
       presenceState: string; onAcPower?: boolean; thermalOk?: boolean
       userPaused?: boolean
+      models?: { name: string; contextLength: number }[]
       capabilitySamples?: { workloadClass: string; itemsPerSecond: number }[]
       residentModels?: Record<string, number>
     }
@@ -164,6 +165,9 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
           SET presence_state = $1, on_ac_power = $2, thermal_ok = $3,
               last_heartbeat = now(),
               user_paused = COALESCE($7, user_paused),
+              -- Merged rather than replaced: a node that has not mentioned a
+              -- model this beat has not forgotten how big its window is.
+              model_context = model_context || $8::jsonb,
               -- Stamped on the transition only, so the UI can say how long a
               -- machine has been paused rather than just that it is.
               user_paused_at = CASE
@@ -178,7 +182,9 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
         WHERE id = $6`,
       [b.presenceState, b.onAcPower ?? null, b.thermalOk ?? null,
        JSON.stringify(profiles), JSON.stringify(b.residentModels ?? {}), node.id,
-       b.userPaused ?? null],
+       b.userPaused ?? null,
+       JSON.stringify(Object.fromEntries(
+         (b.models ?? []).map((m) => [m.name, m.contextLength]))) ],
     )
     // Presence history feeds the capacity graph, which cannot be drawn from
     // current state alone.

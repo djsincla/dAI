@@ -263,6 +263,37 @@ case "generate":
         print(String(format: "released in %.0f ms", freed * 1000))
     } catch { print("generate failed: \(error)"); exit(1) }
 
+case "lease-probe":
+    // Asks the control plane for work of the given kinds and prints the answer.
+    //
+    // Read-only, and it cannot be used to run work a machine's presence
+    // forbids: the server enforces that against its own copy of the state and
+    // refuses regardless of what is asked for. It exists because "this node is
+    // idle" had two indistinguishable causes, and telling them apart otherwise
+    // meant locking the screen and waiting.
+    guard args.count > 3 else {
+        print("usage: dai-agent lease-probe <url> <kind[,kind]>"); exit(2)
+    }
+    do {
+        let dir = Enroll.identityDir()
+        let identity = try NodeIdentity.load(
+            certificate: dir.appendingPathComponent("node.crt"),
+            enclaveKey: Enroll.keyPath(dir))
+        let ca = try String(contentsOf: dir.appendingPathComponent("ca.crt"), encoding: .utf8)
+        let cp = try ControlPlane(base: URL(string: args[2])!, identity: identity, serverCAPEM: ca)
+        let kinds = args[3].split(separator: ",").compactMap { WorkKind(rawValue: String($0)) }
+        if let lease = try await cp.leaseWork(kinds: kinds) {
+            print("leased \(lease.kind.rawValue) unit \(lease.unitId), \(lease.items.count) items")
+            // Hand it straight back: this is a probe, not a worker.
+            try await cp.report(unitId: lease.unitId, completed: [],
+                                unfinished: lease.items, seconds: 0)
+            print("returned it to the queue")
+        } else {
+            print("no work: \(await cp.lastLeaseReason ?? "unknown")")
+        }
+        await cp.shutdown()
+    } catch { print("lease probe failed: \(error)"); exit(1) }
+
 case "qos":
     // Demonstrates the control that E1 measured at 2.4x on sustained work and
     // the worker at ~26x on bursty work.

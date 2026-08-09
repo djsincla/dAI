@@ -239,10 +239,18 @@ paths:
         - name: kinds
           in: query
           required: true
-          description: Comma-separated work kinds the node may currently run
+          description: Work kinds the node may currently run
+          # An array with explode false, which is the OpenAPI spelling of
+          # "comma-separated". Declaring it as a plain string looked equivalent
+          # and was not: the validator then treats the comma as a reserved
+          # character and rejects the very example this parameter documented,
+          # so asking for one kind worked and asking for two never could.
+          style: form
+          explode: false
           schema:
-            type: string
-            example: embed,generate
+            type: array
+            items: { $ref: '#/components/schemas/WorkKind' }
+            example: [embed, generate]
       responses:
         '200':
           description: A leased unit, or a reason none was given

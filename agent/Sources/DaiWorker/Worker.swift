@@ -44,6 +44,10 @@ public actor Worker {
     private var qosBackground: Bool?
     private var capability: [String: Double] = [:]
     private var lastHeartbeat: TimeInterval = 0
+    /// Last reported set of permitted kinds, so a change can be logged once
+    /// rather than every poll.
+    private var lastKinds: [WorkKind]?
+    private var lastReason: String?
 
     public struct Stats: Sendable {
         public var items = 0
@@ -112,6 +116,7 @@ public actor Worker {
         guard now - lastHeartbeat >= 30 else { return }
         lastHeartbeat = now
         do {
+            log("heartbeat: \(reading.state.rawValue)")
             try await controlPlane.heartbeat(
                 state: reading.state,
                 onACPower: reading.signals.onACPower,
@@ -151,6 +156,18 @@ public actor Worker {
             await syncIfDue(reading)
 
             let kinds = availableKinds(statePolicy)
+            // The single most useful line in this log. Without it, a node doing
+            // nothing is indistinguishable from a node that thinks it is not
+            // allowed to, and the two have completely different causes.
+            if kinds != lastKinds {
+                lastKinds = kinds
+                log("\(reading.state.rawValue): "
+                    + (kinds.isEmpty ? "no work permitted"
+                                     : "may run " + kinds.map(\.rawValue).joined(separator: ", "))
+                    + " (gpu=\(statePolicy.gpu) ane=\(statePolicy.ane) "
+                    + "duty=\(String(format: "%.2f", statePolicy.dutyMax)) "
+                    + "runtimes: gpu=\(gpu != nil ? "yes" : "no") ane=\(ane != nil ? "yes" : "no"))")
+            }
             if kinds.isEmpty {
                 if let gpu, await gpu.isLoaded {
                     let freed = await gpu.unload()
@@ -170,10 +187,34 @@ public actor Worker {
                     + String(format: "%.0fms", freed * 1000))
             }
 
-            guard let lease = try? await controlPlane.leaseWork(kinds: kinds) else {
+            var lease: ControlPlane.Lease?
+            var failure: String?
+            do {
+                lease = try await controlPlane.leaseWork(kinds: kinds)
+                if lease == nil { failure = await controlPlane.lastLeaseReason }
+            } catch {
+                // Previously `try?`, which turned every transport and HTTP
+                // error into an indistinguishable nil. A node being refused
+                // work by the server and a node whose requests are failing look
+                // identical from outside, and this hid the second for an entire
+                // debugging session.
+                failure = "request failed: \(error)"
+            }
+
+            guard let lease else {
+                // Keyed on the kinds too. Keying on the message alone meant that
+                // asking for something different and being refused for the same
+                // stated reason logged nothing at all.
+                let key = kinds.map(\.rawValue).joined(separator: ",") + "|" + (failure ?? "")
+                if key != lastReason {
+                    lastReason = key
+                    log("asked for \(kinds.map(\.rawValue).joined(separator: ", ")), "
+                        + "got none: \(failure ?? "unknown")")
+                }
                 try? await Task.sleep(for: .seconds(monitor.pollInterval))
                 continue
             }
+            lastReason = nil
 
             await process(lease, statePolicy: statePolicy, state: reading.state)
         }

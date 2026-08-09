@@ -2,6 +2,7 @@ import DaiAgent
 import Foundation
 import MLX
 import MLXLLM
+import Hub
 import MLXLMCommon
 
 /// MLX runtime for `generate` work.
@@ -16,6 +17,35 @@ public actor MLXRuntime {
 
     public init(modelId: String) { self.modelId = modelId }
 
+    /// Whether the node may reach the hub for weights it does not have.
+    ///
+    /// Off by default, for two reasons that happen to agree.
+    ///
+    /// The measured one: consulting the hub costs 99s on a model already
+    /// present on disk, against 3.85s offline. E4 sized the entire preemption
+    /// design around a 1-3s reload, and 99s does not merely miss that, it
+    /// inverts it - a yield would cost more than the work it protects. The
+    /// number is a network round trip per file, on every load, forever.
+    ///
+    /// The other is the product's premise. A fleet sold on data never leaving
+    /// the building should not have every node fetching weights from the
+    /// internet on first use. Models belong in the control plane's catalogue,
+    /// staged deliberately and verified by hash.
+    public static var fetchAllowed: Bool {
+        ProcessInfo.processInfo.environment["DAI_ALLOW_MODEL_FETCH"] == "1"
+    }
+
+    /// Where model weights live.
+    ///
+    /// Overridable so the daemon can be pointed at its own state directory,
+    /// which it must be: a service account has no usable home.
+    public static var modelDirectory: URL {
+        if let dir = ProcessInfo.processInfo.environment["DAI_MODEL_DIR"], !dir.isEmpty {
+            return URL(fileURLWithPath: dir)
+        }
+        return URL.cachesDirectory
+    }
+
     public var isLoaded: Bool { container != nil }
     public var name: String { modelId }
 
@@ -23,7 +53,17 @@ public actor MLXRuntime {
     public func load() async throws -> TimeInterval {
         if container != nil { return 0 }
         let t0 = Date()
+        // Told explicitly where models live, rather than left to the default.
+        //
+        // swift-transformers does not read HF_HOME or HUGGINGFACE_HUB_CACHE:
+        // those are Python conventions, and it uses its own location under the
+        // running user's Library/Caches. Under the daemon's service account
+        // that resolves to /var/empty, so the download fails on a path no
+        // configuration appeared to control. Setting downloadBase is the only
+        // thing that actually moves it.
         container = try await LLMModelFactory.shared.loadContainer(
+            hub: HubApi(downloadBase: Self.modelDirectory,
+                        useOfflineMode: !Self.fetchAllowed),
             configuration: ModelConfiguration(id: modelId))
         return Date().timeIntervalSince(t0)
     }

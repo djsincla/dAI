@@ -102,7 +102,20 @@ public actor ControlPlane {
         var components = URLComponents(url: base.appendingPathComponent(path),
                                        resolvingAgainstBaseURL: false)!
         if !query.isEmpty {
-            components.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
+            // Encoded explicitly, down to the reserved characters. URLComponents
+            // leaves "," alone because RFC 3986 permits it in a query, but the
+            // server's OpenAPI validator rejects any reserved character it finds
+            // there: "Parameter 'kinds' must be url encoded".
+            //
+            // The effect was invisible in the worst way. A single kind has no
+            // comma and worked; asking for two produced a 400 that the agent
+            // swallowed, so a node sat in LOCKED with GPU work queued, asking
+            // for it every five seconds, and never being told no.
+            components.percentEncodedQueryItems = query.map {
+                URLQueryItem(name: $0.key,
+                             value: $0.value.addingPercentEncoding(
+                                withAllowedCharacters: .daiQueryValue) ?? $0.value)
+            }
         }
         var req = HTTPClientRequest(url: components.url!.absoluteString)
         req.method = .init(rawValue: method)
@@ -250,13 +263,32 @@ public actor ControlPlane {
     /// `kinds` is what the node may run *right now* under its presence policy,
     /// not what it is capable of. Without that distinction the agent fetches
     /// work it must immediately hand back.
+    /// Why the last lease returned nothing.
+    ///
+    /// Kept because "the node is idle" and "the node is being refused work" look
+    /// identical from outside, and the causes are unrelated. Discarding this was
+    /// how a node sat asking for work it was allowed to do and getting none,
+    /// with nothing anywhere saying so.
+    public private(set) var lastLeaseReason: String?
+
     public func leaseWork(kinds: [WorkKind]) async throws -> Lease? {
-        guard !kinds.isEmpty else { return nil }
+        guard !kinds.isEmpty else { lastLeaseReason = "no kinds permitted"; return nil }
         let (_, data) = try await request(
             "GET", "agent/v1/work",
             query: ["kinds": kinds.map(\.rawValue).joined(separator: ",")])
         let d = json(data)
-        if d["reason"] != nil { return nil }   // empty | none-of-these-kinds | node-paused
+        if let reason = d["reason"]?.stringValue {
+            lastLeaseReason = reason   // empty | none-of-these-kinds | node-paused
+            return nil
+        }
+        if d["unitId"]?.stringValue == nil {
+            // A response that is neither a lease nor a reason means the two ends
+            // disagree about the schema, which is worth saying out loud.
+            lastLeaseReason = "unrecognised response: "
+                + (String(data: data, encoding: .utf8)?.prefix(120) ?? "")
+            return nil
+        }
+        lastLeaseReason = nil
         guard let id = d["unitId"]?.stringValue,
               let kind = WorkKind(rawValue: d["kind"]?.stringValue ?? ""),
               case let .array(items)? = d["items"] else { return nil }
@@ -331,4 +363,13 @@ public struct NodeIdentity: Sendable {
         NodeIdentity(certificatePEM: try String(contentsOf: certificate, encoding: .utf8),
                      key: try EnclaveKey.loadOrCreate(at: enclaveKey))
     }
+}
+
+
+extension CharacterSet {
+    /// Unreserved characters only, per RFC 3986. Everything else in a query
+    /// value gets percent-encoded, which is stricter than URL parsers require
+    /// and exactly what a strict server-side validator expects.
+    static let daiQueryValue = CharacterSet(charactersIn:
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
 }

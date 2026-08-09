@@ -204,8 +204,12 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
   })
 
   r.get('/work', async (req, res) => {
-    const raw = String(req.query.kinds ?? '')
-    const requested = raw.split(',').map((s) => s.trim()).filter((s): s is WorkKind =>
+    // The validator hands this back as an array now, but a hand-written client
+    // or an older agent may still produce a bare string, and refusing those
+    // would break nodes mid-upgrade for no benefit.
+    const raw = req.query.kinds
+    const parts = Array.isArray(raw) ? raw.map(String) : String(raw ?? '').split(',')
+    const requested = parts.map((s) => s.trim()).filter((s): s is WorkKind =>
       (KINDS as string[]).includes(s))
 
     const out = await leaseWork(db, req.node!, requested)

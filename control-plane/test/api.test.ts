@@ -293,6 +293,46 @@ describe('authorization', () => {
    * makes the agent malware in that person's mental model, so ownership grants
    * pause rights that no role can remove.
    */
+  it('lets an operator lift a pause they applied', async () => {
+    // Pause could be applied and never removed, so the button was a one-way
+    // door: the node stayed out of the fleet until somebody edited the
+    // database.
+    const pause = () => fetch(`${base}/admin/v1/nodes/${fx.nodeId}/pause`,
+      { method: 'POST', headers: asUser(fx.operatorId), body: '{}' })
+    const resume = () => fetch(`${base}/admin/v1/nodes/${fx.nodeId}/resume`,
+      { method: 'POST', headers: asUser(fx.operatorId), body: '{}' })
+
+    await pause()
+    let { rows } = await db.query('SELECT state FROM nodes WHERE id=$1', [fx.nodeId])
+    expect(rows[0].state).toBe('paused')
+
+    const r = await resume()
+    expect(r.status).toBe(200)
+    rows = (await db.query('SELECT state, paused_until FROM nodes WHERE id=$1',
+                           [fx.nodeId])).rows
+    expect(rows[0].state).toBe('active')
+    expect(rows[0].paused_until).toBeNull()
+  })
+
+  it('resuming a node does not lift the pause its owner set', async () => {
+    // An operator restarting a machine they paused must not quietly also
+    // override the person sitting at it.
+    await fetch(`${base}/agent/v1/heartbeat`, {
+      method: 'POST', headers: asNode(fx.fingerprint),
+      body: JSON.stringify({ presenceState: 'LOCKED', onACPower: true,
+                             thermalOk: true, userPaused: true }),
+    })
+    await fetch(`${base}/admin/v1/nodes/${fx.nodeId}/pause`,
+      { method: 'POST', headers: asUser(fx.operatorId), body: '{}' })
+    await fetch(`${base}/admin/v1/nodes/${fx.nodeId}/resume`,
+      { method: 'POST', headers: asUser(fx.operatorId), body: '{}' })
+
+    const { rows } = await db.query('SELECT state, user_paused FROM nodes WHERE id=$1',
+                                    [fx.nodeId])
+    expect(rows[0].state).toBe('active')
+    expect(rows[0].user_paused).toBe(true)
+  })
+
   it('lets the machine owner pause their own node without any role binding', async () => {
     const r = await fetch(`${base}/admin/v1/nodes/${fx.nodeId}/pause`, {
       method: 'POST', headers: asUser(fx.ownerId), body: JSON.stringify({}),

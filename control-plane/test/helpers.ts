@@ -2,8 +2,26 @@ import type { Express } from 'express'
 import { createPool, type Db, reset } from '../src/lib/db.js'
 import { createApp } from '../src/server.js'
 
+/**
+ * A separate database, and deliberately not the one anybody is using.
+ *
+ * `freshDb` drops the schema, so pointing the suite at the working database
+ * destroys it: every run wiped the demo fleet, invalidated the admin session
+ * and orphaned the identity of any agent enrolled against it. That happened
+ * three times in one afternoon before this existed, each time looking like a
+ * different bug.
+ *
+ * TEST_DATABASE_URL overrides it. DATABASE_URL deliberately does not, because
+ * the whole point is that the variable pointing at real data cannot select
+ * itself as the thing to drop.
+ */
 export const DATABASE_URL =
-  process.env.DATABASE_URL ?? 'postgres://dai:dai@localhost:5433/dai'
+  process.env.TEST_DATABASE_URL ?? 'postgres://dai:dai@localhost:5433/dai_test'
+
+/** The maintenance connection used only to create the test database. */
+const ADMIN_URL = DATABASE_URL.replace(/\/[^/]+$/, '/postgres')
+
+let ensured = false
 
 /**
  * A real Postgres, not a mock. The behaviour under test is mostly concurrency
@@ -11,6 +29,20 @@ export const DATABASE_URL =
  * places that matter.
  */
 export async function freshDb(): Promise<Db> {
+  if (!ensured) {
+    ensured = true
+    const name = DATABASE_URL.slice(DATABASE_URL.lastIndexOf('/') + 1).replace(/\?.*$/, '')
+    const admin = createPool(ADMIN_URL)
+    try {
+      // CREATE DATABASE cannot run inside a transaction, hence the direct query
+      // and the tolerated duplicate error rather than IF NOT EXISTS.
+      await admin.query(`CREATE DATABASE ${name}`)
+    } catch (err) {
+      if ((err as { code?: string }).code !== '42P04') throw err  // already exists
+    } finally {
+      await admin.end()
+    }
+  }
   const db = createPool(DATABASE_URL)
   await reset(db)
   return db

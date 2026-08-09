@@ -297,6 +297,9 @@ public actor Worker {
         }
 
         applyQoS(statePolicy, kind: lease.kind)
+        status.activity = "running \(lease.kind.rawValue)"
+        status.updated = Date()
+        status.write()
         let started = Date()
         var completed: [WorkItem] = []
 

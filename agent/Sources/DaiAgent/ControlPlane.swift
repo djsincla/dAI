@@ -1,0 +1,357 @@
+import Foundation
+import Security
+
+/// Client for the control plane, speaking `control-plane/openapi/dai.yaml`.
+///
+/// This is the third implementation of that schema, after the control plane
+/// itself and the Python agent, which is the point of writing it first: a
+/// mismatch surfaces between independent implementations rather than in
+/// production.
+///
+/// Two properties this client is careful about.
+///
+/// **The local policy is a floor, not a suggestion.** The control plane serves a
+/// policy table and the agent fetches it, but the agent carries its own and
+/// applies whichever is more restrictive. A control plane that is compromised,
+/// misconfigured, or simply newer must not be able to talk a machine into
+/// running GPU work while someone is using it.
+///
+/// **Unreachable is not permission.** Every failure path leaves the agent doing
+/// less work, never more.
+public actor ControlPlane {
+    public enum Failure: Error, CustomStringConvertible {
+        case notEnrolled(String)
+        case http(Int, String)
+        case transport(String)
+        case identity(String)
+
+        public var description: String {
+            switch self {
+            case let .notEnrolled(m): return "not enrolled or not approved: \(m)"
+            case let .http(c, m): return "HTTP \(c): \(m)"
+            case let .transport(m): return "unreachable: \(m)"
+            case let .identity(m): return "client identity: \(m)"
+            }
+        }
+    }
+
+    private let base: URL
+    private let session: URLSession
+    private let delegate: TLSDelegate
+
+    /// - Parameters:
+    ///   - identity: client certificate and key, for mTLS.
+    ///   - serverCA: the CA that signs the *control plane's* certificate. Not
+    ///     the node CA, which signs agent identities and which a node never
+    ///     needs. Pinning the wrong one fails every connection with a
+    ///     certificate error that reads like a network problem.
+    public init(base: URL, identity: SecIdentity?, serverCA: SecCertificate?) {
+        self.base = base
+        self.delegate = TLSDelegate(identity: identity, serverCA: serverCA)
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 60
+        // The reverse channel holds a request open, so this has to outlast the
+        // server's long-poll timeout rather than cutting it short.
+        config.timeoutIntervalForResource = 300
+        self.session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+    }
+
+    // MARK: - Transport
+
+    private func request(_ method: String, _ path: String, body: JSONValue? = nil,
+                         headers: [String: String] = [:],
+                         timeout: TimeInterval? = nil) async throws -> (Int, Data) {
+        var req = URLRequest(url: base.appendingPathComponent(path))
+        req.httpMethod = method
+        req.setValue("application/json", forHTTPHeaderField: "content-type")
+        for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
+        if let body { req.httpBody = try JSONEncoder().encode(body) }
+        if let timeout { req.timeoutInterval = timeout }
+
+        do {
+            let (data, response) = try await session.data(for: req)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 401 || code == 403 {
+                throw Failure.notEnrolled(String(data: data, encoding: .utf8) ?? "")
+            }
+            guard (200..<300).contains(code) else {
+                throw Failure.http(code, String(data: data, encoding: .utf8) ?? "")
+            }
+            return (code, data)
+        } catch let e as Failure {
+            throw e
+        } catch {
+            throw Failure.transport(error.localizedDescription)
+        }
+    }
+
+    private func json(_ data: Data) -> JSONValue {
+        (try? JSONDecoder().decode(JSONValue.self, from: data)) ?? .object([:])
+    }
+
+    // MARK: - Enrollment
+
+    public struct Enrollment: Sendable {
+        public let nodeId: String
+        public let enrollmentToken: String
+    }
+
+    /// Request enrollment. A join token grants nothing by itself: the node waits
+    /// in `pending` until an admin approves it, so this is the start of the flow
+    /// rather than the end.
+    public func enroll(joinToken: String, hostname: String, chip: String,
+                       memoryGb: Double, metalWorkingSetGb: Double,
+                       osVersion: String, csrPEM: String) async throws -> Enrollment {
+        let (_, data) = try await request("POST", "agent/v1/enroll", body: .object([
+            "joinToken": .string(joinToken), "hostname": .string(hostname),
+            "chip": .string(chip), "memoryGb": .number(memoryGb),
+            "metalWorkingSetGb": .number(metalWorkingSetGb),
+            "osVersion": .string(osVersion), "csrPem": .string(csrPEM),
+        ]))
+        let d = json(data)
+        guard let id = d["nodeId"]?.stringValue, let token = d["enrollmentToken"]?.stringValue else {
+            throw Failure.http(202, "enrollment response missing nodeId or token")
+        }
+        return Enrollment(nodeId: id, enrollmentToken: token)
+    }
+
+    public struct IssuedIdentity: Sendable {
+        public let certPEM: String
+        public let serverCAPEM: String?
+    }
+
+    /// Collect the certificate after approval. Returns nil while still pending.
+    ///
+    /// Cannot use mTLS: the whole point is that the node has no certificate yet,
+    /// so the single-use enrollment token stands in.
+    public func collectCertificate(nodeId: String,
+                                   enrollmentToken: String) async throws -> IssuedIdentity? {
+        let (code, data) = try await request("GET", "agent/v1/enroll/\(nodeId)",
+                                             headers: ["x-enrollment-token": enrollmentToken])
+        if code == 202 { return nil }
+        let d = json(data)
+        guard let cert = d["certPem"]?.stringValue else { return nil }
+        return IssuedIdentity(certPEM: cert, serverCAPEM: d["serverCaPem"]?.stringValue)
+    }
+
+    // MARK: - Policy
+
+    /// The served policy table, in the agent's shape.
+    public func fetchPolicy() async throws -> [PresenceState: StatePolicy] {
+        let (_, data) = try await request("GET", "agent/v1/policy")
+        guard case let .object(table) = json(data) else { return [:] }
+        var out: [PresenceState: StatePolicy] = [:]
+        for (key, p) in table {
+            guard let state = PresenceState(rawValue: key) else { continue }
+            // Defaults here are the restrictive ones: a served policy missing a
+            // field must not accidentally widen what the agent will do.
+            out[state] = StatePolicy(
+                gpu: { if case let .bool(b) = p["gpu"] { return b }; return false }(),
+                ane: { if case let .bool(b) = p["ane"] { return b }; return false }(),
+                qos: QoS(rawValue: p["qos"]?.stringValue ?? "background") ?? .background,
+                dutyMax: { if case let .number(n) = p["dutyMax"] { return n }; return 0 }(),
+                memFrac: { if case let .number(n) = p["memFrac"] { return n }; return 0 }(),
+                maxCompletionTokens: p["maxCompletionTokens"]?.intValue ?? 256)
+        }
+        return out
+    }
+
+    // MARK: - Work
+
+    public func heartbeat(state: PresenceState, onACPower: Bool?, thermalOK: Bool?,
+                          capability: [String: Double] = [:],
+                          residentModels: [String: Double] = [:]) async throws {
+        var body: [String: JSONValue] = [
+            "presenceState": .string(state.rawValue),
+            // Replaced rather than merged: a model released on a yield is no
+            // longer resident, and routing to a node that must reload it defeats
+            // the point of tracking residency.
+            "residentModels": .object(residentModels.mapValues { .number($0) }),
+        ]
+        if let onACPower { body["onAcPower"] = .bool(onACPower) }
+        if let thermalOK { body["thermalOk"] = .bool(thermalOK) }
+        if !capability.isEmpty {
+            // Observed from completed work, per workload class. The scheduler
+            // needs a profile rather than a scalar: the same two machines
+            // differed 7.5% on a 1.5B model and 26.3% on a 7B.
+            body["capabilitySamples"] = .array(capability.map {
+                .object(["workloadClass": .string($0.key), "itemsPerSecond": .number($0.value)])
+            })
+        }
+        _ = try await request("POST", "agent/v1/heartbeat", body: .object(body))
+    }
+
+    public struct Lease: Sendable {
+        public let unitId: String
+        public let kind: WorkKind
+        public let modelHash: String?
+        public let items: [WorkItem]
+    }
+
+    /// Lease a unit of work, or learn why none was given.
+    ///
+    /// `kinds` is what the node may run *right now* under its presence policy,
+    /// not what it is capable of. Without that distinction the agent fetches
+    /// work it must immediately hand back.
+    public func leaseWork(kinds: [WorkKind]) async throws -> Lease? {
+        guard !kinds.isEmpty else { return nil }
+        let q = kinds.map(\.rawValue).joined(separator: ",")
+        let (_, data) = try await request("GET", "agent/v1/work?kinds=\(q)")
+        let d = json(data)
+        if d["reason"] != nil { return nil }   // empty | none-of-these-kinds | node-paused
+        guard let id = d["unitId"]?.stringValue,
+              let kind = WorkKind(rawValue: d["kind"]?.stringValue ?? ""),
+              case let .array(items)? = d["items"] else { return nil }
+        return Lease(unitId: id, kind: kind,
+                     modelHash: d["modelHash"]?.stringValue, items: items)
+    }
+
+    /// Report completed items and hand back what was not reached.
+    ///
+    /// Returning the remainder is what makes preemption cheap; discarding the
+    /// unit would make a yield cost a whole batch. A 409 means the lease expired
+    /// and another node already has the work, so losing this result is correct.
+    @discardableResult
+    public func report(unitId: String, completed: [WorkItem],
+                       unfinished: [WorkItem], seconds: Double,
+                       failed: Bool = false) async throws -> Int {
+        let (_, data) = try await request("POST", "agent/v1/work/\(unitId)/result",
+                                          body: .object([
+            "completed": .array(completed), "unfinished": .array(unfinished),
+            "seconds": .number(seconds), "failed": .bool(failed),
+        ]))
+        return json(data)["requeued"]?.intValue ?? 0
+    }
+}
+
+/// Combine the agent's policy with the server's, taking the stricter of each.
+///
+/// Not a preference for one side. The server knows fleet-wide intent and may be
+/// newer; the agent knows the machine and is the thing that will actually
+/// disturb its owner. The intersection means neither a stale agent nor a
+/// compromised control plane can widen what runs on someone's Mac, and
+/// disagreement resolves toward less work rather than more.
+public func mergePolicy(local: [PresenceState: StatePolicy],
+                        served: [PresenceState: StatePolicy]) -> [PresenceState: StatePolicy] {
+    guard !served.isEmpty else { return local }
+    var out: [PresenceState: StatePolicy] = [:]
+    for (state, lp) in local {
+        guard let sp = served[state] else { out[state] = lp; continue }
+        out[state] = StatePolicy(
+            gpu: lp.gpu && sp.gpu,
+            ane: lp.ane && sp.ane,
+            // background is the more restrictive of the two.
+            qos: (lp.qos == .background || sp.qos == .background) ? .background : .standard,
+            dutyMax: min(lp.dutyMax, sp.dutyMax),
+            memFrac: min(lp.memFrac, sp.memFrac),
+            maxCompletionTokens: min(lp.maxCompletionTokens, sp.maxCompletionTokens))
+    }
+    return out
+}
+
+/// Presents the node's client certificate and pins the server CA.
+///
+/// Pinning rather than trusting the system store: a node that verifies nothing
+/// accepts work from anything that can reach it on the network, and a work unit
+/// tells a node what to execute.
+final class TLSDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
+    private let identity: SecIdentity?
+    private let serverCA: SecCertificate?
+
+    init(identity: SecIdentity?, serverCA: SecCertificate?) {
+        self.identity = identity
+        self.serverCA = serverCA
+    }
+
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge)
+        async -> (URLSession.AuthChallengeDisposition, URLCredential?) {
+
+        switch challenge.protectionSpace.authenticationMethod {
+        case NSURLAuthenticationMethodClientCertificate:
+            guard let identity else { return (.performDefaultHandling, nil) }
+            return (.useCredential,
+                    URLCredential(identity: identity, certificates: nil, persistence: .forSession))
+
+        case NSURLAuthenticationMethodServerTrust:
+            guard let trust = challenge.protectionSpace.serverTrust else {
+                return (.cancelAuthenticationChallenge, nil)
+            }
+            guard let serverCA else { return (.performDefaultHandling, nil) }
+            SecTrustSetAnchorCertificates(trust, [serverCA] as CFArray)
+            // Only the pinned CA is acceptable. Leaving the system anchors in
+            // place would mean any publicly trusted certificate for this host
+            // also works, which is not what pinning is for.
+            SecTrustSetAnchorCertificatesOnly(trust, true)
+            var error: CFError?
+            guard SecTrustEvaluateWithError(trust, &error) else {
+                return (.cancelAuthenticationChallenge, nil)
+            }
+            return (.useCredential, URLCredential(trust: trust))
+
+        default:
+            return (.performDefaultHandling, nil)
+        }
+    }
+}
+
+/// Loads a client identity from PEM by way of a PKCS#12 bundle.
+///
+/// The production target is a key generated in the Secure Enclave and marked
+/// non-exportable, so a certificate copied off disk is useless without the
+/// hardware. This path exists because the current enrollment flow produces PEM
+/// files, and it is the weaker of the two in two ways: a readable key file is a
+/// key that can be taken, and shelling out to `openssl` means depending on
+/// whichever implementation the system ships. macOS ships LibreSSL, whose
+/// `pkcs12` differs from OpenSSL's, which cost a debugging cycle here. Secure
+/// Enclave generation removes both problems by never producing a PEM at all.
+public enum ClientIdentity {
+    public static func load(certPEM: URL, keyPEM: URL) throws -> SecIdentity {
+        let p12 = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dai-\(UUID().uuidString).p12")
+        defer { try? FileManager.default.removeItem(at: p12) }
+
+        let password = UUID().uuidString
+        let openssl = Process()
+        openssl.executableURL = URL(fileURLWithPath: "/usr/bin/openssl")
+        // No -legacy: macOS ships LibreSSL, which does not have that flag. It
+        // is an OpenSSL 3 option and adding it fails with "unknown option",
+        // which surfaces here as an opaque identity error.
+        openssl.arguments = ["pkcs12", "-export",
+                             "-inkey", keyPEM.path, "-in", certPEM.path,
+                             "-out", p12.path, "-passout", "pass:\(password)"]
+        let stderr = Pipe()
+        openssl.standardError = stderr
+        try openssl.run()
+        let errorText = String(data: stderr.fileHandleForReading.readDataToEndOfFile(),
+                               encoding: .utf8) ?? ""
+        openssl.waitUntilExit()
+        guard openssl.terminationStatus == 0 else {
+            throw ControlPlane.Failure.identity(
+                "could not build PKCS#12 from PEM: \(errorText.prefix(200))")
+        }
+
+        var items: CFArray?
+        let status = SecPKCS12Import(try Data(contentsOf: p12) as CFData,
+                                     [kSecImportExportPassphrase as String: password] as CFDictionary,
+                                     &items)
+        guard status == errSecSuccess,
+              let array = items as? [[String: Any]],
+              let identity = array.first?[kSecImportItemIdentity as String] else {
+            throw ControlPlane.Failure.identity("SecPKCS12Import failed (\(status))")
+        }
+        return identity as! SecIdentity
+    }
+
+    public static func loadCA(pem: URL) throws -> SecCertificate {
+        let text = try String(contentsOf: pem, encoding: .utf8)
+        let body = text
+            .replacingOccurrences(of: "-----BEGIN CERTIFICATE-----", with: "")
+            .replacingOccurrences(of: "-----END CERTIFICATE-----", with: "")
+            .components(separatedBy: .whitespacesAndNewlines).joined()
+        guard let der = Data(base64Encoded: body),
+              let cert = SecCertificateCreateWithData(nil, der as CFData) else {
+            throw ControlPlane.Failure.identity("could not parse CA certificate")
+        }
+        return cert
+    }
+}

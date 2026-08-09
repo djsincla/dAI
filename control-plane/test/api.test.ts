@@ -308,6 +308,90 @@ describe('authorization', () => {
     expect(lease.jobSource).toBe('test-harness')
   })
 
+  it('gives back what it was asked to compute', async () => {
+    // The API could take work and never return it: units completed, output
+    // stored, nothing able to read it. A work API that accepts a request and
+    // cannot answer it is not finished, however good its dispatch is.
+    const submitted = await (await fetch(`${base}/admin/v1/jobs`, {
+      method: 'POST', headers: asUser(fx.operatorId),
+      body: JSON.stringify({
+        poolId: fx.poolId, kind: 'embed', batchSize: 2,
+        label: 'results round trip', source: 'test-harness',
+        items: [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }],
+      }),
+    })).json() as any
+
+    await fetch(`${base}/agent/v1/heartbeat`, {
+      method: 'POST', headers: asNode(fx.fingerprint),
+      body: JSON.stringify({ presenceState: 'LOCKED', onACPower: true, thermalOk: true }),
+    })
+
+    // Work the whole job the way an agent would.
+    for (;;) {
+      const lease = await (await fetch(`${base}/agent/v1/work?kinds=embed`,
+        { headers: asNode(fx.fingerprint) })).json() as any
+      if (!lease.unitId) break
+      await fetch(`${base}/agent/v1/work/${lease.unitId}/result`, {
+        method: 'POST', headers: asNode(fx.fingerprint),
+        body: JSON.stringify({
+          completed: (lease.items as any[]).map((i) => ({ id: i.id, vector: [0.1, 0.2] })),
+          seconds: 0.5,
+        }),
+      })
+    }
+
+    const page = await (await fetch(
+      `${base}/admin/v1/jobs/${submitted.id}/results`,
+      { headers: asUser(fx.operatorId) })).json() as any
+
+    const items = page.units.flatMap((u: any) => u.items)
+    expect(items).toHaveLength(4)
+    expect(items[0].vector).toEqual([0.1, 0.2])
+    // Which machine produced it, since being able to answer that is the point.
+    expect(page.units[0].node).toBeTruthy()
+    // Null rather than an empty next page, so a caller knows it has everything
+    // without asking again to find out.
+    expect(page.nextAfter).toBeNull()
+  })
+
+  it('pages results in submission order', async () => {
+    const submitted = await (await fetch(`${base}/admin/v1/jobs`, {
+      method: 'POST', headers: asUser(fx.operatorId),
+      body: JSON.stringify({
+        poolId: fx.poolId, kind: 'embed', batchSize: 1,
+        items: [{ id: 1 }, { id: 2 }, { id: 3 }],
+      }),
+    })).json() as any
+    await fetch(`${base}/agent/v1/heartbeat`, {
+      method: 'POST', headers: asNode(fx.fingerprint),
+      body: JSON.stringify({ presenceState: 'LOCKED', onACPower: true, thermalOk: true }),
+    })
+    for (;;) {
+      const lease = await (await fetch(`${base}/agent/v1/work?kinds=embed`,
+        { headers: asNode(fx.fingerprint) })).json() as any
+      if (!lease.unitId) break
+      await fetch(`${base}/agent/v1/work/${lease.unitId}/result`, {
+        method: 'POST', headers: asNode(fx.fingerprint),
+        body: JSON.stringify({ completed: lease.items, seconds: 0.1 }),
+      })
+    }
+
+    const first = await (await fetch(
+      `${base}/admin/v1/jobs/${submitted.id}/results?limit=2`,
+      { headers: asUser(fx.operatorId) })).json() as any
+    expect(first.units).toHaveLength(2)
+    expect(first.nextAfter).not.toBeNull()
+
+    const rest = await (await fetch(
+      `${base}/admin/v1/jobs/${submitted.id}/results?limit=2&after=${first.nextAfter}`,
+      { headers: asUser(fx.operatorId) })).json() as any
+    expect(rest.units).toHaveLength(1)
+    expect(rest.nextAfter).toBeNull()
+
+    const ids = [...first.units, ...rest.units].flatMap((u: any) => u.items.map((i: any) => i.id))
+    expect(ids).toEqual([1, 2, 3])
+  })
+
   it('requires operator on the pool to submit a job', async () => {
     const r = await fetch(`${base}/admin/v1/jobs`, {
       method: 'POST',

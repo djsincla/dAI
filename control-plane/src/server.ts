@@ -104,8 +104,13 @@ export function createApp(db: Db, surface: Surface = 'both'): Express {
   if (surface !== 'agent') {
     app.use('/admin/v1', aclMiddleware(adminAcl, 'admin'), adminRoutes(db, ca))
     // OpenAI-compatible surface. Separate from /admin because its callers are
-    // applications with API keys rather than people with sessions, and it will
-    // want its own rate limits and availability treatment.
+    // applications rather than people, and it will want its own rate limits and
+    // availability treatment.
+    //
+    // Access is by network ACL, and that is the whole of it: there are no API
+    // keys. Said plainly because this comment used to claim keys that do not
+    // exist, which reads as a decision already taken rather than one still
+    // open. Anyone who can reach the subnet can use the fleet.
     app.use('/v1', aclMiddleware(adminAcl, 'serving'), servingRoutes(db, broker))
   }
 

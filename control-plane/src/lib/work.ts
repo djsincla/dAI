@@ -143,9 +143,11 @@ export async function reportResult(
     } else {
       await c.query(
         `UPDATE work_units
-            SET state='done', result=$1, lease_node_id=NULL, lease_expires_at=NULL
+            SET state='done', result=$1, completed_by=$3,
+                lease_node_id=NULL, lease_expires_at=NULL
           WHERE id=$2`,
-        [JSON.stringify({ completed: body.completed, seconds: body.seconds }), unitId],
+        [JSON.stringify({ completed: body.completed, seconds: body.seconds }),
+         unitId, nodeId],
       )
     }
 

@@ -151,6 +151,12 @@ CREATE TABLE work_units (
     -- and can never name an interpreter, a path, or a command.
     payload           jsonb NOT NULL,
     result            jsonb,
+    -- Which machine actually produced this, kept after the lease is released.
+    --
+    -- lease_node_id is cleared on completion, since the lease is over, so
+    -- without this the answer to "where did this result come from" was
+    -- discarded at the moment it became worth knowing.
+    completed_by      uuid REFERENCES nodes(id) ON DELETE SET NULL,
     state             text NOT NULL DEFAULT 'pending'
                       CHECK (state IN ('pending','leased','done','failed')),
     -- Position lets a requeued remainder go back at the head, so a partially

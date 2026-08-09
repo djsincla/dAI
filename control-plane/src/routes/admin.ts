@@ -57,7 +57,7 @@ export function adminRoutes(db: Db, ca: Ca): Router {
     // queue position and nothing else.
     let signed
     try {
-      signed = ca.sign(node.csr_pem, node.id, node.hostname)
+      signed = await ca.sign(node.csr_pem, node.id, node.hostname)
     } catch (err) {
       res.status(400).json({ error: 'bad_request',
                              detail: `cannot sign CSR: ${(err as Error).message}` })

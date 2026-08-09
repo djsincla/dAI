@@ -11,6 +11,12 @@ let command = args.count > 1 ? args[1] : "presence"
 func fmt(_ v: TimeInterval?) -> String { v.map { String(format: "%.1f", $0) } ?? "unreadable" }
 
 switch command {
+case "preflight":
+    // Whether this machine can run the agent at all. Worth running as root too:
+    // the daemon runs in session 0, which is a different enough context that
+    // checking only the interactive case proves less than it looks like.
+    exit(await Preflight.run())
+
 case "presence":
     let signals = MacSignalSource().read()
     let monitor = PresenceMonitor()
@@ -187,6 +193,6 @@ case "qos":
     print("leave background: \(ProcessQoS.setBackground(false))")
 
 default:
-    print("usage: dai-agent [presence|verify-ane <model>|enroll|status|work|qos]")
+    print("usage: dai-agent [preflight|presence|verify-ane <model>|enroll|status|timing|work|qos]")
     exit(2)
 }

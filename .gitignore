@@ -38,3 +38,7 @@ control-plane/certs/
 
 # Swift
 agent/.build/
+
+# packaging build products
+agent/packaging/.staging/
+agent/packaging/dist/

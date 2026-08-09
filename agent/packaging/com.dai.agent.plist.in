@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template. install.sh substitutes the @PLACEHOLDER@ values and writes the
+  result to /Library/LaunchDaemons.
+
+  A LaunchDaemon rather than a LaunchAgent, because E1 measured the difference
+  and it decides what the product is. A daemon runs in session 0 as root with no
+  user logged in, and Metal still works: 2/2 probes passed with the screen
+  locked. An agent only exists while somebody is logged in, which would rule out
+  exactly the overnight hours the whole premise depends on.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.dai.agent</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@BINARY@</string>
+    <string>work</string>
+    <string>@URL@</string>
+    <string>@MODEL@</string>
+    <string>@ANE@</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!--
+    Restart if it dies. ThrottleInterval stops a crash loop from becoming a
+    busy loop: a control plane that is down should cost a connection attempt
+    every 30s, not continuously.
+  -->
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+
+  <!--
+    Standard, deliberately, and this is the setting most likely to be "fixed"
+    by someone being helpful.
+
+    Background looks like the polite choice and is the wrong one here. E1
+    measured it at 2.4x on sustained GPU work and the worker found ~26x on
+    bursty ANE items, and launchd's ProcessType applies for the life of the
+    process: a daemon pinned to Background cannot promote itself when the user
+    goes home, which is when nearly all the capacity is. The agent sets its own
+    QoS per presence state instead, dropping to background the moment somebody
+    is at the machine and lifting it when they are not. Setting it here takes
+    that control away and costs most of the fleet's usable throughput.
+  -->
+  <key>ProcessType</key>
+  <string>Standard</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!--
+      NSHomeDirectory() reads the password database rather than HOME, so a
+      daemon cannot be pointed at an identity by environment alone without
+      this.
+    -->
+    <key>DAI_IDENTITY_DIR</key>
+    <string>@IDENTITY_DIR@</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>@STATE_DIR@</string>
+
+  <key>StandardOutPath</key>
+  <string>@LOG_DIR@/agent.log</string>
+  <key>StandardErrorPath</key>
+  <string>@LOG_DIR@/agent.log</string>
+
+  <!--
+    Time to finish the item in flight on shutdown. The worker yields between
+    items and reports what it completed, so a clean stop returns partial work
+    rather than discarding a whole unit.
+  -->
+  <key>ExitTimeOut</key>
+  <integer>30</integer>
+</dict>
+</plist>

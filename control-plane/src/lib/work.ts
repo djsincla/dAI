@@ -19,6 +19,14 @@ export interface Lease {
   modelHash: string | null
   items: unknown[]
   leaseExpiresAt: string
+  /// What this work is and where it came from, carried down to the node.
+  ///
+  /// The machine's owner is entitled to know what their hardware is doing, and
+  /// "embed" is not an answer. It also makes synthetic work visible as
+  /// synthetic on the machine running it, rather than only in the console of
+  /// whoever submitted it.
+  jobLabel: string | null
+  jobSource: string
 }
 
 export type NoWorkReason = 'empty' | 'none-of-these-kinds' | 'node-paused' | 'user-paused'
@@ -51,7 +59,7 @@ export async function leaseWork(
 
   return tx(db, async (c: pg.PoolClient) => {
     const { rows } = await c.query(
-      `SELECT u.id, u.kind, u.payload, j.model_hash
+      `SELECT u.id, u.kind, u.payload, j.model_hash, j.label, j.source
          FROM work_units u
          JOIN jobs j ON j.id = u.job_id
         WHERE u.state = 'pending'
@@ -89,6 +97,8 @@ export async function leaseWork(
       modelHash: (row.model_hash as string | null) ?? null,
       items: row.payload as unknown[],
       leaseExpiresAt: (leased[0]!.lease_expires_at as Date).toISOString(),
+      jobLabel: (row.label as string | null) ?? null,
+      jobSource: (row.source as string) ?? 'api',
     }
   })
 }

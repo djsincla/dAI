@@ -514,6 +514,18 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
 
   /admin/v1/jobs:
+    get:
+      tags: [admin]
+      summary: Recent jobs, with what they are and where they came from
+      responses:
+        '200':
+          description: Jobs, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Job' }
+        '403': { $ref: '#/components/responses/Forbidden' }
     post:
       tags: [admin]
       summary: Submit a job
@@ -679,6 +691,8 @@ components:
       type: object
       required: [unitId, kind, items, leaseExpiresAt]
       properties:
+        jobLabel: { type: string, nullable: true }
+        jobSource: { type: string }
         unitId: { type: string, format: uuid }
         kind: { $ref: '#/components/schemas/WorkKind' }
         modelHash:
@@ -773,6 +787,23 @@ components:
         kind: { $ref: '#/components/schemas/WorkKind' }
         modelHash: { type: string, nullable: true }
         batchSize: { type: integer, minimum: 1, default: 8 }
+        label:
+          type: string
+          description: |
+            What this work is, in words, for whoever sees it running. A fleet
+            view that can say a machine is busy but not what with is not much of
+            an answer to the person whose machine it is.
+        source:
+          type: string
+          default: api
+          description: |
+            Where the work came from - `api`, `cli`, `test-harness`, `demo-seed`.
+            Claimed by the submitter, unlike the recorded submitter identity,
+            which comes from the authenticated session. It distinguishes honest
+            traffic sources; it is not evidence against a dishonest one.
+
+            Synthetic work must say so. Otherwise every capacity figure it
+            produces is quietly overstated by somebody else's load test.
         items:
           type: array
           minItems: 1
@@ -785,6 +816,10 @@ components:
         id: { type: string, format: uuid }
         poolId: { type: string, format: uuid }
         kind: { $ref: '#/components/schemas/WorkKind' }
+        label: { type: string, nullable: true }
+        source: { type: string }
+        submittedBy: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time, nullable: true }
         state: { type: string, enum: [pending, running, complete, failed] }
         counts:
           type: object

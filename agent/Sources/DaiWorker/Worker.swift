@@ -308,6 +308,8 @@ public actor Worker {
 
         applyQoS(statePolicy, kind: lease.kind)
         status.activity = "running \(lease.kind.rawValue)"
+        status.jobLabel = lease.jobLabel
+        status.jobSource = lease.jobSource
         status.updated = Date()
         status.write()
         let started = Date()
@@ -371,7 +373,10 @@ public actor Worker {
         try? await controlPlane.report(unitId: lease.unitId, completed: completed,
                                        unfinished: [], seconds: seconds)
         status.controlPlaneReachable = true
-        log("\(lease.kind.rawValue): \(completed.count) items in "
+        log("\(lease.kind.rawValue)"
+            + (lease.jobLabel.map { " [\($0)]" } ?? "")
+            + (lease.jobSource == "api" ? "" : " (\(lease.jobSource))")
+            + ": \(completed.count) items in "
             + String(format: "%.2fs", seconds)
             + " (\(String(format: "%.2f", Double(completed.count) / max(seconds, 0.001)))/s) "
             + "state=\(state.rawValue)")

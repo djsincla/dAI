@@ -262,6 +262,11 @@ public actor ControlPlane {
     }
 
     public struct Lease: Sendable {
+        /// What this work is and who asked for it. Carried so the machine's
+        /// owner can be told something more useful than "embed".
+        public var jobLabel: String?
+        public var jobSource: String = "api"
+
         public let unitId: String
         public let kind: WorkKind
         public let modelHash: String?
@@ -302,7 +307,9 @@ public actor ControlPlane {
         guard let id = d["unitId"]?.stringValue,
               let kind = WorkKind(rawValue: d["kind"]?.stringValue ?? ""),
               case let .array(items)? = d["items"] else { return nil }
-        return Lease(unitId: id, kind: kind,
+        return Lease(jobLabel: d["jobLabel"]?.stringValue,
+                     jobSource: d["jobSource"]?.stringValue ?? "api",
+                     unitId: id, kind: kind,
                      modelHash: d["modelHash"]?.stringValue, items: items)
     }
 

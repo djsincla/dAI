@@ -208,6 +208,16 @@ struct MenuContents: View {
                             Text(String(format: "%.1f GB", status.residentGb))
                         }
                     }
+                    if let label = status.jobLabel, !label.isEmpty {
+                        GridRow {
+                            Text("Working on").foregroundStyle(.secondary)
+                            // The source is shown whenever it is not ordinary
+                            // traffic, so a load test cannot be mistaken for
+                            // the studio's actual work on someone's machine.
+                            Text(status.jobSource.map { $0 == "api" ? label : "\(label) - \($0)" }
+                                 ?? label)
+                        }
+                    }
                     GridRow {
                         Text("This machine").foregroundStyle(.secondary)
                         Text(status.presenceState.lowercased())

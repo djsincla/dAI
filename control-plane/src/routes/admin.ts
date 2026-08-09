@@ -339,10 +339,42 @@ export function adminRoutes(db: Db, ca: Ca): Router {
     res.json(rows)
   })
 
+  /**
+   * What is queued and what it is.
+   *
+   * There was no way to see this at all: the fleet view could say a machine was
+   * busy but nothing said with what, or who asked for it. That is a poor answer
+   * for an operator and a worse one for the person whose machine is running it.
+   */
+  r.get('/jobs', async (req, res) => {
+    const { rows } = await db.query(
+      `SELECT j.id, j.pool_id, j.kind, j.state, j.label, j.source, j.created_at,
+              u.email AS submitted_by_email,
+              count(w.id) FILTER (WHERE w.state = 'pending')::int AS pending,
+              count(w.id) FILTER (WHERE w.state = 'leased')::int  AS leased,
+              count(w.id) FILTER (WHERE w.state = 'done')::int    AS done,
+              count(w.id) FILTER (WHERE w.state = 'failed')::int  AS failed
+         FROM jobs j
+         LEFT JOIN users u ON u.id = j.submitted_by
+         LEFT JOIN work_units w ON w.job_id = j.id
+        GROUP BY j.id, u.email
+        ORDER BY j.created_at DESC
+        LIMIT 50`,
+    )
+    res.json(rows.map((j: any) => ({
+      id: j.id, poolId: j.pool_id, kind: j.kind, state: j.state,
+      label: j.label, source: j.source,
+      submittedBy: j.submitted_by_email ?? null,
+      createdAt: j.created_at ? new Date(j.created_at).toISOString() : null,
+      counts: { pending: j.pending, leased: j.leased, done: j.done, failed: j.failed },
+    })))
+  })
+
   r.post('/jobs', async (req, res) => {
     const b = req.body as {
       poolId: string; kind: 'embed' | 'generate' | 'render'
       modelHash?: string | null; batchSize?: number; items: unknown[]
+      label?: string; source?: string
     }
     if (!(await requireRole(db, req.user!.id, b.poolId, 'operator'))) {
       res.status(403).json({ error: 'forbidden', detail: 'operator role required on this pool' })
@@ -351,9 +383,10 @@ export function adminRoutes(db: Db, ca: Ca): Router {
 
     const batchSize = b.batchSize ?? 8
     const { rows } = await db.query(
-      `INSERT INTO jobs (pool_id, kind, model_hash, submitted_by)
-       VALUES ($1,$2,$3,$4) RETURNING id`,
-      [b.poolId, b.kind, b.modelHash ?? null, req.user!.id],
+      `INSERT INTO jobs (pool_id, kind, model_hash, submitted_by, label, source)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
+      [b.poolId, b.kind, b.modelHash ?? null, req.user!.id,
+       b.label ?? null, b.source ?? 'api'],
     )
     const jobId = rows[0]!.id as string
 
@@ -384,12 +417,21 @@ export function adminRoutes(db: Db, ca: Ca): Router {
 
 async function jobSummary(db: Db, jobId: string) {
   const { rows } = await db.query(
-    `SELECT id, pool_id, kind, state FROM jobs WHERE id = $1`, [jobId])
+    `SELECT j.id, j.pool_id, j.kind, j.state, j.label, j.source, j.created_at,
+            u.email AS submitted_by_email
+       FROM jobs j LEFT JOIN users u ON u.id = j.submitted_by
+      WHERE j.id = $1`, [jobId])
   const job = rows[0]
   if (!job) return null
   const { rows: counts } = await db.query(
     `SELECT state, count(*)::int AS n FROM work_units WHERE job_id=$1 GROUP BY state`, [jobId])
   const c: Record<string, number> = { pending: 0, leased: 0, done: 0, failed: 0 }
   for (const row of counts as { state: string; n: number }[]) c[row.state] = row.n
-  return { id: job.id, poolId: job.pool_id, kind: job.kind, state: job.state, counts: c }
+  return {
+    id: job.id, poolId: job.pool_id, kind: job.kind, state: job.state,
+    label: job.label, source: job.source,
+    submittedBy: job.submitted_by_email ?? null,
+    createdAt: job.created_at ? new Date(job.created_at).toISOString() : null,
+    counts: c,
+  }
 }

@@ -370,6 +370,58 @@ export function adminRoutes(db: Db, ca: Ca): Router {
     })))
   })
 
+  /**
+   * The results of a job.
+   *
+   * Without this the API could take work and never give it back: units were
+   * completed, their output stored, and nothing could read it. A work API that
+   * accepts a request and cannot answer it is not finished, however good its
+   * dispatch is.
+   *
+   * Paged by position, which is submission order, so a caller can stream a
+   * large job in pieces and knows where it stopped. Offsets would drift as
+   * requeued remainders slot in ahead.
+   */
+  r.get('/jobs/:jobId/results', async (req, res) => {
+    const jobId = req.params.jobId!
+    const limit = Math.min(Number(req.query.limit ?? 100), 1000)
+    const after = req.query.after === undefined ? -1 : Number(req.query.after)
+
+    const { rows: job } = await db.query(`SELECT id, state FROM jobs WHERE id = $1`, [jobId])
+    if (job.length === 0) { res.status(404).json({ error: 'not_found' }); return }
+
+    const { rows } = await db.query(
+      `SELECT w.id, w.position, w.state, w.result, n.hostname
+         FROM work_units w
+         LEFT JOIN nodes n ON n.id = w.completed_by
+        WHERE w.job_id = $1 AND w.position > $2 AND w.state = 'done'
+        ORDER BY w.position
+        LIMIT $3`,
+      [jobId, after, limit],
+    )
+
+    res.json({
+      jobId,
+      state: job[0]!.state,
+      units: rows.map((u: any) => ({
+        unitId: u.id,
+        // Coerced because pg returns bigint as a string to avoid losing
+        // precision, and the schema says integer. Passing it through unchanged
+        // fails response validation with a message about the field rather than
+        // the driver.
+        position: Number(u.position),
+        // Which machine produced it. The point of the whole arrangement is that
+        // this is answerable.
+        node: u.hostname ?? null,
+        seconds: u.result?.seconds ?? null,
+        items: u.result?.completed ?? [],
+      })),
+      // Null when the page was not full, which is how a caller knows it has
+      // everything rather than having to ask again to find out.
+      nextAfter: rows.length === limit ? Number(rows[rows.length - 1]!.position) : null,
+    })
+  })
+
   r.post('/jobs', async (req, res) => {
     const b = req.body as {
       poolId: string; kind: 'embed' | 'generate' | 'render'

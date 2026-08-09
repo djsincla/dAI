@@ -19,8 +19,12 @@ const mk = async (host, chip, mem, ws, state, owner) =>
     cert_fingerprint,owner_user_id,presence_state,on_ac_power,thermal_ok)
     VALUES ($1,$2,$3,$4,'active',$5,$6,$7,true,true) RETURNING id`,
     [host, chip, mem, ws, 'fp-'+host, owner, state])).rows[0].id
-const a = await mk('rotorua','Apple M2 Max',64,51.8,'LOCKED',u.rows[0].id)
-const b = await mk('orca','Apple M4 Pro',48,37.4,'ACTIVE',u.rows[0].id)
+// Named so they cannot be mistaken for hardware. Seeding them as 'rotorua' and
+// 'orca' put fabricated machines next to real ones under the same names in the
+// fleet view, which is a bad thing for a fleet view to do: the first question
+// anyone asks of it is which machines are real.
+const a = await mk('demo-1 (not a real machine)','Apple M2 Max',64,51.8,'LOCKED',u.rows[0].id)
+const b = await mk('demo-2 (not a real machine)','Apple M4 Pro',48,37.4,'ACTIVE',u.rows[0].id)
 // 24h of presence history: machines lock overnight, active during the day.
 for (let h = 23; h >= 0; h--) {
   for (const [id, night, day] of [[a,'LOCKED','ACTIVE'],[b,'ABSENT','IDLE']]) {

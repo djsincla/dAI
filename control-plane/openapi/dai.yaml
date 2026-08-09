@@ -585,6 +585,10 @@ components:
     EnrollRequest:
       type: object
       required: [joinToken, hostname, chip, memoryGb, metalWorkingSetGb, osVersion, csrPem]
+      description: |
+        `machineId` is the hardware's IOPlatformUUID. Approving a node retires
+        any earlier record for the same machine, so a reinstalled machine
+        replaces its old entry rather than appearing twice.
       properties:
         joinToken: { type: string }
         hostname: { type: string }
@@ -596,6 +600,7 @@ components:
             Metal self-caps well below installed RAM (~81% on an M2 Max).
             Ceilings are fractions of this, never of installed memory.
         osVersion: { type: string }
+        machineId: { type: string, nullable: true }
         csrPem:
           type: string
           description: |
@@ -705,7 +710,13 @@ components:
         memoryGb: { type: number }
         metalWorkingSetGb: { type: number }
         tier: { type: string, enum: [harvest, cluster] }
-        state: { type: string, enum: [pending, active, cordoned, paused, offline] }
+        state:
+          type: string
+          enum: [pending, active, cordoned, paused, offline, superseded]
+          description: |
+            `superseded` means this record was replaced when the same physical
+            machine enrolled again. Kept rather than deleted, because the
+            certificate it holds was really issued.
         ownerUserId: { type: string, format: uuid, nullable: true }
         presenceState:
           # Null until the node's first heartbeat. A freshly enrolled node has

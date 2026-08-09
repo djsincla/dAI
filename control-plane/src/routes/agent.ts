@@ -38,6 +38,7 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
     const b = req.body as {
       joinToken: string; hostname: string; chip: string; memoryGb: number
       metalWorkingSetGb: number; osVersion: string; csrPem: string
+      machineId?: string | null
     }
 
     const { rows: tok } = await db.query(
@@ -55,11 +56,11 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
     const enrollmentToken = newEnrollmentToken()
     const { rows } = await db.query(
       `INSERT INTO nodes (hostname, chip, memory_gb, metal_working_set_gb, os_version,
-                          state, csr_pem, enrollment_token)
-       VALUES ($1,$2,$3,$4,$5,'pending',$6,$7)
+                          state, csr_pem, enrollment_token, machine_id)
+       VALUES ($1,$2,$3,$4,$5,'pending',$6,$7,$8)
        RETURNING id, state`,
       [b.hostname, b.chip, b.memoryGb, b.metalWorkingSetGb, b.osVersion,
-       b.csrPem, enrollmentToken],
+       b.csrPem, enrollmentToken, b.machineId ?? null],
     )
     res.status(202).json({
       nodeId: rows[0]!.id,

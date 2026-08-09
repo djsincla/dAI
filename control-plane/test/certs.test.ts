@@ -192,6 +192,49 @@ describe('enrollment and issuance over HTTP', () => {
     return { ...(await r.json()), dir }
   }
 
+
+  it('retires the old record when the same machine enrolls again', async () => {
+    // A reinstalled machine arrives as a new node with a new key. Without this
+    // the old record stays active-looking forever, so the fleet view shows two
+    // entries for one machine and counts its capacity twice - which is exactly
+    // what a fleet view must not do.
+    const machineId = 'AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE'
+    const enrollSame = async () => {
+      const { csr, dir } = makeCsr('same-machine', 'ec')
+      const r = await fetch(`${base}/agent/v1/enroll`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          joinToken: 'jt-test', hostname: 'rotorua', chip: 'Apple M4 Pro',
+          memoryGb: 48, metalWorkingSetGb: 38, osVersion: '15.0',
+          csrPem: csr, machineId,
+        }),
+      })
+      rmSync(dir, { recursive: true, force: true })
+      return (await r.json() as any).nodeId as string
+    }
+    const approve = (id: string) =>
+      fetch(`${base}/admin/v1/nodes/${id}/approve`, {
+        method: 'POST', headers: asUser(fx.operatorId), body: '{}',
+      })
+
+    const first = await enrollSame()
+    await approve(first)
+    const second = await enrollSame()
+    await approve(second)
+
+    const { rows } = await db.query(
+      `SELECT id, state FROM nodes WHERE machine_id = $1 ORDER BY created_at`, [machineId])
+    expect(rows).toHaveLength(2)
+    expect(rows[0].state).toBe('superseded')
+    expect(rows[1].state).toBe('active')
+
+    // Superseded rather than deleted: the certificate really was issued and
+    // knowing what was signed matters after the fact.
+    const { rows: kept } = await db.query(
+      `SELECT cert_pem FROM nodes WHERE id = $1`, [rows[0].id])
+    expect(kept[0].cert_pem).toBeTruthy()
+  })
+
   it('issues nothing at enrollment', async () => {
     const e = await enroll()
     expect(e.state).toBe('pending')

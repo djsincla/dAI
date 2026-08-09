@@ -98,6 +98,7 @@ enum Enroll {
             FileHandle.standardError.write("Resuming enrollment for \(nodeId)\n".data(using: .utf8)!)
         } else {
             let e = try await cp.enroll(joinToken: joinToken, hostname: host, chip: hw.chip,
+                                        machineId: MachineIdentity.platformUUID(),
                                         memoryGb: hw.memoryGb,
                                         metalWorkingSetGb: MetalInfo.workingSetGb(),
                                         osVersion: ProcessInfo.processInfo

@@ -184,9 +184,20 @@ public actor ControlPlane {
                         body: d["body"] ?? .object([:]))
     }
 
-    public func reportDispatch(id: String, text: String?, error: String?) async throws {
+    public func reportDispatch(id: String, text: String?, error: String?,
+                               promptTokens: Int = 0,
+                               completionTokens: Int = 0) async throws {
         var body: [String: JSONValue] = [:]
-        if let text { body["result"] = .object(["text": .string(text)]) }
+        if let text {
+            body["result"] = .object([
+                "text": .string(text),
+                // Real counts from the runtime. A client drives its context
+                // gauge and its compaction from these, so zeros tell it the
+                // conversation is never filling up.
+                "promptTokens": .number(Double(promptTokens)),
+                "completionTokens": .number(Double(completionTokens)),
+            ])
+        }
         if let error { body["error"] = .string(error) }
         _ = try await request("POST", "agent/v1/dispatch/\(id)/result", body: .object(body))
     }
@@ -281,7 +292,8 @@ public actor ControlPlane {
     public func heartbeat(state: PresenceState, onACPower: Bool?, thermalOK: Bool?,
                           userPaused: Bool = false,
                           capability: [String: Double] = [:],
-                          residentModels: [String: Double] = [:]) async throws {
+                          residentModels: [String: Double] = [:],
+                          modelInfo: [String: Int] = [:]) async throws {
         var body: [String: JSONValue] = [
             "presenceState": .string(state.rawValue),
             // Replaced rather than merged: a model released on a yield is no
@@ -294,6 +306,15 @@ public actor ControlPlane {
         // holding a stale pause with no way to learn otherwise, and a fleet
         // view that under-reports capacity is a fleet view people stop reading.
         body["userPaused"] = .bool(userPaused)
+        if !modelInfo.isEmpty {
+            // What each resident model actually accepts. Advertised so a client
+            // does not have to assume a window: guessing high runs a
+            // conversation past what the model takes, guessing low wastes most
+            // of what it paid for.
+            body["models"] = .array(modelInfo.map { name, context in
+                .object(["name": .string(name), "contextLength": .number(Double(context))])
+            })
+        }
         if let onACPower { body["onAcPower"] = .bool(onACPower) }
         if let thermalOK { body["thermalOk"] = .bool(thermalOK) }
         if !capability.isEmpty {

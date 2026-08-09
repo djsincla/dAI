@@ -342,6 +342,26 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
 
+  /api/v0/models:
+    get:
+      tags: [serving]
+      summary: Models in LM Studio's shape, including the context window
+      description: |
+        Served so tools written against LM Studio work unchanged. Scripts probe
+        this path for `loaded_context_length` to size a client's context window,
+        and asking people to patch their tooling to try a fleet is a good way to
+        have nobody try it.
+      responses:
+        '200':
+          description: Models this fleet can serve
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
   /v1/messages:
     post:
       tags: [serving]
@@ -774,6 +794,18 @@ components:
       type: object
       required: [presenceState]
       properties:
+        models:
+          type: array
+          description: |
+            What each model this node can serve accepts. Reported rather than
+            configured centrally, so the advertised window cannot drift from the
+            weights actually on disk.
+          items:
+            type: object
+            required: [name, contextLength]
+            properties:
+              name: { type: string }
+              contextLength: { type: integer }
         userPaused:
           type: boolean
           description: |
@@ -877,6 +909,18 @@ components:
             - $ref: '#/components/schemas/PresenceState'
             - type: 'null'
         lastHeartbeat: { type: string, format: date-time, nullable: true }
+        models:
+          type: array
+          description: |
+            What each model this node can serve accepts. Reported rather than
+            configured centrally, so the advertised window cannot drift from the
+            weights actually on disk.
+          items:
+            type: object
+            required: [name, contextLength]
+            properties:
+              name: { type: string }
+              contextLength: { type: integer }
         userPaused:
           type: boolean
           description: |

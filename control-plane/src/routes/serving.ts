@@ -22,14 +22,37 @@ export function servingRoutes(db: Db, broker: Broker): Router {
   const r = Router()
   r.use(userAuth(db))
 
+  /**
+   * Models this fleet can serve, and how much context each accepts.
+   *
+   * The window is advertised because a client that has to guess gets it wrong
+   * in one of two expensive ways: guess high and the conversation runs past
+   * what the model takes, guess low and most of the window goes unused. Taken
+   * from what nodes report rather than configured here, so it cannot drift
+   * from the weights actually on disk.
+   */
   r.get('/models', async (_req, res) => {
     const { rows } = await db.query(
-      `SELECT DISTINCT jsonb_object_keys(resident_models) AS hash
-         FROM nodes WHERE state = 'active'`)
+      `SELECT name, max(context)::int AS context
+         FROM nodes,
+              LATERAL jsonb_each(
+                CASE WHEN resident_models = '{}'::jsonb THEN model_context
+                     ELSE resident_models || model_context END) AS m(name, value),
+              LATERAL (SELECT COALESCE((model_context ->> m.name)::int, 0)) AS c(context)
+        WHERE state = 'active'
+        GROUP BY name`)
     res.json({
       object: 'list',
       data: (rows as any[]).map((m) => ({
-        id: m.hash, object: 'model', owned_by: 'dai',
+        id: m.name,
+        object: 'model',
+        owned_by: 'dai',
+        // Both spellings. context_length is what clients look for; the other
+        // two are what the OpenAI and LM Studio shapes use, and a client that
+        // finds any of them does not have to fall back to a default.
+        context_length: m.context || null,
+        max_context_length: m.context || null,
+        context_window: m.context || null,
       })),
     })
   })
@@ -114,6 +137,41 @@ export function servingRoutes(db: Db, broker: Broker): Router {
         maxTokensApplied: maxTokens,
         cappedByPolicy: maxTokens < requested,
       },
+    })
+  })
+
+  /**
+   * LM Studio's model shape, served so tools written against it work unchanged.
+   *
+   * Not an endorsement of the shape. Scripts in the wild probe this path for
+   * `loaded_context_length` to size a client's context window, and asking
+   * people to patch their tooling to try a fleet is a good way to have nobody
+   * try it.
+   */
+  r.get('/v0/models', async (_req, res) => {
+    const { rows } = await db.query(
+      `SELECT name, max(context)::int AS context, bool_or(resident) AS resident
+         FROM nodes,
+              LATERAL jsonb_each(
+                CASE WHEN resident_models = '{}'::jsonb THEN model_context
+                     ELSE resident_models || model_context END) AS m(name, value),
+              LATERAL (SELECT COALESCE((model_context ->> m.name)::int, 0)) AS c(context),
+              LATERAL (SELECT resident_models ? m.name) AS r(resident)
+        WHERE state = 'active'
+        GROUP BY name`)
+    res.json({
+      object: 'list',
+      data: (rows as any[]).map((m) => ({
+        id: m.name,
+        object: 'model',
+        type: 'llm',
+        publisher: 'dai',
+        // The window the model accepts. Named as LM Studio names it, because
+        // that is what the tools reading this path look for.
+        max_context_length: m.context || null,
+        loaded_context_length: m.context || null,
+        state: m.resident ? 'loaded' : 'not-loaded',
+      })),
     })
   })
 

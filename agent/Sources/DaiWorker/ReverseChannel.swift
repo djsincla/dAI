@@ -118,10 +118,16 @@ public actor ReverseChannel {
         let signals = source.read()
         let resident: [String: Double] = await (gpu?.isLoaded ?? false)
             ? [await gpu!.name: await gpu!.residentGb] : [:]
+        // Advertised whether or not the model is loaded right now: the window a
+        // model accepts does not depend on whether it happens to be resident,
+        // and a client asking what this node can serve wants the answer either
+        // way.
+        var info: [String: Int] = [:]
+        if let gpu, let context = await gpu.contextLength { info[await gpu.name] = context }
         try? await controlPlane.heartbeat(
             state: state, onACPower: signals.onACPower, thermalOK: signals.thermalOK,
             userPaused: pauseSwitch.read().paused,
-            residentModels: resident)
+            residentModels: resident, modelInfo: info)
     }
 
     private func handle(_ dispatch: ControlPlane.Dispatch, maxTokens: Int) async {
@@ -143,11 +149,14 @@ public actor ReverseChannel {
             // two: a single request has no seam to yield at, so its length is
             // the only thing bounding how long a returning user waits.
             let requested = dispatch.body["max_tokens"]?.intValue ?? 512
-            let text = try await gpu.generate(prompt: promptFrom(dispatch.body),
-                                              maxTokens: min(requested, maxTokens))
+            let out = try await gpu.complete(prompt: promptFrom(dispatch.body),
+                                             maxTokens: min(requested, maxTokens))
             let elapsed = Date().timeIntervalSince(started)
-            log(String(format: "answered in %.2fs (%d chars)", elapsed, text.count))
-            try await controlPlane.reportDispatch(id: dispatch.id, text: text, error: nil)
+            log(String(format: "answered in %.2fs (%d prompt, %d generated)",
+                       elapsed, out.promptTokens, out.completionTokens))
+            try await controlPlane.reportDispatch(
+                id: dispatch.id, text: out.text, error: nil,
+                promptTokens: out.promptTokens, completionTokens: out.completionTokens)
         } catch {
             log("failed: \(error)")
             try? await controlPlane.reportDispatch(

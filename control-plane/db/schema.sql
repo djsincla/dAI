@@ -98,6 +98,12 @@ CREATE TABLE nodes (
     user_paused           boolean NOT NULL DEFAULT false,
     user_paused_at        timestamptz,
     presence_state        text,
+    -- What each model this node can serve actually accepts, keyed by name.
+    --
+    -- Separate from resident_models, which is about memory right now: a
+    -- context window is a property of the model and does not change with
+    -- whether it happens to be loaded.
+    model_context         jsonb NOT NULL DEFAULT '{}'::jsonb,
     on_ac_power           boolean,
     thermal_ok            boolean,
     last_heartbeat        timestamptz,

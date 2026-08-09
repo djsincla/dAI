@@ -32,6 +32,12 @@ launchctl bootout "system/$LABEL" 2>/dev/null || true
 rm -f "$PLIST"
 rm -rf "$BINARY_DIR"
 
+CONSOLE_UID=$(stat -f%u /dev/console)
+[[ "$CONSOLE_UID" != "0" ]] && launchctl bootout "gui/$CONSOLE_UID/com.dai.menubar" 2>/dev/null
+rm -f /Library/LaunchAgents/com.dai.menubar.plist
+rm -rf /Applications/dAI.app
+pkill -f 'dAI.app/Contents/MacOS/dai-menubar' 2>/dev/null || true
+
 if [[ $PURGE -eq 1 ]]; then
   echo "==> removing identity (this node will need re-enrolling and re-approving)"
   rm -rf "$STATE_DIR" "$LOG_DIR"

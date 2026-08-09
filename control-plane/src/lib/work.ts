@@ -21,7 +21,7 @@ export interface Lease {
   leaseExpiresAt: string
 }
 
-export type NoWorkReason = 'empty' | 'none-of-these-kinds' | 'node-paused'
+export type NoWorkReason = 'empty' | 'none-of-these-kinds' | 'node-paused' | 'user-paused'
 
 /**
  * Lease one unit for a node.
@@ -32,9 +32,16 @@ export type NoWorkReason = 'empty' | 'none-of-these-kinds' | 'node-paused'
  */
 export async function leaseWork(
   db: Db,
-  node: { id: string; state: string; presence_state: string | null; paused_until: Date | null },
+  node: {
+    id: string; state: string; presence_state: string | null
+    paused_until: Date | null; user_paused?: boolean
+  },
   requested: WorkKind[],
 ): Promise<Lease | { reason: NoWorkReason }> {
+  // Checked before the administrative pause and reported separately, because
+  // the two are not the same thing and an operator looking at an idle machine
+  // needs to know which one is in force. This one they cannot lift.
+  if (node.user_paused) return { reason: 'user-paused' }
   if (node.state === 'paused' || (node.paused_until && node.paused_until > new Date())) {
     return { reason: 'node-paused' }
   }

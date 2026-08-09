@@ -99,6 +99,57 @@ describe('agent surface', () => {
     expect((await ask('LOCKED')).kind).toBe('generate')
   })
 
+  it('withholds work from a node its owner paused, and no admin can lift it', async () => {
+    // The property the whole arrangement depends on. Isolation here is policy,
+    // not hardware, so the only hard guarantee a machine's owner has is that
+    // the off switch works. An admin who can clear it turns the agent into
+    // something people work around instead of trust.
+    await submitJob(db, fx.poolId, 'embed', 4, 2)
+    const beat = (userPaused: boolean) =>
+      fetch(`${base}/agent/v1/heartbeat`, {
+        method: 'POST', headers: asNode(fx.fingerprint),
+        body: JSON.stringify({ presenceState: 'LOCKED', onACPower: true,
+                               thermalOk: true, userPaused }),
+      })
+    const ask = async () => {
+      const r = await fetch(`${base}/agent/v1/work?kinds=embed,generate`,
+                            { headers: asNode(fx.fingerprint) })
+      return r.json() as Promise<any>
+    }
+
+    await beat(true)
+    expect((await ask()).reason).toBe('user-paused')
+
+    // An operator unpausing the node administratively must not touch it.
+    await fetch(`${base}/admin/v1/nodes/${fx.nodeId}/pause`, {
+      method: 'POST', headers: asUser(fx.operatorId), body: JSON.stringify({ until: null }),
+    })
+    const { rows } = await db.query('SELECT user_paused, state FROM nodes WHERE id=$1',
+                                    [fx.nodeId])
+    expect(rows[0].user_paused).toBe(true)
+    expect((await ask()).reason).toBe('user-paused')
+
+    // Only the machine itself can lift it, by saying so on a heartbeat.
+    await beat(false)
+    const after = await db.query('SELECT user_paused FROM nodes WHERE id=$1', [fx.nodeId])
+    expect(after.rows[0].user_paused).toBe(false)
+  })
+
+  it('leaves a user-paused machine out of fleet capacity', async () => {
+    // Counting a paused machine would overstate the fleet by exactly the
+    // machines whose owners have opted out, which is the number most worth
+    // being honest about.
+    await fetch(`${base}/agent/v1/heartbeat`, {
+      method: 'POST', headers: asNode(fx.fingerprint),
+      body: JSON.stringify({ presenceState: 'ABSENT', onACPower: true,
+                             thermalOk: true, userPaused: true }),
+    })
+    const r = await fetch(`${base}/admin/v1/fleet/summary`, { headers: asUser(fx.operatorId) })
+    const summary = await r.json() as any
+    const gpu = summary.now?.gpuGb ?? summary.gpuGb ?? 0
+    expect(gpu).toBe(0)
+  })
+
   it('records heartbeat and stores capability per workload class', async () => {
     const r = await fetch(`${base}/agent/v1/heartbeat`, {
       method: 'POST',

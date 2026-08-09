@@ -78,8 +78,15 @@ cp "$PRODUCTS/dai-agent" "$STAGING/usr/local/libexec/dai/"
 for bundle in "$PRODUCTS"/*.bundle; do
   [[ -e "$bundle" ]] && cp -R "$bundle" "$STAGING/usr/local/libexec/dai/"
 done
-cp "$HERE/com.dai.agent.plist.in" "$HERE/install.sh" "$HERE/uninstall.sh" \
-   "$STAGING/usr/local/libexec/dai/"
+cp "$HERE/com.dai.agent.plist.in" "$HERE/com.dai.menubar.plist.in" \
+   "$HERE/install.sh" "$HERE/uninstall.sh" "$STAGING/usr/local/libexec/dai/"
+
+# The menu bar app ships in the same package. Shipping the daemon without it
+# would put work on someone's machine with no way for them to see or stop it,
+# which is the one thing this design cannot afford to get wrong.
+"$HERE/build-app.sh" "$PRODUCTS"
+mkdir -p "$STAGING/Applications"
+cp -R "$PRODUCTS/dAI.app" "$STAGING/Applications/"
 
 echo "==> signing binary"
 # The hardened runtime is required for notarisation. No entitlements: the
@@ -88,6 +95,8 @@ echo "==> signing binary"
 codesign --force --timestamp --options runtime \
          --sign "$APP_ID" "$STAGING/usr/local/libexec/dai/dai-agent"
 codesign --verify --strict --verbose=2 "$STAGING/usr/local/libexec/dai/dai-agent"
+codesign --force --timestamp --options runtime --sign "$APP_ID" "$STAGING/Applications/dAI.app"
+codesign --verify --strict --verbose=2 "$STAGING/Applications/dAI.app"
 
 echo "==> building package"
 mkdir -p "$OUT"

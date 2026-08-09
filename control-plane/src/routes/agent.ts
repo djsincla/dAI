@@ -132,6 +132,7 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
   r.post('/heartbeat', async (req, res) => {
     const b = req.body as {
       presenceState: string; onAcPower?: boolean; thermalOk?: boolean
+      userPaused?: boolean
       capabilitySamples?: { workloadClass: string; itemsPerSecond: number }[]
       residentModels?: Record<string, number>
     }
@@ -147,6 +148,13 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
       `UPDATE nodes
           SET presence_state = $1, on_ac_power = $2, thermal_ok = $3,
               last_heartbeat = now(),
+              user_paused = COALESCE($7, user_paused),
+              -- Stamped on the transition only, so the UI can say how long a
+              -- machine has been paused rather than just that it is.
+              user_paused_at = CASE
+                WHEN COALESCE($7, user_paused) AND NOT user_paused THEN now()
+                WHEN NOT COALESCE($7, user_paused) THEN NULL
+                ELSE user_paused_at END,
               capability_profiles = capability_profiles || $4::jsonb,
               -- Replaced rather than merged: a model the node has released is
               -- no longer resident, and routing to it would put a 1-3s load on
@@ -154,7 +162,8 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
               resident_models = $5::jsonb
         WHERE id = $6`,
       [b.presenceState, b.onAcPower ?? null, b.thermalOk ?? null,
-       JSON.stringify(profiles), JSON.stringify(b.residentModels ?? {}), node.id],
+       JSON.stringify(profiles), JSON.stringify(b.residentModels ?? {}), node.id,
+       b.userPaused ?? null],
     )
     // Presence history feeds the capacity graph, which cannot be drawn from
     // current state alone.

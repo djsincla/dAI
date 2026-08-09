@@ -74,6 +74,17 @@ CREATE TABLE nodes (
     revoked_at            timestamptz,
     enrolled_at           timestamptz,
     paused_until          timestamptz,
+    -- Reported by the agent, and never written by the control plane.
+    --
+    -- This is the pause on someone's own machine, and it has to be theirs
+    -- alone. An admin who can clear it turns the agent into something people
+    -- work around rather than trust, and the whole arrangement depends on
+    -- trust: the isolation here is policy, not hardware, so the only real
+    -- guarantee a machine's owner has is that the off switch works. It is
+    -- deliberately separate from state='paused', which is the administrative
+    -- one and can be lifted by an operator.
+    user_paused           boolean NOT NULL DEFAULT false,
+    user_paused_at        timestamptz,
     presence_state        text,
     on_ac_power           boolean,
     thermal_ok            boolean,

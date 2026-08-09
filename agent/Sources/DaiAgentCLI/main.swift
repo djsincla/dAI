@@ -23,6 +23,23 @@ case "verify-mlx-child":
     // it. Not meant to be called directly.
     exit(MLXProbe.runChild())
 
+case "pause":
+    // No arguments, no privilege, no control plane. Someone reaching for this
+    // is already annoyed; anything else to get right first is a failure.
+    do {
+        let reason = args.count > 2 ? args[2...].joined(separator: " ") : nil
+        try PauseSwitch().pause(reason: reason)
+        print("Paused. Nothing will run on this machine until you resume.")
+        print("The fleet will be told within a few seconds, and cannot override it.")
+        print("Resume with: dai-agent resume")
+    } catch { print("could not pause: \(error)"); exit(1) }
+
+case "resume":
+    do {
+        try PauseSwitch().resume()
+        print("Resumed. Work may run again when nobody is using this machine.")
+    } catch { print("could not resume: \(error)"); exit(1) }
+
 case "preflight":
     // Whether this machine can run the agent at all. Worth running as root too:
     // the daemon runs in session 0, which is a different enough context that
@@ -30,6 +47,9 @@ case "preflight":
     exit(await Preflight.run())
 
 case "presence":
+    if PauseSwitch().read().paused {
+        print("PAUSED by the machine owner - nothing will run here until `dai-agent resume`")
+    }
     let signals = MacSignalSource().read()
     let monitor = PresenceMonitor()
     let reading = monitor.update(signals, now: Date().timeIntervalSince1970)
@@ -301,6 +321,6 @@ case "qos":
     print("leave background: \(ProcessQoS.setBackground(false))")
 
 default:
-    print("usage: dai-agent [preflight|presence|verify-ane <model>|generate|enroll|status|timing|work|qos]")
+    print("usage: dai-agent [pause|resume|preflight|presence|verify-ane <model>|generate|enroll|status|timing|lease-probe|work|qos]")
     exit(2)
 }

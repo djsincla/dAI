@@ -254,7 +254,7 @@ public func mergePolicy(local: [PresenceState: StatePolicy],
 /// Pinning rather than trusting the system store: a node that verifies nothing
 /// accepts work from anything that can reach it on the network, and a work unit
 /// tells a node what to execute.
-final class TLSDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
+final class TLSDelegate: NSObject, URLSessionDelegate, URLSessionTaskDelegate, @unchecked Sendable {
     private let identity: SecIdentity?
     private let serverCA: SecCertificate?
 
@@ -263,9 +263,41 @@ final class TLSDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
         self.serverCA = serverCA
     }
 
-    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge)
-        async -> (URLSession.AuthChallengeDisposition, URLCredential?) {
+    /// Server trust arrives as a *session*-level challenge.
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        let (disposition, credential) = handle(challenge)
+        completionHandler(disposition, credential)
+    }
 
+    /// Client certificates arrive as a *task*-level challenge, and only
+    /// URLSessionTaskDelegate receives them.
+    ///
+    /// Implementing just the session-level method meant the certificate
+    /// challenge was never answered, and the request sat until it timed out.
+    /// The symptom reads like a network fault rather than a delegate that is
+    /// not being asked, which is what made it slow to find.
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        let (disposition, credential) = handle(challenge)
+        completionHandler(disposition, credential)
+    }
+
+    private func handle(_ challenge: URLAuthenticationChallenge)
+        -> (URLSession.AuthChallengeDisposition, URLCredential?) {
+
+        if ProcessInfo.processInfo.environment["DAI_TLS_DEBUG"] != nil {
+            FileHandle.standardError.write(
+                "TLS challenge: \(challenge.protectionSpace.authenticationMethod)\n"
+                    .data(using: .utf8)!)
+        }
         switch challenge.protectionSpace.authenticationMethod {
         case NSURLAuthenticationMethodClientCertificate:
             guard let identity else { return (.performDefaultHandling, nil) }
@@ -295,6 +327,22 @@ final class TLSDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
 }
 
 /// Loads a client identity from PEM by way of a PKCS#12 bundle.
+///
+/// **This path does not currently work and is the reason the Swift agent cannot
+/// yet replace the Python one.** The identity imports successfully and both TLS
+/// challenges are answered, but the handshake then stalls until the request
+/// times out. An otherwise identical request that presents no client
+/// certificate completes in 0.01s, and `curl` with the same PEM files succeeds,
+/// so the fault is specific to using a `SecIdentity` whose private key was
+/// imported this way: it is not backed by an accessible keychain, and signing
+/// blocks rather than failing.
+///
+/// The fix is the one already identified as the security gap: generate the key
+/// in the Secure Enclave, marked non-exportable, and never produce a PEM at
+/// all. That removes the readable key file, the dependency on whichever
+/// `openssl` the system ships, and this stall together. It requires the control
+/// plane CA to sign EC P-256 CSRs, which node-forge does not do, so the server
+/// side moves to a WebCrypto-based issuer at the same time.
 ///
 /// The production target is a key generated in the Secure Enclave and marked
 /// non-exportable, so a certificate copied off disk is useless without the

@@ -23,6 +23,8 @@ which is what a Python environment on every Mac was always going to cost.
 | `SignalSource.swift` | The real machine, via IOKit and power management. |
 | `ANERuntime.swift` | Core ML pinned to the ANE, with `MLComputePlan` verification. |
 | `QoS.swift` | Runtime QoS via `setpriority(PRIO_DARWIN_PROCESS)`. |
+| `MLXRuntime.swift` | `generate` work via mlx-swift, with eager release. |
+| `Worker.swift` | The loop: lease, per-item yield, partial results, duty cycling. |
 | `PresenceTests.swift` | 20 cases, ported from the Python suite. |
 
 ```
@@ -98,16 +100,40 @@ The server CA is distinct from the node CA that signs agent identities, and
 pinning the wrong one fails every connection with an error that reads like a
 network problem.
 
+## Known blocker: client identity from PKCS#12
+
+`dai-agent status` and `work` reach the control plane but stall on the mutual-TLS
+handshake until the request times out. Isolated precisely:
+
+| | |
+|---|---|
+| `curl` with the same PEM files | works |
+| Swift, server trust only, no client cert | **0.01s** |
+| Swift, presenting the client identity | **61s timeout** |
+| Both TLS challenges answered | yes, confirmed by logging |
+| Identity import | succeeds in 0.09s |
+
+So it is not the network, the server, the delegate, or the certificate. It is
+the `SecIdentity` produced by `SecPKCS12Import`: its private key is not backed by
+an accessible keychain, and signing during the handshake blocks rather than
+failing. Python's `ssl.load_cert_chain` takes PEM directly and has no equivalent
+step, which is why the Python agent works over mTLS today and this does not.
+
+**The fix is the Secure Enclave path already identified as the security gap.**
+Generating the key in the Enclave, marked non-exportable, removes the readable
+key file, the dependency on whichever `openssl` the system ships, and this stall
+together. It requires the control plane CA to sign EC P-256 CSRs, which
+node-forge cannot do, so the server-side issuer moves to a WebCrypto-based
+library at the same time.
+
+`dai-agent timing <url>` reports per-phase latency and is what located this.
+
 ## Not yet ported
 
-- MLX runtime for `generate` work (mlx-swift is a dependency already)
-- The worker loop: leasing, per-item yield, partial results
+- **Secure Enclave key generation**, which is now both the security gap and the
+  blocker above.
 - Reverse channel for interactive requests
 - launchd daemon packaging and notarisation
-- **Secure Enclave key generation.** Today the key is a 0600 PEM converted to
-  PKCS#12 via `openssl`, which is weaker in two ways: a readable key file can be
-  taken, and macOS ships LibreSSL whose `pkcs12` differs from OpenSSL's, which
-  already cost one debugging cycle. Generating in the Enclave removes both by
-  never producing a PEM.
+- A `render` runtime
 
 Until those land, `../spike/harvest/harvest_worker.py` is the agent that works.

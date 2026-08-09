@@ -214,10 +214,54 @@ case "work":
         }
 
         let seconds = args.count > 5 ? Double(args[5]) ?? .infinity : .infinity
-        let worker = Worker(controlPlane: cp, gpu: gpu, ane: ane, promoteAfter: 15)
+        // 300s by default, and long on purpose: E4 showed a false "they have
+        // gone" costs a model load and an immediate preemption. Overridable
+        // because that wait makes the behaviour untestable by hand, and a test
+        // constant left in the daemon path would quietly ship as the default.
+        let promote = ProcessInfo.processInfo.environment["DAI_PROMOTE_SECONDS"]
+            .flatMap(Double.init) ?? idlePromoteSeconds
+        let worker = Worker(controlPlane: cp, gpu: gpu, ane: ane, promoteAfter: promote)
         await worker.run(maxSeconds: seconds)
         await cp.shutdown()
     } catch { print("worker failed: \(error)"); exit(1) }
+
+case "generate":
+    // Exercises the GPU runtime directly, outside the presence gate.
+    //
+    // Needed because generate work is only permitted in LOCKED and ABSENT, so
+    // sitting at the machine makes it unreachable through the worker: the very
+    // situation in which someone wants to know whether a node can serve it.
+    // This answers "does this model run here" without waiting for the machine
+    // to be free.
+    guard args.count > 3 else {
+        print("usage: dai-agent generate <model-id> <prompt> [max-tokens]"); exit(2)
+    }
+    guard MLXProbe.isAvailable() else {
+        print("no GPU runtime: MLX cannot load its Metal shader library.")
+        print("install it with: xcodebuild -downloadComponent MetalToolchain")
+        exit(1)
+    }
+    do {
+        let runtime = MLXRuntime(modelId: args[2])
+        let loaded = try await runtime.load()
+        print(String(format: "loaded in %.2fs, %.1f GB resident",
+                     loaded, await runtime.residentGb))
+
+        let maxTokens = args.count > 4 ? Int(args[4]) ?? 128 : 128
+        let started = Date()
+        let text = try await runtime.generate(prompt: args[3], maxTokens: maxTokens)
+        let elapsed = Date().timeIntervalSince(started)
+        print("---")
+        print(text)
+        print("---")
+        // Roughly, since the token count is not returned. Enough to tell a
+        // working GPU path from one that has silently fallen back.
+        print(String(format: "%.2fs, ~%.1f tok/s (%.1f GB resident)",
+                     elapsed, Double(text.split(separator: " ").count) / elapsed,
+                     await runtime.residentGb))
+        let freed = await runtime.unload()
+        print(String(format: "released in %.0f ms", freed * 1000))
+    } catch { print("generate failed: \(error)"); exit(1) }
 
 case "qos":
     // Demonstrates the control that E1 measured at 2.4x on sustained work and
@@ -226,6 +270,6 @@ case "qos":
     print("leave background: \(ProcessQoS.setBackground(false))")
 
 default:
-    print("usage: dai-agent [preflight|presence|verify-ane <model>|enroll|status|timing|work|qos]")
+    print("usage: dai-agent [preflight|presence|verify-ane <model>|generate|enroll|status|timing|work|qos]")
     exit(2)
 }

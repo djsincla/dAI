@@ -79,6 +79,8 @@
       ~/.cache writes nowhere. Model downloads have to be told where to land or
       the first GPU work unit fails on a path the logs will not explain.
     -->
+    <key>DAI_PROMOTE_SECONDS</key>
+    <string>@PROMOTE@</string>
     <key>HF_HOME</key>
     <string>@MODEL_DIR@</string>
     <key>HUGGINGFACE_HUB_CACHE</key>

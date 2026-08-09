@@ -166,8 +166,19 @@ root with nobody logged in and Metal still works: 2/2 probes passed with the
 screen locked. A LaunchAgent only exists while somebody is logged in, which
 would give up exactly the overnight hours the premise depends on.
 
+**Build with `xcodebuild`, not `swift build`.** SwiftPM's command line cannot
+compile MLX's Metal shaders - documented upstream - so a binary built that way
+aborts from C++ the first time it touches the GPU, with an error that reads
+exactly like a missing Metal toolchain and is not. Coverage is disabled
+explicitly because the generated scheme leaves profiling instrumentation in a
+Release build, and the daemon then fails to write `default.profraw` on every
+start.
+
 ```
-swift build -c release
+xcodebuild build -scheme dai-agent -destination 'platform=OS X' \
+  -configuration Release -derivedDataPath .xcbuild \
+  ENABLE_CODE_COVERAGE=NO CLANG_ENABLE_CODE_COVERAGE=NO SWIFT_ENABLE_CODE_COVERAGE=NO
+
 sudo packaging/install.sh --url https://control-plane:8452 \
                           --token JOIN_TOKEN \
                           --ca server-ca.crt \

@@ -8,9 +8,13 @@ import MLX
 /// rather than an error anyone can catch.
 public enum MLXSelfTest {
     public static func touchGPU() {
+        // Float explicitly. A Swift literal array is [Double], and Metal has no
+        // float64, so the obvious spelling fails on a working GPU with an error
+        // about dtypes that reads like a broken installation.
+        //
         // Small enough to be free, real enough that the shaders must load: an
         // allocation alone would not, but an evaluated op will.
-        let a = MLXArray([1.0, 2.0, 3.0])
+        let a = MLXArray([Float(1), Float(2), Float(3)])
         let b = a + a
         b.eval()
     }

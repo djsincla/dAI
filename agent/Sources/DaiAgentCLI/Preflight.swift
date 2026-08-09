@@ -89,8 +89,13 @@ enum Preflight {
         if MLXProbe.isAvailable() {
             ok("MLX", "GPU runtime works; this node can serve generate work")
         } else {
-            warn("MLX", "no GPU runtime (Metal shader library missing). ANE work "
-                + "still runs; for GPU work: xcodebuild -downloadComponent MetalToolchain")
+            // Specific about the cause, because the fix is not the obvious one:
+            // SwiftPM's command line cannot compile MLX's Metal shaders at all,
+            // which is documented upstream and looks exactly like a missing
+            // toolchain.
+            warn("MLX", "no GPU runtime; ANE work still runs. Build with "
+                + "xcodebuild rather than swift build: SwiftPM cannot compile "
+                + "MLX's Metal shaders")
         }
 
         // 6. QoS, the dial the agent turns when somebody sits down.

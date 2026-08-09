@@ -26,7 +26,7 @@ MODEL_DIR=/var/db/dai/models
 PLIST=/Library/LaunchDaemons/com.dai.agent.plist
 LABEL=com.dai.agent
 
-URL=""; TOKEN=""; CA=""; MODEL=""; ANE="-"; WAIT=600; SVC_USER="_dai"
+URL=""; TOKEN=""; CA=""; MODEL=""; ANE="-"; WAIT=600; SVC_USER="_dai"; PROMOTE=300; GPU_MODEL_CACHE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --url)   URL="$2"; shift 2 ;;
@@ -36,6 +36,11 @@ while [[ $# -gt 0 ]]; do
     --ane)   ANE="$2"; shift 2 ;;
     --wait)  WAIT="$2"; shift 2 ;;
     --user)  SVC_USER="$2"; shift 2 ;;
+    # Seconds of sustained absence before GPU work is allowed to start. Long by
+    # design; short only for testing, since waiting 5 minutes to see anything
+    # happen makes the behaviour impossible to check by hand.
+    --promote) PROMOTE="$2"; shift 2 ;;
+    --gpu-model-cache) GPU_MODEL_CACHE="$2"; shift 2 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -50,9 +55,18 @@ done
 [[ -f "$CA" ]] || { echo "server CA not found: $CA" >&2; exit 1; }
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-BUILD="$HERE/../.build/release"
+# The xcodebuild product, not the SwiftPM one. SwiftPM's command line cannot
+# compile MLX's Metal shaders, which is documented upstream, so a binary built
+# with `swift build` aborts from C++ the first time it touches the GPU. It looks
+# exactly like a missing Metal toolchain and is not.
+BUILD="$HERE/../.xcbuild/Build/Products/Release"
 [[ -x "$BUILD/dai-agent" ]] || {
-  echo "no release build found. Run: swift build -c release" >&2; exit 1
+  echo "no build found at $BUILD" >&2
+  echo "run: xcodebuild build -scheme dai-agent -destination 'platform=OS X' \\" >&2
+  echo "       -configuration Release -derivedDataPath .xcbuild \\" >&2
+  echo "       ENABLE_CODE_COVERAGE=NO CLANG_ENABLE_CODE_COVERAGE=NO \\" >&2
+  echo "       SWIFT_ENABLE_CODE_COVERAGE=NO" >&2
+  exit 1
 }
 
 # The daemon runs as this account, not as root. Creating it here rather than
@@ -98,6 +112,20 @@ install -m 600 "$CA" "$IDENTITY_DIR/server-ca.crt"
 # so the daemon would work when installed and fail after a restart, which is the
 # hardest kind of failure to attribute.
 install -d -m 755 "$MODEL_DIR"
+# The GPU model is staged too, rather than fetched by the daemon.
+#
+# Two reasons, and the second is the real one. The service account reports
+# itself offline when it tries to reach the hub, so the fetch fails outright.
+# But even where it works, a fleet whose selling point is that data never leaves
+# the building should not have every node pulling weights from the internet on
+# first use: models belong in the control plane's catalogue, distributed
+# deliberately and verified by hash. This is the interim form of that.
+if [[ -n "$GPU_MODEL_CACHE" && -d "$GPU_MODEL_CACHE" ]]; then
+  echo "==> staging GPU model cache from $GPU_MODEL_CACHE"
+  install -d -m 755 "$MODEL_DIR/hub"
+  cp -R "$GPU_MODEL_CACHE"/. "$MODEL_DIR/hub/"
+fi
+
 if [[ "$ANE" != "-" && -e "$ANE" ]]; then
   rm -rf "$MODEL_DIR/$(basename "$ANE")"
   cp -R "$ANE" "$MODEL_DIR/"
@@ -143,6 +171,7 @@ sed -e "s|@BINARY@|$BINARY_DIR/dai-agent|g" \
     -e "s|@LOG_DIR@|$LOG_DIR|g" \
     -e "s|@USER@|$SVC_USER|g" \
     -e "s|@MODEL_DIR@|$MODEL_DIR|g" \
+    -e "s|@PROMOTE@|$PROMOTE|g" \
     "$HERE/com.dai.agent.plist.in" > "$PLIST"
 chown root:wheel "$PLIST"
 chmod 644 "$PLIST"

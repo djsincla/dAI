@@ -163,6 +163,16 @@ public actor ANERuntime {
     /// than a prompt. Text is hashed into the input tensor as a stand-in until a
     /// real embedding model is converted; swapping that in changes only this
     /// method.
+    /// Overload taking the wire type, so callers do not have to flatten a
+    /// JSONValue into an untyped dictionary just to hand it back again.
+    @discardableResult
+    public func run(item: WorkItem) throws -> WorkItem {
+        let text = item["prompt"]?.stringValue ?? item["text"]?.stringValue ?? ""
+        let out = try run(item: ["prompt": text, "id": item["id"]?.intValue as Any])
+        return .object(["id": item["id"] ?? .null,
+                        "keys": .array((out["keys"] as? [String] ?? []).map(JSONValue.string))])
+    }
+
     @discardableResult
     public func run(item: [String: Any]) throws -> [String: Any] {
         guard let model, let inputName, let inputShape else {

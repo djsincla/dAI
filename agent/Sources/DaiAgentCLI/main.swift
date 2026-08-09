@@ -1,4 +1,5 @@
 import DaiAgent
+import DaiWorker
 import Foundation
 
 // Subcommands while the port proceeds. `presence` is the one worth having first:
@@ -63,6 +64,40 @@ case "enroll":
     do { try await Enroll.run(controlPlane: url, joinToken: args[3], caPath: ca, waitSeconds: wait) }
     catch { print("enrollment failed: \(error)"); exit(1) }
 
+case "timing":
+    // Which phase is actually slow. The symptom was "request timed out", which
+    // points at the network; that is worth checking rather than assuming.
+    let dir0 = Enroll.identityDir()
+    var t = Date()
+    let id0 = try? ClientIdentity.load(certPEM: dir0.appendingPathComponent("node.crt"),
+                                       keyPEM: dir0.appendingPathComponent("node.key"))
+    print(String(format: "identity load: %.2fs (ok=%@)", Date().timeIntervalSince(t),
+                 id0 != nil ? "yes" : "no"))
+    t = Date()
+    let ca0 = try? ClientIdentity.loadCA(pem: dir0.appendingPathComponent("ca.crt"))
+    print(String(format: "ca load:       %.2fs (ok=%@)", Date().timeIntervalSince(t),
+                 ca0 != nil ? "yes" : "no"))
+    t = Date()
+    let cp0 = ControlPlane(base: URL(string: args[2])!, identity: id0, serverCA: ca0)
+    print(String(format: "session init:  %.2fs", Date().timeIntervalSince(t)))
+    // Unauthenticated endpoint first: separates "TLS and HTTP work" from
+    // "the agent auth path works".
+    t = Date()
+    var probe = URLRequest(url: URL(string: args[2])!.appendingPathComponent("healthz"))
+    probe.timeoutInterval = 15
+    let probeSession = URLSession(configuration: .ephemeral,
+                                  delegate: TLSProbeDelegate(ca: ca0), delegateQueue: nil)
+    do {
+        let (d, r) = try await probeSession.data(for: probe)
+        print(String(format: "healthz:       %.2fs %d %@", Date().timeIntervalSince(t),
+                     (r as? HTTPURLResponse)?.statusCode ?? 0,
+                     String(data: d, encoding: .utf8) ?? ""))
+    } catch { print(String(format: "healthz:       %.2fs FAILED %@", Date().timeIntervalSince(t), String(describing: error))) }
+
+    t = Date()
+    do { _ = try await cp0.fetchPolicy(); print(String(format: "fetchPolicy:   %.2fs OK", Date().timeIntervalSince(t))) }
+    catch { print(String(format: "fetchPolicy:   %.2fs FAILED %@", Date().timeIntervalSince(t), String(describing: error))) }
+
 case "status":
     // Proves the identity works: fetches policy over mTLS and merges it with the
     // local table, taking the stricter of the two.
@@ -96,6 +131,40 @@ case "status":
         print("heartbeat sent: \(reading.state.rawValue)")
     } catch { print("status failed: \(error)"); exit(1) }
 
+case "work":
+    // usage: dai-agent work <url> <model> [ane-model] [seconds]
+    guard args.count > 3 else {
+        print("usage: dai-agent work <url> <model-id> [ane-model.mlpackage] [seconds]"); exit(2)
+    }
+    let dir = Enroll.identityDir()
+    do {
+        let identity = try ClientIdentity.load(
+            certPEM: dir.appendingPathComponent("node.crt"),
+            keyPEM: dir.appendingPathComponent("node.key"))
+        let ca = try ClientIdentity.loadCA(pem: dir.appendingPathComponent("ca.crt"))
+        let cp = ControlPlane(base: URL(string: args[2])!, identity: identity, serverCA: ca)
+
+        var ane: ANERuntime?
+        if args.count > 4, !args[4].isEmpty, args[4] != "-" {
+            let runtime = ANERuntime(modelURL: URL(fileURLWithPath: args[4]))
+            do {
+                _ = try await runtime.load()
+                if let p = await runtime.placement {
+                    print(String(format: "ANE model loaded (%.0f%% of %d ops on ANE)",
+                                 p.aneShare * 100, p.totalOps))
+                }
+                ane = runtime
+            } catch {
+                // Refuse rather than silently disturb the user from the CPU.
+                print("ANE model REJECTED: \(error)")
+            }
+        }
+        let seconds = args.count > 5 ? Double(args[5]) ?? .infinity : .infinity
+        let worker = Worker(controlPlane: cp, gpu: MLXRuntime(modelId: args[3]),
+                            ane: ane, promoteAfter: 15)
+        await worker.run(maxSeconds: seconds)
+    } catch { print("worker failed: \(error)"); exit(1) }
+
 case "qos":
     // Demonstrates the control that E1 measured at 2.4x on sustained work and
     // the worker at ~26x on bursty work.
@@ -103,6 +172,6 @@ case "qos":
     print("leave background: \(ProcessQoS.setBackground(false))")
 
 default:
-    print("usage: dai-agent [presence|verify-ane <model>|enroll|status|qos]")
+    print("usage: dai-agent [presence|verify-ane <model>|enroll|status|work|qos]")
     exit(2)
 }

@@ -31,7 +31,7 @@ public enum WorkKind: String, Sendable, CaseIterable {
 
     /// `embed` runs on the ANE. The other two are GPU work and are confined to
     /// states where nobody is at the machine.
-    var isGPU: Bool { self != .embed }
+    public var isGPU: Bool { self != .embed }
 }
 
 public enum QoS: String, Sendable { case background, standard }

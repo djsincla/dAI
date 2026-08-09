@@ -159,6 +159,69 @@ one with the entitlement and no profile gets the process killed on launch.
 CryptoKit hands back a sealed blob to store wherever we like and needs neither,
 verified from an unsigned command line tool.
 
+## Running as a daemon
+
+A LaunchDaemon, not a LaunchAgent, and E1 is why. A daemon runs in session 0 as
+root with nobody logged in and Metal still works: 2/2 probes passed with the
+screen locked. A LaunchAgent only exists while somebody is logged in, which
+would give up exactly the overnight hours the premise depends on.
+
+```
+swift build -c release
+sudo packaging/install.sh --url https://control-plane:8452 \
+                          --token JOIN_TOKEN \
+                          --ca server-ca.crt \
+                          --model mlx-community/Llama-3.2-3B-Instruct-4bit
+```
+
+Enrollment is part of installation because the two cannot be separated: the
+daemon has nothing to authenticate with until an admin approves the node, and
+one that starts without an identity sits in a reconnect loop that reads like a
+network fault. The script is resumable - run it, approve the node, run it again.
+
+Check a machine before installing anything, and check it as root too, since the
+daemon's context is not the interactive one:
+
+```
+sudo packaging/../.build/release/dai-agent preflight
+```
+
+### The plist setting most likely to be "fixed" by someone helpful
+
+`ProcessType` is `Standard`. `Background` looks like the polite choice and is the
+wrong one: E1 measured it at 2.4x on sustained GPU work and the worker found
+~26x on bursty ANE items, and launchd's `ProcessType` applies for the life of the
+process. A daemon pinned to `Background` cannot promote itself when the user goes
+home, which is when nearly all the capacity is. The agent sets its own QoS per
+presence state instead - background the moment somebody is at the machine,
+standard when they are not. Setting it in the plist takes that control away.
+
+### Notarisation
+
+`packaging/build-pkg.sh` produces a signed, notarised, stapled `.pkg`, which is
+what MDM needs; `install.sh` is only appropriate for a machine you are sitting
+at. Gatekeeper refuses an un-notarised package on every machine except the one
+that built it, and quietly enough to waste a day.
+
+It needs three credentials that are commonly confused with each other:
+
+| | |
+|---|---|
+| Developer ID Application | signs the binary |
+| Developer ID Installer | signs the `.pkg` |
+| a `notarytool` profile | submits to Apple |
+
+**None of these is the "Apple Development" certificate a normal Xcode setup
+provides.** That one signs code for local use and Apple will not notarise
+anything carrying it, so the script checks for the right identity up front
+rather than failing after a release build. Stapling is not optional for this
+product in particular: without it every target must reach Apple to verify, and
+an air-gapped network is a realistic deployment for something sold on data never
+leaving the building.
+
+No entitlements are needed, which is a consequence of reaching the Secure
+Enclave through CryptoKit rather than the keychain.
+
 ## Not yet ported
 
 - **Secure Enclave key generation**, which is now both the security gap and the

@@ -45,6 +45,15 @@ final class StatusModel: ObservableObject {
     private let pauseSwitch = PauseSwitch()
     private var timer: Timer?
 
+    /// Whether an agent is installed at all.
+    ///
+    /// Without this the app cannot tell "nothing is installed here" from "the
+    /// daemon has stopped", and it reported the first as the second: alarming
+    /// language about a machine where nothing was ever meant to be running.
+    private var daemonInstalled: Bool {
+        FileManager.default.fileExists(atPath: "/Library/LaunchDaemons/com.dai.agent.plist")
+    }
+
     init() {
         refresh()
         // Two seconds: fast enough that pausing feels immediate, slow enough to
@@ -54,9 +63,12 @@ final class StatusModel: ObservableObject {
         }
     }
 
+    @Published private(set) var installed = false
+
     func refresh() {
         status = AgentStatus.read()
         paused = pauseSwitch.read().paused
+        installed = daemonInstalled
     }
 
     func togglePause() {
@@ -68,18 +80,29 @@ final class StatusModel: ObservableObject {
         refresh()
     }
 
+    /// A fresh status file outranks everything.
+    ///
+    /// The installation check is a fallback for working out *why* nothing is
+    /// reporting, not a precondition for believing what is. Checking it first
+    /// meant the app said "not installed" while an agent was visibly running,
+    /// which is worse than the vagueness it replaced: a status panel that
+    /// contradicts the machine teaches people to ignore it.
+    private var running: Bool { status?.isFresh == true }
+
     var symbolName: String {
         if paused { return "pause.circle" }
-        guard let status, status.isFresh else { return "circle.dashed" }
-        return status.activity.hasPrefix("running") ? "bolt.fill" : "bolt"
+        if running { return status!.activity.hasPrefix("running") ? "bolt.fill" : "bolt" }
+        return installed ? "exclamationmark.triangle" : "bolt.slash"
     }
 
     /// Deliberately plain language. The audience is someone whose machine feels
     /// slow, not an operator.
     var headline: String {
         if paused { return "Paused by you" }
-        guard let status else { return "Not running" }
-        guard status.isFresh else { return "Not responding" }
+        guard let status, running else {
+            if !installed { return "Not installed" }
+            return status == nil ? "Starting up" : "Not responding"
+        }
         if status.permitted.isEmpty { return "Standing by" }
         if status.activity.hasPrefix("running") { return "Working" }
         return "Waiting for work"
@@ -87,11 +110,16 @@ final class StatusModel: ObservableObject {
 
     var detail: String {
         if paused { return "Nothing will run here until you resume." }
-        guard let status else {
-            return "The agent is not installed or has not started."
-        }
-        guard status.isFresh else {
-            return "No update since \(Self.relative(status.updated)). It may have stopped."
+        guard let status, running else {
+            if !installed {
+                return "No agent is installed on this machine, so nothing is running here."
+            }
+            guard let status else { return "The agent is installed but has not reported yet." }
+            // Says what it knows rather than guessing. This is the state that
+            // should prompt someone to ask a question, so it needs to be
+            // distinguishable from ordinary idleness at a glance.
+            return "Installed, but no update since \(Self.relative(status.updated)). "
+                + "It has probably stopped."
         }
         if status.permitted.isEmpty {
             return "You are using this machine, so nothing is running."
@@ -103,6 +131,11 @@ final class StatusModel: ObservableObject {
         }
         return "Running \(status.permitted.joined(separator: " and ")) work while you are away."
     }
+
+    /// Figures are worth showing whenever there are any, including after the
+    /// agent stops: what somebody contributed does not become untrue because
+    /// the daemon is no longer running.
+    var showsFigures: Bool { (status?.itemsCompleted ?? 0) > 0 || running }
 
     static func relative(_ date: Date) -> String {
         let formatter = RelativeDateTimeFormatter()
@@ -116,6 +149,23 @@ struct MenuContents: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            // Says what this is, unprompted.
+            //
+            // Someone finding an unexplained icon on their own machine has one
+            // question, and it is not the presence state. Without a name and a
+            // sentence, the panel answers "what is it doing" for a thing the
+            // reader has no reason to recognise, which reads as something that
+            // installed itself.
+            VStack(alignment: .leading, spacing: 2) {
+                Text("dAI").font(.system(size: 15, weight: .semibold))
+                Text("Shared compute. This machine helps run the studio's AI work "
+                     + "when you are not using it.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider()
+
             HStack {
                 Image(systemName: model.symbolName).font(.title2)
                 VStack(alignment: .leading, spacing: 2) {
@@ -127,7 +177,7 @@ struct MenuContents: View {
 
             Divider()
 
-            if let status = model.status {
+            if let status = model.status, model.showsFigures {
                 // The contribution counter. This is the part that changes how
                 // people feel about the arrangement.
                 Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 4) {
@@ -174,7 +224,16 @@ struct MenuContents: View {
             }
 
             Divider()
-            Button("Quit") { NSApplication.shared.terminate(nil) }
+
+            // Where it goes and where it does not, in one line. This is the
+            // question behind the question when somebody opens this panel.
+            Text("Work runs here and results go to the studio's own control "
+                 + "plane. Nothing leaves the building.")
+                .font(.caption2).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button("Quit this menu") { NSApplication.shared.terminate(nil) }
+                .font(.caption)
                 .keyboardShortcut("q")
         }
         .padding(14)

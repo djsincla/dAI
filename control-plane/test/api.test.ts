@@ -1,7 +1,7 @@
 import type { Server } from 'node:http'
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Db } from '../src/lib/db.js'
-import { type Fixtures, appFor, freshDb, seed, setPresence } from './helpers.js'
+import { type Fixtures, appFor, freshDb, seed, setPresence, submitJob } from './helpers.js'
 
 let db: Db
 let fx: Fixtures
@@ -54,6 +54,49 @@ describe('agent surface', () => {
     expect(policy.LOCKED.gpu).toBe(true)
     expect(policy.LOCKED.qos).toBe('standard')
     for (const state of Object.keys(policy)) expect(policy[state].ane).toBe(true)
+  })
+
+  it('accepts a request for more than one work kind', async () => {
+    // Regression, and an expensive one. `kinds` was declared as a plain string
+    // documented as comma-separated, which made the validator treat the comma
+    // as a reserved character and reject the parameter's own example. Asking
+    // for one kind worked, so every test passed; asking for two returned 400.
+    // A node sat in LOCKED with GPU work queued, asking for it every five
+    // seconds and being refused, and nothing on either side said so.
+    await fetch(`${base}/agent/v1/heartbeat`, {
+      method: 'POST', headers: asNode(fx.fingerprint),
+      body: JSON.stringify({ presenceState: 'LOCKED', onACPower: true, thermalOK: true }),
+    })
+
+    for (const query of ['embed,generate', 'embed%2Cgenerate']) {
+      const r = await fetch(`${base}/agent/v1/work?kinds=${query}`, {
+        headers: asNode(fx.fingerprint),
+      })
+      expect(r.status, `kinds=${query}`).toBe(200)
+    }
+  })
+
+  it('serves GPU work to a locked node and withholds it from an active one', async () => {
+    // The property the whole product rests on, asserted over HTTP rather than
+    // against the function underneath it, because that is where it broke.
+    // Its own work, rather than whatever the fixture happens to leave behind:
+    // a test that depends on another test's leftovers passes for the wrong
+    // reason and fails for one too.
+    await submitJob(db, fx.poolId, 'generate', 4, 2)
+
+    const ask = async (presenceState: string) => {
+      await fetch(`${base}/agent/v1/heartbeat`, {
+        method: 'POST', headers: asNode(fx.fingerprint),
+        body: JSON.stringify({ presenceState, onACPower: true, thermalOK: true }),
+      })
+      const r = await fetch(`${base}/agent/v1/work?kinds=embed,generate`, {
+        headers: asNode(fx.fingerprint),
+      })
+      return r.json() as Promise<any>
+    }
+
+    expect((await ask('ACTIVE')).kind).toBeUndefined()
+    expect((await ask('LOCKED')).kind).toBe('generate')
   })
 
   it('records heartbeat and stores capability per workload class', async () => {

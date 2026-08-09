@@ -120,10 +120,12 @@ install -d -m 755 "$MODEL_DIR"
 # the building should not have every node pulling weights from the internet on
 # first use: models belong in the control plane's catalogue, distributed
 # deliberately and verified by hash. This is the interim form of that.
+# Note the layout: swift-transformers stores models as <base>/<org>/<repo>,
+# not the models--org--repo form the Python hub client uses. Copying the Python
+# cache here produces a directory that looks right and is never found.
 if [[ -n "$GPU_MODEL_CACHE" && -d "$GPU_MODEL_CACHE" ]]; then
   echo "==> staging GPU model cache from $GPU_MODEL_CACHE"
-  install -d -m 755 "$MODEL_DIR/hub"
-  cp -R "$GPU_MODEL_CACHE"/. "$MODEL_DIR/hub/"
+  cp -R "$GPU_MODEL_CACHE"/. "$MODEL_DIR/"
 fi
 
 if [[ "$ANE" != "-" && -e "$ANE" ]]; then

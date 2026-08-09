@@ -71,12 +71,43 @@ swift run dai-agent      # prints what this machine currently looks like
 swift test
 ```
 
+## Control plane
+
+```
+$ dai-agent enroll https://control:8443 <join-token> server-ca.pem 300
+nodeId e85f508d-...
+state   pending
+Approved. Identity written to ~/.dai/identity
+
+$ dai-agent status https://control:8443
+authenticated by client certificate
+served policy states: ABSENT, ACTIVE, IDLE, LOCKED, PASSIVE
+  ACTIVE   gpu=false ane=true  qos=background duty=0.00 mem=0.00
+  LOCKED   gpu=true  ane=true  qos=standard   duty=1.00 mem=0.70
+heartbeat sent: ACTIVE
+```
+
+The key is generated here and never sent. Policy is merged rather than adopted,
+taking the stricter of the served and local tables per field: the server knows
+fleet-wide intent and may be newer, the agent knows the machine and is what will
+actually disturb its owner.
+
+The bootstrap bundle is three things, not two: URL, join token, and the **server**
+CA. A node must verify the control plane before it has an identity of its own.
+The server CA is distinct from the node CA that signs agent identities, and
+pinning the wrong one fails every connection with an error that reads like a
+network problem.
+
 ## Not yet ported
 
 - MLX runtime for `generate` work (mlx-swift is a dependency already)
-- Core ML runtime and `MLComputePlan` placement verification for `embed`
-- Control plane client: enrollment, mTLS, heartbeat, work leasing, reverse channel
-- QoS switching via `setpriority(PRIO_DARWIN_PROCESS)`
+- The worker loop: leasing, per-item yield, partial results
+- Reverse channel for interactive requests
 - launchd daemon packaging and notarisation
+- **Secure Enclave key generation.** Today the key is a 0600 PEM converted to
+  PKCS#12 via `openssl`, which is weaker in two ways: a readable key file can be
+  taken, and macOS ships LibreSSL whose `pkcs12` differs from OpenSSL's, which
+  already cost one debugging cycle. Generating in the Enclave removes both by
+  never producing a PEM.
 
 Until those land, `../spike/harvest/harvest_worker.py` is the agent that works.

@@ -51,6 +51,51 @@ case "verify-ane":
         exit(1)
     }
 
+case "enroll":
+    // usage: dai-agent enroll <control-plane-url> <join-token> [server-ca.pem] [waitSeconds]
+    guard args.count > 3 else {
+        print("usage: dai-agent enroll <url> <join-token> [server-ca.pem] [wait-seconds]")
+        exit(2)
+    }
+    let url = URL(string: args[2])!
+    let ca = args.count > 4 && !args[4].isEmpty ? args[4] : nil
+    let wait = args.count > 5 ? Double(args[5]) ?? 0 : 0
+    do { try await Enroll.run(controlPlane: url, joinToken: args[3], caPath: ca, waitSeconds: wait) }
+    catch { print("enrollment failed: \(error)"); exit(1) }
+
+case "status":
+    // Proves the identity works: fetches policy over mTLS and merges it with the
+    // local table, taking the stricter of the two.
+    guard args.count > 2 else { print("usage: dai-agent status <url>"); exit(2) }
+    let dir = Enroll.identityDir()
+    do {
+        let identity = try ClientIdentity.load(
+            certPEM: dir.appendingPathComponent("node.crt"),
+            keyPEM: dir.appendingPathComponent("node.key"))
+        let ca = try ClientIdentity.loadCA(pem: dir.appendingPathComponent("ca.crt"))
+        let cp = ControlPlane(base: URL(string: args[2])!, identity: identity, serverCA: ca)
+
+        let served = try await cp.fetchPolicy()
+        let merged = mergePolicy(local: defaultPolicy, served: served)
+        print("authenticated by client certificate")
+        print("served policy states: \(served.keys.map(\.rawValue).sorted().joined(separator: ", "))")
+        for state in PresenceState.allCases {
+            let p = merged[state]!
+            print(String(format: "  %-8s gpu=%-5s ane=%-5s qos=%-10s duty=%.2f mem=%.2f",
+                         (state.rawValue as NSString).utf8String!,
+                         (String(p.gpu) as NSString).utf8String!,
+                         (String(p.ane) as NSString).utf8String!,
+                         (p.qos.rawValue as NSString).utf8String!, p.dutyMax, p.memFrac))
+        }
+
+        let signals = MacSignalSource().read()
+        let monitor = PresenceMonitor()
+        let reading = monitor.update(signals, now: Date().timeIntervalSince1970)
+        try await cp.heartbeat(state: reading.state, onACPower: signals.onACPower,
+                               thermalOK: signals.thermalOK)
+        print("heartbeat sent: \(reading.state.rawValue)")
+    } catch { print("status failed: \(error)"); exit(1) }
+
 case "qos":
     // Demonstrates the control that E1 measured at 2.4x on sustained work and
     // the worker at ~26x on bursty work.
@@ -58,6 +103,6 @@ case "qos":
     print("leave background: \(ProcessQoS.setBackground(false))")
 
 default:
-    print("usage: dai-agent [presence|verify-ane <model>|qos]")
+    print("usage: dai-agent [presence|verify-ane <model>|enroll|status|qos]")
     exit(2)
 }

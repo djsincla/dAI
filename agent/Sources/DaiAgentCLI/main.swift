@@ -65,38 +65,51 @@ case "enroll":
     catch { print("enrollment failed: \(error)"); exit(1) }
 
 case "timing":
-    // Which phase is actually slow. The symptom was "request timed out", which
-    // points at the network; that is worth checking rather than assuming.
+    // Written to find where a 61s stall was going, which turned out to be a
+    // keychain prompt nobody could answer. Kept because "the request timed out"
+    // points at the network, and the phase breakdown is what showed it was not.
+    guard args.count > 2 else { print("usage: dai-agent timing <url>"); exit(2) }
     let dir0 = Enroll.identityDir()
     var t = Date()
-    let id0 = try? ClientIdentity.load(certPEM: dir0.appendingPathComponent("node.crt"),
-                                       keyPEM: dir0.appendingPathComponent("node.key"))
+    let id0 = try? NodeIdentity.load(certificate: dir0.appendingPathComponent("node.crt"),
+                                     enclaveKey: Enroll.keyPath(dir0))
     print(String(format: "identity load: %.2fs (ok=%@)", Date().timeIntervalSince(t),
                  id0 != nil ? "yes" : "no"))
     t = Date()
-    let ca0 = try? ClientIdentity.loadCA(pem: dir0.appendingPathComponent("ca.crt"))
+    let ca0 = try? String(contentsOf: dir0.appendingPathComponent("ca.crt"), encoding: .utf8)
     print(String(format: "ca load:       %.2fs (ok=%@)", Date().timeIntervalSince(t),
                  ca0 != nil ? "yes" : "no"))
     t = Date()
-    let cp0 = ControlPlane(base: URL(string: args[2])!, identity: id0, serverCA: ca0)
-    print(String(format: "session init:  %.2fs", Date().timeIntervalSince(t)))
-    // Unauthenticated endpoint first: separates "TLS and HTTP work" from
-    // "the agent auth path works".
+    guard let cp0 = try? ControlPlane(base: URL(string: args[2])!,
+                                      identity: id0, serverCAPEM: ca0) else {
+        print("client init failed"); exit(1)
+    }
+    print(String(format: "client init:   %.2fs", Date().timeIntervalSince(t)))
+
+    // Server trust only, no client certificate: separates "TLS and HTTP work"
+    // from "the mutual-auth path works".
     t = Date()
-    var probe = URLRequest(url: URL(string: args[2])!.appendingPathComponent("healthz"))
-    probe.timeoutInterval = 15
-    let probeSession = URLSession(configuration: .ephemeral,
-                                  delegate: TLSProbeDelegate(ca: ca0), delegateQueue: nil)
-    do {
-        let (d, r) = try await probeSession.data(for: probe)
-        print(String(format: "healthz:       %.2fs %d %@", Date().timeIntervalSince(t),
-                     (r as? HTTPURLResponse)?.statusCode ?? 0,
-                     String(data: d, encoding: .utf8) ?? ""))
-    } catch { print(String(format: "healthz:       %.2fs FAILED %@", Date().timeIntervalSince(t), String(describing: error))) }
+    if let anon = try? ControlPlane(base: URL(string: args[2])!,
+                                    identity: nil, serverCAPEM: ca0) {
+        do {
+            let ok = try await anon.healthz()
+            print(String(format: "healthz:       %.2fs %@", Date().timeIntervalSince(t), ok))
+        } catch {
+            print(String(format: "healthz:       %.2fs FAILED %@",
+                         Date().timeIntervalSince(t), String(describing: error)))
+        }
+        await anon.shutdown()
+    }
 
     t = Date()
-    do { _ = try await cp0.fetchPolicy(); print(String(format: "fetchPolicy:   %.2fs OK", Date().timeIntervalSince(t))) }
-    catch { print(String(format: "fetchPolicy:   %.2fs FAILED %@", Date().timeIntervalSince(t), String(describing: error))) }
+    do {
+        _ = try await cp0.fetchPolicy()
+        print(String(format: "fetchPolicy:   %.2fs OK", Date().timeIntervalSince(t)))
+    } catch {
+        print(String(format: "fetchPolicy:   %.2fs FAILED %@",
+                     Date().timeIntervalSince(t), String(describing: error)))
+    }
+    await cp0.shutdown()
 
 case "status":
     // Proves the identity works: fetches policy over mTLS and merges it with the
@@ -104,11 +117,11 @@ case "status":
     guard args.count > 2 else { print("usage: dai-agent status <url>"); exit(2) }
     let dir = Enroll.identityDir()
     do {
-        let identity = try ClientIdentity.load(
-            certPEM: dir.appendingPathComponent("node.crt"),
-            keyPEM: dir.appendingPathComponent("node.key"))
-        let ca = try ClientIdentity.loadCA(pem: dir.appendingPathComponent("ca.crt"))
-        let cp = ControlPlane(base: URL(string: args[2])!, identity: identity, serverCA: ca)
+        let identity = try NodeIdentity.load(
+            certificate: dir.appendingPathComponent("node.crt"),
+            enclaveKey: Enroll.keyPath(dir))
+        let ca = try String(contentsOf: dir.appendingPathComponent("ca.crt"), encoding: .utf8)
+        let cp = try ControlPlane(base: URL(string: args[2])!, identity: identity, serverCAPEM: ca)
 
         let served = try await cp.fetchPolicy()
         let merged = mergePolicy(local: defaultPolicy, served: served)
@@ -129,6 +142,7 @@ case "status":
         try await cp.heartbeat(state: reading.state, onACPower: signals.onACPower,
                                thermalOK: signals.thermalOK)
         print("heartbeat sent: \(reading.state.rawValue)")
+        await cp.shutdown()
     } catch { print("status failed: \(error)"); exit(1) }
 
 case "work":
@@ -138,11 +152,11 @@ case "work":
     }
     let dir = Enroll.identityDir()
     do {
-        let identity = try ClientIdentity.load(
-            certPEM: dir.appendingPathComponent("node.crt"),
-            keyPEM: dir.appendingPathComponent("node.key"))
-        let ca = try ClientIdentity.loadCA(pem: dir.appendingPathComponent("ca.crt"))
-        let cp = ControlPlane(base: URL(string: args[2])!, identity: identity, serverCA: ca)
+        let identity = try NodeIdentity.load(
+            certificate: dir.appendingPathComponent("node.crt"),
+            enclaveKey: Enroll.keyPath(dir))
+        let ca = try String(contentsOf: dir.appendingPathComponent("ca.crt"), encoding: .utf8)
+        let cp = try ControlPlane(base: URL(string: args[2])!, identity: identity, serverCAPEM: ca)
 
         var ane: ANERuntime?
         if args.count > 4, !args[4].isEmpty, args[4] != "-" {
@@ -163,6 +177,7 @@ case "work":
         let worker = Worker(controlPlane: cp, gpu: MLXRuntime(modelId: args[3]),
                             ane: ane, promoteAfter: 15)
         await worker.run(maxSeconds: seconds)
+        await cp.shutdown()
     } catch { print("worker failed: \(error)"); exit(1) }
 
 case "qos":

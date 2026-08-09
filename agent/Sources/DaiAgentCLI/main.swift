@@ -11,6 +11,11 @@ let command = args.count > 1 ? args[1] : "presence"
 func fmt(_ v: TimeInterval?) -> String { v.map { String(format: "%.1f", $0) } ?? "unreadable" }
 
 switch command {
+case "verify-mlx-child":
+    // Runs in a child process so that an MLX abort cannot take the agent with
+    // it. Not meant to be called directly.
+    exit(MLXProbe.runChild())
+
 case "preflight":
     // Whether this machine can run the agent at all. Worth running as root too:
     // the daemon runs in session 0, which is a different enough context that
@@ -56,6 +61,17 @@ case "verify-ane":
     } catch {
         print("REFUSED: \(error)")
         exit(1)
+    }
+
+    // Where the time goes, since "slow" and "slow at inference" are different
+    // problems with different fixes.
+    if let b = try? await runtime.benchmark() {
+        print(String(format: "  input shape     %@ (%d floats)",
+                     b.shape.map(String.init).joined(separator: "x"),
+                     b.shape.reduce(1, *)))
+        print(String(format: "  prepare input   %.1f ms", b.fill * 1000))
+        print(String(format: "  predict         %.1f ms", b.predict * 1000))
+        print(String(format: "  ceiling         %.1f items/s", 1 / (b.fill + b.predict)))
     }
 
 case "enroll":
@@ -179,9 +195,19 @@ case "work":
                 print("ANE model REJECTED: \(error)")
             }
         }
+        // Checked out of process, because a missing Metal shader library is a
+        // C++ abort rather than an error: probing it in-process would take the
+        // agent down and stop the ANE work that does not need MLX at all.
+        var gpu: MLXRuntime?
+        if MLXProbe.isAvailable() {
+            gpu = MLXRuntime(modelId: args[3])
+        } else {
+            print("no GPU runtime on this machine; running ANE work only "
+                + "(xcodebuild -downloadComponent MetalToolchain enables GPU work)")
+        }
+
         let seconds = args.count > 5 ? Double(args[5]) ?? .infinity : .infinity
-        let worker = Worker(controlPlane: cp, gpu: MLXRuntime(modelId: args[3]),
-                            ane: ane, promoteAfter: 15)
+        let worker = Worker(controlPlane: cp, gpu: gpu, ane: ane, promoteAfter: 15)
         await worker.run(maxSeconds: seconds)
         await cp.shutdown()
     } catch { print("worker failed: \(error)"); exit(1) }

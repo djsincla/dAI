@@ -90,9 +90,21 @@ public actor ControlPlane {
     // MARK: - Transport
 
     private func request(_ method: String, _ path: String, body: JSONValue? = nil,
+                         query: [String: String] = [:],
                          headers: [String: String] = [:],
                          timeout: TimeInterval? = nil) async throws -> (Int, Data) {
-        var req = HTTPClientRequest(url: base.appendingPathComponent(path).absoluteString)
+        // Query parameters go through URLComponents rather than into the path.
+        // appendingPathComponent percent-encodes "?" into %3F, so a path with a
+        // query string in it becomes a single nonsense path segment. The server
+        // answers 404, the caller's `try?` swallows it, and the agent polls
+        // forever finding no work while the queue is full. That is exactly what
+        // it did.
+        var components = URLComponents(url: base.appendingPathComponent(path),
+                                       resolvingAgainstBaseURL: false)!
+        if !query.isEmpty {
+            components.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
+        }
+        var req = HTTPClientRequest(url: components.url!.absoluteString)
         req.method = .init(rawValue: method)
         req.headers.add(name: "content-type", value: "application/json")
         for (k, v) in headers { req.headers.add(name: k, value: v) }
@@ -240,8 +252,9 @@ public actor ControlPlane {
     /// work it must immediately hand back.
     public func leaseWork(kinds: [WorkKind]) async throws -> Lease? {
         guard !kinds.isEmpty else { return nil }
-        let q = kinds.map(\.rawValue).joined(separator: ",")
-        let (_, data) = try await request("GET", "agent/v1/work?kinds=\(q)")
+        let (_, data) = try await request(
+            "GET", "agent/v1/work",
+            query: ["kinds": kinds.map(\.rawValue).joined(separator: ",")])
         let d = json(data)
         if d["reason"] != nil { return nil }   // empty | none-of-these-kinds | node-paused
         guard let id = d["unitId"]?.stringValue,

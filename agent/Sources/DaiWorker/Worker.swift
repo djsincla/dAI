@@ -19,10 +19,23 @@ import Foundation
 /// nothing in responsiveness because that interval already *is* the designed
 /// yield latency.
 public actor Worker {
+    enum Failure: Error, CustomStringConvertible {
+        case noGPURuntime
+        public var description: String {
+            "this node has no GPU runtime; generate work should not have been leased to it"
+        }
+    }
+
     private let controlPlane: ControlPlane
     private let source: SignalSource
     private let monitor: PresenceMonitor
-    private let gpu: MLXRuntime
+    /// Optional because a machine can be a useful fleet member without a
+    /// working GPU runtime. MLX needs a Metal shader library built by a
+    /// toolchain that is a separate Xcode download, and a machine missing it
+    /// should still harvest ANE work rather than refuse to start: three of the
+    /// five presence states permit nothing but ANE work anyway, so the GPU
+    /// runtime is not what most of the fleet's hours are made of.
+    private let gpu: MLXRuntime?
     private let ane: ANERuntime?
 
     private var policy: [PresenceState: StatePolicy] = defaultPolicy
@@ -41,7 +54,7 @@ public actor Worker {
     public private(set) var stats = Stats()
 
     public init(controlPlane: ControlPlane, source: SignalSource = MacSignalSource(),
-                gpu: MLXRuntime, ane: ANERuntime? = nil,
+                gpu: MLXRuntime? = nil, ane: ANERuntime? = nil,
                 promoteAfter: TimeInterval = idlePromoteSeconds) {
         self.controlPlane = controlPlane
         self.source = source
@@ -68,7 +81,9 @@ public actor Worker {
     private func availableKinds(_ p: StatePolicy) -> [WorkKind] {
         var kinds: [WorkKind] = []
         if p.ane, ane != nil { kinds.append(.embed) }
-        if p.gpu, p.dutyMax > 0 { kinds.append(.generate) }
+        // Advertising generate without a runtime to serve it would have the
+        // control plane hand out work this node must immediately give back.
+        if p.gpu, p.dutyMax > 0, gpu != nil { kinds.append(.generate) }
         return kinds
     }
 
@@ -87,7 +102,7 @@ public actor Worker {
 
     private func residentModels() async -> [String: Double] {
         var out: [String: Double] = [:]
-        if await gpu.isLoaded { out[await gpu.name] = await gpu.residentGb }
+        if let gpu, await gpu.isLoaded { out[await gpu.name] = await gpu.residentGb }
         if let ane, await ane.isLoaded { out["ane:embed"] = 0.3 }
         return out
     }
@@ -137,7 +152,7 @@ public actor Worker {
 
             let kinds = availableKinds(statePolicy)
             if kinds.isEmpty {
-                if await gpu.isLoaded {
+                if let gpu, await gpu.isLoaded {
                     let freed = await gpu.unload()
                     log("standing down in \(reading.state.rawValue); released in "
                         + String(format: "%.0fms", freed * 1000))
@@ -149,7 +164,7 @@ public actor Worker {
             // Release the GPU model as soon as GPU work stops being permitted,
             // even though ANE work continues. E4 puts reload at 1-3s, so holding
             // it against a possible return is not worth the resident memory.
-            if !kinds.contains(.generate), await gpu.isLoaded {
+            if !kinds.contains(.generate), let gpu, await gpu.isLoaded {
                 let freed = await gpu.unload()
                 log("GPU work not permitted in \(reading.state.rawValue); released in "
                     + String(format: "%.0fms", freed * 1000))
@@ -163,13 +178,13 @@ public actor Worker {
             await process(lease, statePolicy: statePolicy, state: reading.state)
         }
 
-        _ = await gpu.unload()
+        if let gpu { _ = await gpu.unload() }
         log("done: \(stats.units) units, \(stats.items) items, \(stats.yields) yields")
     }
 
     private func process(_ lease: ControlPlane.Lease,
                          statePolicy: StatePolicy, state: PresenceState) async {
-        if lease.kind == .generate, await !gpu.isLoaded {
+        if lease.kind == .generate, let gpu, await !gpu.isLoaded {
             do {
                 let seconds = try await gpu.load()
                 stats.loads += 1
@@ -209,6 +224,7 @@ public actor Worker {
                 case .embed:
                     if let ane { _ = try await ane.run(item: item) }
                 case .generate:
+                    guard let gpu else { throw Failure.noGPURuntime }
                     let prompt = item["prompt"]?.stringValue ?? ""
                     _ = try await gpu.generate(prompt: prompt,
                                                maxTokens: statePolicy.maxCompletionTokens)
@@ -236,7 +252,7 @@ public actor Worker {
         if seconds > 0, !completed.isEmpty {
             // Workload class rather than kind: throughput differs by model,
             // which is why the scheduler stores a profile rather than a scalar.
-            let key = lease.kind == .generate ? await gpu.name : "ane:embed"
+            let key = lease.kind == .generate ? (await gpu?.name ?? "generate") : "ane:embed"
             capability[key] = Double(completed.count) / seconds
         }
         try? await controlPlane.report(unitId: lease.unitId, completed: completed,

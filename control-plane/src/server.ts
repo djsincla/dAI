@@ -75,18 +75,52 @@ export function createApp(db: Db, surface: Surface = 'both'): Express {
     app.use('/ui', express.static(join(here, '..', 'ui')))
   }
 
-  app.use(
-    OpenApiValidator.middleware({
-      apiSpec: OPENAPI_PATH,
-      validateRequests: true,
-      // Responses are validated in test and dev only: a schema drift should
-      // fail a build, not a production request that is otherwise fine.
-      validateResponses: process.env.NODE_ENV !== 'production',
-      validateSecurity: false, // handled per-surface; the two differ
-      ignorePaths: (p: string) => p === '/healthz' || p === '/openapi.yaml' || p === '/docs'
-        || p.startsWith('/ui'),
-    }),
-  )
+  // Two validators, because the surfaces have opposite requirements.
+  //
+  // The agent and admin APIs are ours: we define both ends, and strictness
+  // there has already caught a real bug that would otherwise have been silent.
+  //
+  // The serving surface exists to be compatible with clients nobody here
+  // controls, and those clients append query parameters as they please. Claude
+  // Code sends ?beta=true, which the strict validator rejected with a 400, so
+  // every real request failed while curl worked. The API this imitates
+  // tolerates unknown parameters, so imitating it means tolerating them too.
+  const isServing = (p: string) => p.startsWith('/v1/') || p.startsWith('/api/')
+  const alwaysSkip = (p: string) => p === '/healthz' || p === '/openapi.yaml'
+    || p === '/docs' || p.startsWith('/ui')
+
+  // Drop query parameters on the serving surface, and say what was dropped.
+  //
+  // None of these endpoints take any, and clients we do not control append
+  // their own: Claude Code sends ?beta=true, which the validator rejected with
+  // a 400, so every real request failed while curl worked. Silently ignoring
+  // them is what the API this imitates does. Logging them means a parameter
+  // that turns out to matter shows up in the log rather than being discovered
+  // by its absence.
+  app.use((req: Request, _res: Response, next: NextFunction) => {
+    if (!isServing(req.path)) return next()
+    const keys = Object.keys(req.query ?? {})
+    if (keys.length > 0) {
+      console.log(`[serving] ignoring query parameter${keys.length > 1 ? 's' : ''} `
+        + `on ${req.path}: ${keys.join(', ')}`)
+      // Redefined rather than assigned: req.query is a getter in Express 5.
+      Object.defineProperty(req, 'query', { value: {}, writable: true, configurable: true })
+    }
+    next()
+  })
+
+  const validator = (opts: { serving: boolean }) => OpenApiValidator.middleware({
+    apiSpec: OPENAPI_PATH,
+    validateRequests: true,
+    // Responses are validated in test and dev only: a schema drift should
+    // fail a build, not a production request that is otherwise fine.
+    validateResponses: process.env.NODE_ENV !== 'production',
+    validateSecurity: false, // handled per-surface; the two differ
+    ignorePaths: (p: string) => alwaysSkip(p) || (opts.serving ? !isServing(p) : isServing(p)),
+  })
+
+  app.use(validator({ serving: true }))
+  app.use(validator({ serving: false }))
 
   // Network ACLs run before auth: a request from a disallowed range is
   // rejected without touching the database. Defence in depth, never a

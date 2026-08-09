@@ -27,6 +27,26 @@ const asNode = (fp: string) => ({ 'x-node-fingerprint': fp, 'content-type': 'app
 const asUser = (id: string) => ({ authorization: `Bearer ${id}`, 'content-type': 'application/json' })
 
 describe('agent surface', () => {
+  it('answers 401 for a malformed token, not 500', async () => {
+    // Session tokens are uuids and the column is one, so anything else made
+    // Postgres raise and surfaced as a 500. A 500 tells a client the server is
+    // broken and to retry: an invalid credential sent one interactive client
+    // into its retry loop instead of failing fast, which is the opposite of
+    // what a wrong credential should do.
+    for (const token of ['lm-studio', 'not-a-uuid', '../../etc/passwd', '']) {
+      const r = await fetch(`${base}/v1/models`, {
+        headers: { authorization: `Bearer ${token}` },
+      })
+      expect(r.status, `token: ${JSON.stringify(token)}`).toBe(401)
+    }
+
+    // A well-formed but unknown one is also 401, and always was.
+    const unknown = await fetch(`${base}/v1/models`, {
+      headers: { authorization: 'Bearer 00000000-0000-0000-0000-000000000000' },
+    })
+    expect(unknown.status).toBe(401)
+  })
+
   it('rejects a request with no client certificate', async () => {
     const r = await fetch(`${base}/agent/v1/policy`)
     expect(r.status).toBe(401)

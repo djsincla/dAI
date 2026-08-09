@@ -21,7 +21,26 @@ which is what a Python environment on every Mac was always going to cost.
 |---|---|
 | `Presence.swift` | Signals, classification, policy table, hysteresis. Pure. |
 | `SignalSource.swift` | The real machine, via IOKit and power management. |
+| `ANERuntime.swift` | Core ML pinned to the ANE, with `MLComputePlan` verification. |
+| `QoS.swift` | Runtime QoS via `setpriority(PRIO_DARWIN_PROCESS)`. |
 | `PresenceTests.swift` | 20 cases, ported from the Python suite. |
+
+```
+$ dai-agent verify-ane ane_embed.mlpackage
+loaded in 1.82s
+  NeuralEngine    34 ops  (100%)
+ANE share: 100% of 34 compute ops
+VERDICT: ANE-resident. Safe to run while someone is using the machine.
+```
+
+Placement verification is the safety property and the reason this is Swift.
+Core ML treats `.cpuAndNeuralEngine` as a preference and falls back to CPU
+silently, so a worker that believed it was on the ANE while running on the CPU
+would disturb the very user it exists to avoid, with every log looking fine.
+
+`MLComputePlan` requires macOS 14.4, which sets this package's floor. Making the
+check conditional on availability was the alternative and is worse: an agent
+that silently skips verification is the failure mode verification exists for.
 
 The policy core is deliberately free of MLX and Core ML. Every policy bug found
 in the Python agent reproduced from a recorded signal struct with no hardware

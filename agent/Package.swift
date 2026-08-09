@@ -7,7 +7,7 @@ import PackageDescription
 // the hardware.
 let package = Package(
     name: "DaiAgent",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v15)],
     products: [
         .executable(name: "dai-agent", targets: ["DaiAgentCLI"]),
         .library(name: "DaiAgent", targets: ["DaiAgent"]),

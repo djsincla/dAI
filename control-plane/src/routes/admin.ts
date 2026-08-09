@@ -133,6 +133,39 @@ export function adminRoutes(db: Db, ca: Ca): Router {
   })
 
   /**
+   * Lift an administrative pause.
+   *
+   * Its absence was a plain bug: pause could be applied and never removed, so
+   * the button was a one-way door and the node stayed out of the fleet until
+   * someone edited the database. Same authorisation as pause, since being able
+   * to stop a machine and not start it again is not a meaningful safety
+   * property.
+   *
+   * It does not touch user_paused. The machine owner's pause is theirs, and an
+   * operator resuming a node they paused must not quietly also override the
+   * person sitting at it.
+   */
+  r.post('/nodes/:nodeId/resume', async (req, res) => {
+    if (!(await mayPauseNode(db, req.user!.id, req.params.nodeId!))) {
+      res.status(403).json({ error: 'forbidden', detail: 'not the owner and not an operator' })
+      return
+    }
+    const { rows } = await db.query(
+      `UPDATE nodes SET state='active', paused_until=NULL
+        WHERE id=$1 AND state='paused'
+       RETURNING id, hostname, tier, state, user_paused`,
+      [req.params.nodeId],
+    )
+    if (rows.length === 0) {
+      res.status(404).json({ error: 'not_found', detail: 'no paused node with that id' })
+      return
+    }
+    await db.query(`INSERT INTO activity_log (node_id, event, detail) VALUES ($1,'node.resumed',$2)`,
+      [req.params.nodeId, JSON.stringify({ by: req.user!.id })])
+    res.json(rows[0])
+  })
+
+  /**
    * Fleet capacity, now and over the last 24 hours.
    *
    * Split by GPU and ANE because they are not interchangeable: GPU work is

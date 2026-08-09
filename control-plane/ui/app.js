@@ -116,6 +116,8 @@ function renderNodes(nodes, details) {
   // poll destroys hover state and swallows clicks that land mid-refresh, which
   // is exactly what happened the first time this was driven by hand.
   const signature = JSON.stringify(nodes.map((n) => [
+    // n.state included so the row redraws when it changes: without it the
+    // button kept its old label after a successful pause.
     n.id, n.hostname, n.presenceState, n.state, n.userPaused,
     details.get(n.id)?.headroomGb, details.get(n.id)?.yields7d,
   ]))
@@ -151,7 +153,11 @@ function renderNodes(nodes, details) {
         // have to either lie or fail, and a disabled control at least says the
         // truth: this is not yours to lift.
         ? '<td><span class="muted" title="Only the person at that machine can resume it">owner paused</span></td>'
-        : `<td><button data-pause="${n.id}">Pause</button></td>`}`
+        // Reflects the state rather than assuming one. It always said "Pause",
+        // so pausing a node left a button that appeared to do nothing and there
+        // was no way back: a one-way door dressed as a toggle.
+        : `<td><button data-action="${n.state === 'paused' ? 'resume' : 'pause'}"
+                      data-node="${n.id}">${n.state === 'paused' ? 'Resume' : 'Pause'}</button></td>`}`
     tr.addEventListener('click', (ev) => {
       if (ev.target.closest('button')) return
       openNode(n.id)
@@ -159,12 +165,15 @@ function renderNodes(nodes, details) {
     body.append(tr)
   }
 
-  body.querySelectorAll('[data-pause]').forEach((btn) =>
+  body.querySelectorAll('[data-action]').forEach((btn) =>
     btn.addEventListener('click', async () => {
+      const { action, node } = btn.dataset
       try {
-        await api(`/nodes/${btn.dataset.pause}/pause`, { method: 'POST', body: '{}' })
+        await api(`/nodes/${node}/${action}`, { method: 'POST', body: '{}' })
         // The owner of a machine can always pause it, whatever roles say.
-        toast('Paused. The node stops receiving work immediately.')
+        toast(action === 'pause'
+          ? 'Paused. The node stops receiving work immediately.'
+          : 'Resumed. The node will take work again when its presence allows.')
         refresh()
       } catch (err) { toast(err.message, true) }
     }))

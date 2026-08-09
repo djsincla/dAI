@@ -444,6 +444,24 @@ paths:
               schema: { $ref: '#/components/schemas/Node' }
         '403': { $ref: '#/components/responses/Forbidden' }
 
+  /admin/v1/nodes/{nodeId}/resume:
+    post:
+      tags: [admin]
+      summary: Lift an administrative pause
+      description: |
+        Does not affect a pause set by the machine's owner. That one is theirs
+        and no role can lift it.
+      parameters:
+        - { name: nodeId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Node resumed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Node' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /admin/v1/fleet/summary:
     get:
       tags: [admin]

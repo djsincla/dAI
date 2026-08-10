@@ -206,21 +206,40 @@ describe('serving over HTTP', () => {
     expect((await r.json()).accepted).toBe(false)
   })
 
-  it('does not list a model whose node cannot answer', async () => {
+  it('does not list a model whose node has stopped reporting', async () => {
     // Previously this listed anything any node had ever mentioned, so a model
-    // showed as available with nothing connected. A capability check is exactly
-    // where that misleads: a client asks what it can use, is told, and every
-    // request then fails. Stale is worse than empty, because empty is
-    // actionable.
+    // showed as available long after its node was gone. A capability check is
+    // exactly where that misleads: a client asks what it can use, is told, and
+    // every request then fails.
+    //
+    // Keyed on the heartbeat rather than on whether the node is parked on the
+    // channel, because those are different facts: a node reading a large prompt
+    // is unavailable for minutes while being entirely healthy, and dropping its
+    // model from the catalogue makes an active request look impossible.
+    await fetch(`${base}/agent/v1/heartbeat`, {
+      method: 'POST', headers: asNode(fx.fingerprint),
+      body: JSON.stringify({ presenceState: 'LOCKED', residentModels: { 'qwen-7b': 4 } }),
+    })
+    await db.query(
+      `UPDATE nodes SET last_heartbeat = now() - interval '10 minutes' WHERE id = $1`,
+      [fx.nodeId])
+
+    const r = await fetch(`${base}/v1/models`, { headers: asUser(fx.operatorId) })
+    expect((await r.json()).data.map((m: any) => m.id)).not.toContain('qwen-7b')
+  })
+
+  it('keeps listing a model while its node is mid-request', async () => {
+    // The node is not parked on the channel while it answers, and a long prompt
+    // occupies it for minutes. The model is still there.
     await fetch(`${base}/agent/v1/heartbeat`, {
       method: 'POST', headers: asNode(fx.fingerprint),
       body: JSON.stringify({ presenceState: 'LOCKED', residentModels: { 'qwen-7b': 4 } }),
     })
     const r = await fetch(`${base}/v1/models`, { headers: asUser(fx.operatorId) })
-    expect((await r.json()).data.map((m: any) => m.id)).not.toContain('qwen-7b')
+    expect((await r.json()).data.map((m: any) => m.id)).toContain('qwen-7b')
   })
 
-  it('lists a model once its node is holding the channel open', async () => {
+  it('lists a model with its measured window once the node reports one', async () => {
     await fetch(`${base}/agent/v1/heartbeat`, {
       method: 'POST', headers: asNode(fx.fingerprint),
       body: JSON.stringify({

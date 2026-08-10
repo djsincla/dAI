@@ -29,7 +29,6 @@ public actor ReverseChannel {
     private var policy: [PresenceState: StatePolicy] = defaultPolicy
     /// Set from the control plane's view of this node, not assumed.
     private var isCluster = false
-    private var lastHeartbeat: TimeInterval = 0
 
     public init(controlPlane: ControlPlane, gpu: MLXRuntime?,
                 source: SignalSource = MacSignalSource(),
@@ -81,13 +80,25 @@ public actor ReverseChannel {
         let deadline = Date().addingTimeInterval(maxSeconds)
         log("holding the reverse channel open")
 
+        // Heartbeats run on their own task, not in the request loop.
+        //
+        // A large prompt takes minutes to read - 19,243 tokens measured at 377
+        // seconds - and for all of that the loop is inside a single call. With
+        // the heartbeat inline the node went silent while it worked, the
+        // scheduler dropped it for being stale, and it looked exactly like a
+        // crash: gone from the fleet, no error anywhere, back a few minutes
+        // later. It was answering the whole time.
+        let beating = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.heartbeatNow()
+                try? await Task.sleep(for: .seconds(20))
+            }
+        }
+        defer { beating.cancel() }
+
         while Date() < deadline {
             let gate = mayServe()
-            // A serving node has to heartbeat like any other. The scheduler
-            // only considers nodes it has heard from recently, so a node that
-            // holds the channel open and says nothing else is invisible to
-            // routing: connected, willing, and never chosen.
-            await heartbeatIfDue(gate.state)
+
             guard gate.ok else {
                 // Not connecting at all is the honest signal: the control plane
                 // only routes to nodes holding the channel open, so dropping it
@@ -111,11 +122,10 @@ public actor ReverseChannel {
         }
     }
 
-    private func heartbeatIfDue(_ state: PresenceState) async {
-        let now = Date().timeIntervalSince1970
-        guard now - lastHeartbeat >= 20 else { return }
-        lastHeartbeat = now
+    /// Report in, whatever the request loop is doing.
+    private func heartbeatNow() async {
         let signals = source.read()
+        let state = monitor.update(signals, now: Date().timeIntervalSince1970).state
         let resident: [String: Double] = await (gpu?.isLoaded ?? false)
             ? [await gpu!.name: await gpu!.residentGb] : [:]
         // Advertised whether or not the model is loaded right now: the window a

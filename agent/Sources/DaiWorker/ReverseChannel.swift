@@ -26,6 +26,17 @@ public actor ReverseChannel {
     private let monitor: PresenceMonitor
     private let pauseSwitch = PauseSwitch()
 
+    /// What the machine's owner is shown.
+    ///
+    /// Serving published nothing, so a machine answering requests all day told
+    /// its owner nothing was installed - the exact failure the panel exists to
+    /// prevent. Serving is also not the same activity as overnight batch work,
+    /// and saying which matters more to the person at the desk than to anyone
+    /// else: "answering requests for the studio" and "running batch work" are
+    /// different bargains.
+    private var status = AgentStatus()
+    private var served = 0
+
     private var policy: [PresenceState: StatePolicy] = defaultPolicy
     /// Set from the control plane's view of this node, not assumed.
     private var isCluster = false
@@ -101,6 +112,8 @@ public actor ReverseChannel {
         while Date() < deadline {
             let gate = mayServe()
 
+            await publish(gate.state, activity: gate.ok ? "ready to answer requests"
+                                                        : "standing by")
             guard gate.ok else {
                 // Not connecting at all is the honest signal: the control plane
                 // only routes to nodes holding the channel open, so dropping it
@@ -125,9 +138,23 @@ public actor ReverseChannel {
     }
 
     /// Report in, whatever the request loop is doing.
+    private func publish(_ state: PresenceState, activity: String) async {
+        let pause = pauseSwitch.read()
+        status.updated = Date()
+        status.presenceState = state.rawValue
+        status.paused = pause.paused
+        status.pauseReason = pause.reason
+        status.permitted = pause.paused ? [] : (gpu != nil ? ["serve"] : [])
+        status.activity = activity
+        status.unitsCompleted = served
+        status.residentGb = await (gpu?.isLoaded ?? false) ? (await gpu?.residentGb ?? 0) : 0
+        status.write()
+    }
+
     private func heartbeatNow() async {
         let signals = source.read()
         let state = monitor.update(signals, now: Date().timeIntervalSince1970).state
+        await publish(state, activity: status.activity)
         let resident: [String: Double] = await (gpu?.isLoaded ?? false)
             ? [await gpu!.name: await gpu!.residentGb] : [:]
         // Advertised whether or not the model is loaded right now: the window a
@@ -191,6 +218,7 @@ public actor ReverseChannel {
             return
         }
 
+        await publish(mayServe().state, activity: "answering a request")
         let started = Date()
         do {
             // Refuse early rather than time out. A prompt beyond what this node
@@ -239,6 +267,8 @@ public actor ReverseChannel {
                 return
             }
 
+            served += 1
+            status.itemsCompleted += out.completionTokens
             let elapsed = Date().timeIntervalSince(started)
             // The prompt rate is logged because it is what sizes the advertised
             // window, and a window nobody can explain is one nobody trusts.

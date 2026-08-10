@@ -136,6 +136,11 @@ final class StatusModel: ObservableObject {
         if status.permitted.isEmpty {
             return "You are using this machine, so nothing is running."
         }
+        if status.permitted == ["serve"] {
+            // A different bargain from overnight batch work, and the person at
+            // the desk is the one it differs for.
+            return "Answering requests for the studio from this machine."
+        }
         if status.permitted == ["embed"] {
             // Worth saying, because it is the answer to "why is my machine
             // doing anything while I am using it".
@@ -195,7 +200,9 @@ struct MenuContents: View {
                 Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 4) {
                     GridRow {
                         Text("Contributed").foregroundStyle(.secondary)
-                        Text("\(status.itemsCompleted) items, \(status.unitsCompleted) batches")
+                        Text(status.permitted == ["serve"]
+                             ? "\(status.unitsCompleted) requests answered"
+                             : "\(status.itemsCompleted) items, \(status.unitsCompleted) batches")
                     }
                     GridRow {
                         Text("Handed back").foregroundStyle(.secondary)

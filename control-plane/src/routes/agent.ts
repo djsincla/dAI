@@ -165,12 +165,18 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
           SET presence_state = $1, on_ac_power = $2, thermal_ok = $3,
               last_heartbeat = now(),
               user_paused = COALESCE($7, user_paused),
-              -- Replaced, not merged. Merging looked conservative and was
-              -- wrong: a node restarted onto a different model went on
-              -- advertising the previous one, so the fleet offered a model
-              -- nothing could serve. Each heartbeat carries the node's current
-              -- set, so it is the whole truth about that node.
-              model_context = $8::jsonb,
+              -- Replaced when the beat carries models, left alone when it does
+              -- not.
+              --
+              -- Replacing unconditionally was right when one loop spoke for a
+              -- node and wrong the moment two did: a node runs batch work and
+              -- serving side by side, each heartbeats, and the batch loop knows
+              -- nothing about the GPU model. Its silence was being read as
+              -- "this node serves nothing" and erased the catalogue entry a
+              -- second later.
+              --
+              -- Absent means unchanged; present means authoritative.
+              model_context = COALESCE($8::jsonb, model_context),
               -- Stamped on the transition only, so the UI can say how long a
               -- machine has been paused rather than just that it is.
               user_paused_at = CASE
@@ -186,8 +192,10 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
       [b.presenceState, b.onAcPower ?? null, b.thermalOk ?? null,
        JSON.stringify(profiles), JSON.stringify(b.residentModels ?? {}), node.id,
        b.userPaused ?? null,
-       JSON.stringify(Object.fromEntries(
-         (b.models ?? []).map((m) => [m.name, m.contextLength]))) ],
+       b.models === undefined
+         ? null
+         : JSON.stringify(Object.fromEntries(
+             b.models.map((m) => [m.name, m.contextLength]))) ],
     )
     // Presence history feeds the capacity graph, which cannot be drawn from
     // current state alone.

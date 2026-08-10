@@ -241,6 +241,22 @@ case "work":
         let promote = ProcessInfo.processInfo.environment["DAI_PROMOTE_SECONDS"]
             .flatMap(Double.init) ?? idlePromoteSeconds
         let worker = Worker(controlPlane: cp, gpu: gpu, ane: ane, promoteAfter: promote)
+
+        // Batch and serving run side by side in one process, because a node
+        // does both and they cannot share a loop: an interactive request must
+        // not wait for a batch unit to finish, and a batch unit must not be
+        // held behind a conversation. Keeping them in separate commands meant
+        // installing the daemon quietly turned serving off, which is how a
+        // machine ended up harvesting all day while reporting no chat model.
+        if gpu != nil {
+            let channel = ReverseChannel(controlPlane: cp, gpu: gpu, promoteAfter: promote)
+            if let servedPolicy = try? await cp.fetchPolicy() {
+                await channel.setPolicy(mergePolicy(local: defaultPolicy, served: servedPolicy))
+            }
+            if let me = try? await cp.whoami() { await channel.setCluster(me.isCluster) }
+            Task { await channel.run(maxSeconds: seconds) }
+        }
+
         await worker.run(maxSeconds: seconds)
         await cp.shutdown()
     } catch { print("worker failed: \(error)"); exit(1) }

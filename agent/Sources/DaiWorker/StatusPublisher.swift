@@ -11,7 +11,13 @@ import Foundation
 ///
 /// Each loop now updates only what it knows. The file is the union.
 public final class StatusPublisher: @unchecked Sendable {
-    public init() {}
+    /// The path is injectable so a test does not write to the file a running
+    /// daemon owns, and so two tests cannot see each other's state.
+    private let path: String
+
+    public init(path: String = AgentStatus.defaultPath) {
+        self.path = path
+    }
 
     private let lock = NSLock()
     private var status = AgentStatus()
@@ -28,7 +34,7 @@ public final class StatusPublisher: @unchecked Sendable {
         status.permitted = batchKinds + (servingReady ? ["serve"] : [])
         status.activity = servingActivity ?? batchActivity
         status.updated = Date()
-        status.write()
+        status.write(path: path)
     }
 
     public func updateBatch(presence: String, permitted: [String], activity: String,

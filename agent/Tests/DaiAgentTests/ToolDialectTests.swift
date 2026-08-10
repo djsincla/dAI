@@ -210,10 +210,10 @@ import Testing
         """#.write(toFile: path, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(atPath: path) }
 
-        setenv("DAI_TOOL_DIALECTS", path, 1)
-        defer { unsetenv("DAI_TOOL_DIALECTS") }
-
-        let loaded = ToolDialects.load()
+        // Loaded by path rather than through the environment: setting it here
+        // changed it for every other suite running at the same time, and they
+        // then found a dialect list containing only this test's invention.
+        let loaded = ToolDialects.load(path: path)
         #expect(loaded.count == 1)
         let picked = ToolDialects.select(template: "uses @@CALL@@ here", modelId: "x",
                                          from: loaded)

@@ -57,6 +57,6 @@ let package = Package(
             dependencies: ["DaiAgent", "DaiWorker"]
         ),
         .executableTarget(name: "DaiMenuBar", dependencies: ["DaiAgent"]),
-        .testTarget(name: "DaiAgentTests", dependencies: ["DaiAgent"]),
+        .testTarget(name: "DaiAgentTests", dependencies: ["DaiAgent", "DaiWorker"]),
     ]
 )

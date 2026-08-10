@@ -18,34 +18,7 @@ import { candidatesFor, isRefusal, selectNode } from '../lib/router.js'
  * served by hearing that immediately, with a reason, than by a request that
  * hangs until it times out.
  */
-export function servingRoutes(db: Db, broker: Broker): Router {
-  const r = Router()
-  r.use(userAuth(db))
-
-  /**
-   * Models this fleet can serve, and how much context each accepts.
-   *
-   * The window is advertised because a client that has to guess gets it wrong
-   * in one of two expensive ways: guess high and the conversation runs past
-   * what the model takes, guess low and most of the window goes unused. Taken
-   * from what nodes report rather than configured here, so it cannot drift
-   * from the weights actually on disk.
-   */
-  /**
-   * Models this fleet can serve, and how much context each accepts.
-   *
-   * Only from nodes that could answer right now. The listing reported a model
-   * as loaded with nothing connected, because it read the last heartbeat a node
-   * ever sent, and a capability check is exactly where that misleads: a client
-   * asks what is available, is told, and every request then fails. Stale is
-   * worse than empty here, because empty is actionable.
-   *
-   * The window is advertised so a client does not have to guess: guess high and
-   * the conversation runs past what the model takes, guess low and most of it
-   * goes unused. Taken from what nodes report rather than configured here, so it
-   * cannot drift from the weights on disk.
-   */
-  async function servableModels() {
+async function servableModels(db: Db, broker: Broker) {
     const { rows } = await db.query(
       `SELECT id AS node_id, name,
               COALESCE((model_context ->> name)::int, 0) AS context,
@@ -82,8 +55,35 @@ export function servingRoutes(db: Db, broker: Broker): Router {
     return models
   }
 
+export function servingRoutes(db: Db, broker: Broker): Router {
+  const r = Router()
+  r.use(userAuth(db))
+
+  /**
+   * Models this fleet can serve, and how much context each accepts.
+   *
+   * The window is advertised because a client that has to guess gets it wrong
+   * in one of two expensive ways: guess high and the conversation runs past
+   * what the model takes, guess low and most of the window goes unused. Taken
+   * from what nodes report rather than configured here, so it cannot drift
+   * from the weights actually on disk.
+   */
+  /**
+   * Models this fleet can serve, and how much context each accepts.
+   *
+   * Only from nodes that could answer right now. The listing reported a model
+   * as loaded with nothing connected, because it read the last heartbeat a node
+   * ever sent, and a capability check is exactly where that misleads: a client
+   * asks what is available, is told, and every request then fails. Stale is
+   * worse than empty here, because empty is actionable.
+   *
+   * The window is advertised so a client does not have to guess: guess high and
+   * the conversation runs past what the model takes, guess low and most of it
+   * goes unused. Taken from what nodes report rather than configured here, so it
+   * cannot drift from the weights on disk.
+   */
   r.get('/models', async (_req, res) => {
-    const models = await servableModels()
+    const models = await servableModels(db, broker)
     res.json({
       object: 'list',
       data: [...models].map(([id, m]) => ({
@@ -191,42 +191,6 @@ export function servingRoutes(db: Db, broker: Broker): Router {
     })
   })
 
-  r.get('/v0/models', async (_req, res) => {
-    const models = await servableModels()
-    res.json({
-      object: 'list',
-      data: [...models].map(([id, m]) => ({
-        id,
-        object: 'model',
-        // A model with no context window is not a chat model. Typing everything
-        // as llm made an embedding model look like something a client could
-        // send a conversation to, and anything routing off that field would
-        // pick it.
-        type: m.context > 0 ? 'llm' : 'embeddings',
-        publisher: 'dai',
-        max_context_length: m.context || null,
-        loaded_context_length: m.context || null,
-        // Reconciled with what a request would actually do. Reporting "loaded"
-        // while /v1/messages answers "no nodes connected" is two views of one
-        // fleet disagreeing, and it is exactly what makes a listing-based
-        // health check untrustworthy.
-        state: !m.live ? 'busy' : m.resident ? 'loaded' : 'not-loaded',
-      })),
-    })
-  })
-
-  /**
-   * How many tokens a request would cost, before sending it.
-   *
-   * Counted by the node's own tokeniser and chat template rather than
-   * estimated here. An approximate count feeding a client's decision about what
-   * to send is a slower version of advertising a context window nothing can
-   * reach: it is wrong in the direction that produces either refused requests
-   * or truncated conversations, and the client has no way to know which.
-   *
-   * Tools are included, since their schemas are rendered into the prompt and
-   * are often the larger half of it.
-   */
   r.post('/messages/count_tokens', async (req, res) => {
     const body = req.body as {
       model?: string
@@ -235,7 +199,7 @@ export function servingRoutes(db: Db, broker: Broker): Router {
       tools?: unknown[]
     }
 
-    const servable = await servableModels()
+    const servable = await servableModels(db, broker)
     if (!body.model || !servable.has(body.model)) {
       res.status(404).json({
         type: 'error',
@@ -310,7 +274,7 @@ export function servingRoutes(db: Db, broker: Broker): Router {
     // a model nobody has loaded returned a confident answer from whatever
     // happened to be resident - the worst possible response to asking for
     // something specific.
-    const servable = await servableModels()
+    const servable = await servableModels(db, broker)
     if (!body.model || !servable.has(body.model)) {
       res.status(404).json({
         type: 'error',
@@ -595,5 +559,54 @@ export function servingRoutes(db: Db, broker: Broker): Router {
     })
   })
 
+  return r
+}
+
+/**
+ * LM Studio's model shape, on its own router.
+ *
+ * Mounted at /api, and only this. Mounting the whole serving router there
+ * exposed every endpoint twice under an undocumented prefix - /api/messages,
+ * /api/chat/completions and the rest - which nothing validated and nobody
+ * meant to publish. A conformance test found it on its first run.
+ */
+export function compatRoutes(db: Db, broker: Broker): Router {
+  const r = Router()
+  r.get('/v0/models', async (_req, res) => {
+    const models = await servableModels(db, broker)
+    res.json({
+      object: 'list',
+      data: [...models].map(([id, m]) => ({
+        id,
+        object: 'model',
+        // A model with no context window is not a chat model. Typing everything
+        // as llm made an embedding model look like something a client could
+        // send a conversation to, and anything routing off that field would
+        // pick it.
+        type: m.context > 0 ? 'llm' : 'embeddings',
+        publisher: 'dai',
+        max_context_length: m.context || null,
+        loaded_context_length: m.context || null,
+        // Reconciled with what a request would actually do. Reporting "loaded"
+        // while /v1/messages answers "no nodes connected" is two views of one
+        // fleet disagreeing, and it is exactly what makes a listing-based
+        // health check untrustworthy.
+        state: !m.live ? 'busy' : m.resident ? 'loaded' : 'not-loaded',
+      })),
+    })
+  })
+
+  /**
+   * How many tokens a request would cost, before sending it.
+   *
+   * Counted by the node's own tokeniser and chat template rather than
+   * estimated here. An approximate count feeding a client's decision about what
+   * to send is a slower version of advertising a context window nothing can
+   * reach: it is wrong in the direction that produces either refused requests
+   * or truncated conversations, and the client has no way to know which.
+   *
+   * Tools are included, since their schemas are rendered into the prompt and
+   * are often the larger half of it.
+   */
   return r
 }

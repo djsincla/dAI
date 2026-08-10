@@ -10,7 +10,7 @@ import { startReaper } from './lib/work.js'
 import { Acl, aclMiddleware, describeAcls } from './lib/netacl.js'
 import { Broker } from './lib/broker.js'
 import { Ca } from './lib/ca.js'
-import { servingRoutes } from './routes/serving.js'
+import { compatRoutes, servingRoutes } from './routes/serving.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 export const OPENAPI_PATH = join(here, '..', 'openapi', 'dai.yaml')
@@ -196,7 +196,7 @@ export function createApp(db: Db, surface: Surface = 'both'): Express {
     // The same router under /api, so /api/v0/models resolves. Tools written
     // against LM Studio probe that path for the context window, and the point
     // of serving their shape is that they work without being patched.
-    app.use('/api', aclMiddleware(adminAcl, 'serving'), servingRoutes(db, broker))
+    app.use('/api', aclMiddleware(adminAcl, 'serving'), compatRoutes(db, broker))
   }
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {

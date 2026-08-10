@@ -30,6 +30,10 @@ public struct PauseSwitch: Sendable {
 
     private let url: URL
 
+    /// Exposed so a test can point at a file of its own rather than toggling
+    /// the switch on the machine running it.
+    public var path: String { url.path }
+
     public init(path: String = PauseSwitch.defaultPath) {
         self.url = URL(fileURLWithPath: path)
     }

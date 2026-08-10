@@ -1,0 +1,63 @@
+import Foundation
+
+/// What the worker and the serving loop need from a control plane.
+///
+/// Extracted so those loops can be tested at all. Every bug that has reached
+/// production in this agent has been in them - a lease request that could not
+/// be encoded, two heartbeats erasing each other's models, a batch loop
+/// releasing the model a serving loop was using - and none was reachable by a
+/// test, because exercising either loop meant standing up a real control plane
+/// and a real model.
+///
+/// The protocol is deliberately the existing surface rather than a tidier one.
+/// A shape invented for testing tests the shape that was invented.
+public protocol ControlPlaneClient: Actor {
+    func fetchPolicy() async throws -> [PresenceState: StatePolicy]
+    func heartbeat(state: PresenceState, onACPower: Bool?, thermalOK: Bool?,
+                   userPaused: Bool, capability: [String: Double],
+                   residentModels: [String: Double], modelInfo: [String: Int]) async throws
+    func leaseWork(kinds: [WorkKind]) async throws -> ControlPlane.Lease?
+    var lastLeaseReason: String? { get }
+    func report(unitId: String, completed: [WorkItem], unfinished: [WorkItem],
+                seconds: Double, failed: Bool) async throws -> Int
+    func awaitDispatch() async throws -> ControlPlane.Dispatch?
+    func reportDispatch(id: String, text: String?, error: String?,
+                        promptTokens: Int, completionTokens: Int,
+                        cachedTokens: Int, toolCalls: [ToolCall]) async throws
+    func isDispatchCancelled(id: String) async -> Bool
+}
+
+extension ControlPlane: ControlPlaneClient {}
+
+/// The defaults the call sites rely on.
+///
+/// A protocol requirement cannot carry them, so they live here rather than
+/// being spelled out at every call - which would make the loops noisier in
+/// order to make them testable, and the point of the protocol is that it costs
+/// them nothing.
+public extension ControlPlaneClient {
+    func heartbeat(state: PresenceState, onACPower: Bool?, thermalOK: Bool?,
+                   userPaused: Bool = false, capability: [String: Double] = [:],
+                   residentModels: [String: Double] = [:],
+                   modelInfo: [String: Int] = [:]) async throws {
+        try await heartbeat(state: state, onACPower: onACPower, thermalOK: thermalOK,
+                            userPaused: userPaused, capability: capability,
+                            residentModels: residentModels, modelInfo: modelInfo)
+    }
+
+    @discardableResult
+    func report(unitId: String, completed: [WorkItem], unfinished: [WorkItem],
+                seconds: Double, failed: Bool = false) async throws -> Int {
+        try await report(unitId: unitId, completed: completed, unfinished: unfinished,
+                         seconds: seconds, failed: failed)
+    }
+
+    func reportDispatch(id: String, text: String?, error: String?,
+                        promptTokens: Int = 0, completionTokens: Int = 0,
+                        cachedTokens: Int = 0, toolCalls: [ToolCall] = []) async throws {
+        try await reportDispatch(id: id, text: text, error: error,
+                                 promptTokens: promptTokens,
+                                 completionTokens: completionTokens,
+                                 cachedTokens: cachedTokens, toolCalls: toolCalls)
+    }
+}

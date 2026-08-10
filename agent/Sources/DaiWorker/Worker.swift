@@ -26,7 +26,7 @@ public actor Worker {
         }
     }
 
-    private let controlPlane: ControlPlane
+    private let controlPlane: any ControlPlaneClient
     private let source: SignalSource
     private let monitor: PresenceMonitor
     private let pauseSwitch: PauseSwitch
@@ -63,15 +63,16 @@ public actor Worker {
     }
     public private(set) var stats = Stats()
 
-    public init(controlPlane: ControlPlane, source: SignalSource = MacSignalSource(),
+    public init(controlPlane: any ControlPlaneClient, source: SignalSource = MacSignalSource(),
                 gpu: MLXRuntime? = nil, ane: ANERuntime? = nil,
+                pauseSwitch: PauseSwitch = PauseSwitch(),
                 status: StatusPublisher = StatusPublisher(),
                 promoteAfter: TimeInterval = idlePromoteSeconds) {
         self.status = status
         self.controlPlane = controlPlane
         self.source = source
         self.monitor = PresenceMonitor(promoteAfter: promoteAfter)
-        self.pauseSwitch = PauseSwitch()
+        self.pauseSwitch = pauseSwitch
         self.gpu = gpu
         self.ane = ane
     }

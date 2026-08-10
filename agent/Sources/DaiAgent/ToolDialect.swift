@@ -137,10 +137,15 @@ public enum ToolDialects {
     ]
     """
 
-    public static func load() -> [ToolDialect] {
+    /// - Parameter path: an explicit file, for callers that should not depend on
+    ///   process-wide state. The environment variable remains the deployment
+    ///   mechanism; passing a path is how a test avoids reaching into it, since
+    ///   mutating the environment changes it for everything running alongside.
+    public static func load(path: String? = nil) -> [ToolDialect] {
         let decoder = JSONDecoder()
-        if let path = ProcessInfo.processInfo.environment["DAI_TOOL_DIALECTS"],
-           let data = FileManager.default.contents(atPath: path),
+        let chosen = path ?? ProcessInfo.processInfo.environment["DAI_TOOL_DIALECTS"]
+        if let chosen,
+           let data = FileManager.default.contents(atPath: chosen),
            let custom = try? decoder.decode([ToolDialect].self, from: data) {
             return custom
         }

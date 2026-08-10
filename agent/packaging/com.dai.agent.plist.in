@@ -1,8 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Template. install.sh substitutes the @PLACEHOLDER@ values and writes the
-  result to /Library/LaunchDaemons.
+  Template. install.sh substitutes the values written in capitals between at
+  signs, and writes the result to /Library/LaunchDaemons. A test renders this
+  the same way and checks that nothing is left unsubstituted, because an
+  unreplaced name is a literal string in a live configuration and fails as a
+  path that does not exist rather than as a template error.
 
   A LaunchDaemon rather than a LaunchAgent, because E1 measured the difference
   and it decides what the product is. A daemon runs in session 0 as root with no

@@ -109,11 +109,26 @@ export class Broker {
    * Rejects rather than hangs if the node never answers: a node that vanishes
    * mid-request is the expected case on a harvested fleet, not an exception.
    */
+  /**
+   * Dispatches still running that nobody is waiting for any more.
+   *
+   * A node is a serial resource: one request occupies it entirely, and a
+   * cancelled one measured at 330 seconds of work for an answer nobody would
+   * read. With a single node that is the whole cluster blocked, and people
+   * cancel constantly.
+   */
+  private readonly cancelled = new Set<string>()
+
+  isCancelled(dispatchId: string): boolean {
+    return this.cancelled.has(dispatchId)
+  }
+
   dispatch(
     nodeId: string,
     kind: string,
     modelHash: string | null,
     body: unknown,
+    signal?: AbortSignal,
   ): Promise<{ ok: true; body: unknown } | { ok: false; error: string }> {
     const waiter = this.waiters.get(nodeId)
     if (!waiter) return Promise.resolve({ ok: false as const, error: 'node not connected' })
@@ -129,6 +144,18 @@ export class Broker {
         resolve({ ok: false, error: 'node did not answer in time' })
       }, this.requestTimeoutMs)
       this.pending.set(dispatch.id, { dispatch, nodeId, resolve, timer })
+
+      // The caller going away is recorded rather than acted on directly: the
+      // node is mid-generation and there is no open channel to push anything
+      // down, so it asks. Marked before resolving, or a node polling in the
+      // same tick is told to continue work already abandoned.
+      signal?.addEventListener('abort', () => {
+        console.log(`[serving] caller gave up on ${dispatch.id}; asking the node to stop`)
+        this.cancelled.add(dispatch.id)
+        this.finish(dispatch.id)
+        resolve({ ok: false, error: 'cancelled by the caller' })
+      }, { once: true })
+
       waiter.resolve(dispatch)
     })
   }
@@ -142,6 +169,11 @@ export class Broker {
     this.finish(dispatchId)
     entry.resolve(result.error ? { ok: false, error: result.error } : { ok: true, body: result.body })
     return true
+  }
+
+  /** Forget a cancellation once the node has acknowledged it. */
+  clearCancelled(dispatchId: string): void {
+    this.cancelled.delete(dispatchId)
   }
 
   private finish(dispatchId: string): void {

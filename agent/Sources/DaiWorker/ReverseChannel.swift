@@ -96,6 +96,8 @@ public actor ReverseChannel {
         }
         defer { beating.cancel() }
 
+        defer { log("serve loop returning; deadline was \(deadline)") }
+
         while Date() < deadline {
             let gate = mayServe()
 
@@ -147,6 +149,28 @@ public actor ReverseChannel {
             return
         }
 
+        // Watch for the caller giving up while this runs. Two seconds is a
+        // compromise: often enough that a cancel is felt as immediate, rare
+        // enough to be free next to the work it is interrupting.
+        let cancelled = CancelFlag()
+        // Detached, and that detail is the whole thing.
+        //
+        // A plain Task created inside an actor inherits its isolation, so this
+        // would queue behind the very call it is meant to interrupt: the actor
+        // is occupied for the length of the generation, and a watcher that can
+        // only run when the actor is free never runs at all. Detaching gives it
+        // its own executor.
+        let watching = Task.detached { [controlPlane] in
+            while !Task.isCancelled {
+                if await controlPlane.isDispatchCancelled(id: dispatch.id) {
+                    cancelled.set()
+                    return
+                }
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
+        defer { watching.cancel() }
+
         let started = Date()
         do {
             // Refuse early rather than time out. A prompt beyond what this node
@@ -182,7 +206,19 @@ public actor ReverseChannel {
                 maxTokens: min(requested, maxTokens),
                 tools: dispatch.body["tools"]?.arrayValue,
                 messages: chatFrom(dispatch.body, dialect: await gpu.toolDialect),
-                forceTool: forcedTool(dispatch.body))
+                forceTool: forcedTool(dispatch.body),
+                cancelled: cancelled)
+
+            if cancelled.isSet {
+                // Nothing to report. The control plane has already answered the
+                // caller and closed the dispatch, so posting a partial result
+                // here only earns a 409 and puts a failure in the log for a
+                // request that did exactly what it was asked to.
+                log(String(format: "cancelled by the caller after %.1fs",
+                           Date().timeIntervalSince(started)))
+                return
+            }
+
             let elapsed = Date().timeIntervalSince(started)
             // The prompt rate is logged because it is what sizes the advertised
             // window, and a window nobody can explain is one nobody trusts.

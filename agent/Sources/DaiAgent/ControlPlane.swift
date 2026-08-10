@@ -184,6 +184,17 @@ public actor ControlPlane {
                         body: d["body"] ?? .object([:]))
     }
 
+    /// Whether the caller has given up on a request still being worked on.
+    ///
+    /// Asked rather than told: the node is inside a generation loop with no
+    /// open channel to receive anything, so it checks. A failure here answers
+    /// false, because a network blip should not throw away work in progress.
+    public func isDispatchCancelled(id: String) async -> Bool {
+        guard let (_, data) = try? await request(
+            "GET", "agent/v1/dispatch/\(id)/cancelled", timeout: 10) else { return false }
+        return json(data)["cancelled"] == .bool(true)
+    }
+
     public func reportDispatch(id: String, text: String?, error: String?,
                                promptTokens: Int = 0,
                                completionTokens: Int = 0,

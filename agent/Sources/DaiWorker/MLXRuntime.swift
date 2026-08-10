@@ -135,11 +135,12 @@ public actor MLXRuntime {
     public func complete(prompt: String, maxTokens: Int,
                          tools: [DaiAgent.JSONValue]? = nil,
                          messages: [[String: String]]? = nil,
-                         forceTool: String? = nil) async throws -> Completion {
+                         forceTool: String? = nil,
+                         cancelled: CancelFlag? = nil) async throws -> Completion {
         let started = Date()
         let out = try await generateCompletion(prompt: prompt, maxTokens: maxTokens,
                                                tools: tools, messages: messages,
-                                               forceTool: forceTool)
+                                               forceTool: forceTool, cancelled: cancelled)
         let elapsed = Date().timeIntervalSince(started)
 
         // Measured here rather than taken from MLX's promptTime, which reports
@@ -161,7 +162,8 @@ public actor MLXRuntime {
     private func generateCompletion(prompt: String, maxTokens: Int,
                                     tools: [DaiAgent.JSONValue]? = nil,
                                     messages: [[String: String]]? = nil,
-                                    forceTool: String? = nil) async throws -> Completion {
+                                    forceTool: String? = nil,
+                                    cancelled: CancelFlag? = nil) async throws -> Completion {
         guard let container else { throw Failure.notLoaded }
         let dialect = toolDialect
         var built = messages ?? [["role": "user", "content": prompt]]
@@ -228,6 +230,11 @@ public actor MLXRuntime {
             var promptSeconds = 0.0
             var generateSeconds = 0.0
             for await item in stream {
+                // Checked between tokens. Generation cannot be interrupted
+                // mid-token, so this is as fine-grained as it gets - and it is
+                // fine enough: the cost of a cancelled request drops from the
+                // whole answer to one token.
+                if cancelled?.isSet == true { break }
                 switch item {
                 case let .chunk(chunk):
                     text += chunk

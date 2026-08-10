@@ -202,6 +202,34 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
 
+  /agent/v1/dispatch/{dispatchId}/cancelled:
+    get:
+      tags: [agent]
+      summary: Has the caller given up on this request?
+      description: |
+        Polled by a node while it generates. Asked rather than pushed because
+        the node is inside a generation loop with no open channel to receive
+        anything, and a cancelled request otherwise occupies it to completion:
+        330 seconds of work for an answer nobody would read, on a resource that
+        serves one request at a time.
+      parameters:
+        - name: dispatchId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Whether to stop
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [cancelled]
+                properties:
+                  cancelled: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
   /agent/v1/dispatch/{dispatchId}/result:
     post:
       tags: [agent]

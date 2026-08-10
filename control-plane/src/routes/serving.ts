@@ -309,11 +309,27 @@ export function servingRoutes(db: Db, broker: Broker): Router {
 
     const result = out.body as {
       text: string; promptTokens?: number; completionTokens?: number
+      cachedTokens?: number
       toolCalls?: { name: string; arguments: unknown }[]
     }
     const id = `msg_${started}`
+
+    // Split the way the API this imitates splits it: every prompt token lands
+    // in exactly one bucket, so a client summing them gets the prompt it sent.
+    //
+    // Reported at all because caching was invisible without it - the saving is
+    // real and large, and a client showing a context gauge had no way to know
+    // any of it had happened.
+    //
+    // cache_creation stays zero deliberately. In the real API that means the
+    // caller asked for a write and is charged differently for it; here caching
+    // is implicit and unbilled, and claiming creation would describe a decision
+    // nobody made.
+    const cached = result.cachedTokens ?? 0
     const usage = {
-      input_tokens: result.promptTokens ?? 0,
+      input_tokens: Math.max(0, (result.promptTokens ?? 0) - cached),
+      cache_read_input_tokens: cached,
+      cache_creation_input_tokens: 0,
       output_tokens: result.completionTokens ?? 0,
     }
 
@@ -413,7 +429,12 @@ export function servingRoutes(db: Db, broker: Broker): Router {
       send('message_start', { type: 'message_start', message: {
         id, type: 'message', role: 'assistant', model: modelHash ?? 'default',
         content: [], stop_reason: null, stop_sequence: null,
-        usage: { input_tokens: usage.input_tokens, output_tokens: 0 },
+        usage: {
+          input_tokens: usage.input_tokens,
+          cache_read_input_tokens: usage.cache_read_input_tokens,
+          cache_creation_input_tokens: usage.cache_creation_input_tokens,
+          output_tokens: 0,
+        },
       } })
       // Each block start, delta and stop, in order. A tool_use block streams
       // its input as input_json_delta rather than as a field on the start

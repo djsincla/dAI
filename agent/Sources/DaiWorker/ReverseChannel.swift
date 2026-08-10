@@ -210,7 +210,7 @@ public actor ReverseChannel {
             try await controlPlane.reportDispatch(
                 id: dispatch.id, text: out.text, error: nil,
                 promptTokens: out.promptTokens, completionTokens: out.completionTokens,
-                toolCalls: calls)
+                cachedTokens: out.reusedTokens, toolCalls: calls)
         } catch {
             log("failed: \(error)")
             try? await controlPlane.reportDispatch(

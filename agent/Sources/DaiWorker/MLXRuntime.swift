@@ -283,6 +283,24 @@ public actor MLXRuntime {
     /// Advertised so a client does not have to assume. A client guessing high
     /// runs a conversation past what the model accepts; guessing low wastes
     /// most of the window it paid for.
+    /// How many tokens a prompt would occupy, without generating anything.
+    ///
+    /// Counted by the model's own tokeniser and its own chat template, because
+    /// an estimate is worse than nothing here: the number feeds a client's
+    /// decision about what to send, and being wrong by a fifth means either a
+    /// refused request or a truncated conversation. Tools count too - schemas
+    /// are rendered into the prompt and are frequently the larger half.
+    public func countTokens(messages: [[String: String]],
+                            tools: [DaiAgent.JSONValue]? = nil) async throws -> Int {
+        guard let container else { throw Failure.notLoaded }
+        return try await container.perform { context in
+            let specs = tools?.compactMap { $0.anyValue as? [String: Any] }
+            let input = try await context.processor.prepare(
+                input: .init(messages: messages, tools: specs))
+            return input.text.tokens.size
+        }
+    }
+
     /// The tool-call dialect this model speaks, chosen from its chat template.
     ///
     /// Read from disk rather than held on the loaded model, so it is available

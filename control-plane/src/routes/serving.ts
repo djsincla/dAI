@@ -203,6 +203,78 @@ export function servingRoutes(db: Db, broker: Broker): Router {
   })
 
   /**
+   * How many tokens a request would cost, before sending it.
+   *
+   * Counted by the node's own tokeniser and chat template rather than
+   * estimated here. An approximate count feeding a client's decision about what
+   * to send is a slower version of advertising a context window nothing can
+   * reach: it is wrong in the direction that produces either refused requests
+   * or truncated conversations, and the client has no way to know which.
+   *
+   * Tools are included, since their schemas are rendered into the prompt and
+   * are often the larger half of it.
+   */
+  r.post('/messages/count_tokens', async (req, res) => {
+    const body = req.body as {
+      model?: string
+      messages: { role: string; content: unknown }[]
+      system?: unknown
+      tools?: unknown[]
+    }
+
+    const servable = await servableModels()
+    if (!body.model || !servable.has(body.model)) {
+      res.status(404).json({
+        type: 'error',
+        error: {
+          type: 'not_found_error',
+          message: body.model
+            ? `no node is serving "${body.model}". Available: `
+              + ([...servable.keys()].join(', ') || 'none')
+            : 'model is required',
+        },
+      })
+      return
+    }
+
+    const candidates = await candidatesFor(db, broker.inFlightCounts)
+    const connected = candidates.filter((c) => broker.isConnected(c.id))
+    const choice = selectNode(connected, 'generate', body.model)
+    if (isRefusal(choice)) {
+      res.status(503).json({
+        type: 'error',
+        error: { type: 'overloaded_error', message: choice.detail },
+      })
+      return
+    }
+
+    const messages = body.system
+      ? [{ role: 'system', content: body.system }, ...body.messages]
+      : body.messages
+
+    const cancel = new AbortController()
+    res.on('close', () => { if (!res.writableEnded) cancel.abort() })
+
+    const out = await broker.dispatch(choice.id, 'generate', body.model, {
+      operation: 'count_tokens',
+      messages,
+      tools: body.tools,
+    }, cancel.signal)
+
+    if (cancel.signal.aborted) return
+    if (!out.ok) {
+      res.status(503).json({
+        type: 'error',
+        error: { type: 'api_error', message: out.error },
+      })
+      return
+    }
+
+    const result = out.body as { promptTokens?: number }
+    res.json({ input_tokens: result.promptTokens ?? 0 })
+  })
+
+  /**
    * Anthropic-native messages endpoint.
    *
    * Exists because the clients people actually use speak this shape, and a

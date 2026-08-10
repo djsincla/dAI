@@ -171,6 +171,26 @@ public actor ReverseChannel {
         }
         defer { watching.cancel() }
 
+        // Counting is not generating: no cancellation watch, no policy cap, no
+        // tool parsing. It exists so a client can decide what to send, so it
+        // has to be cheap enough to ask before every turn.
+        if dispatch.body["operation"]?.stringValue == "count_tokens" {
+            do {
+                if await !gpu.isLoaded { _ = try await gpu.load() }
+                let count = try await gpu.countTokens(
+                    messages: chatFrom(dispatch.body, dialect: await gpu.toolDialect)
+                        ?? [["role": "user", "content": promptFrom(dispatch.body)]],
+                    tools: dispatch.body["tools"]?.arrayValue)
+                log("counted \(count) tokens")
+                try await controlPlane.reportDispatch(
+                    id: dispatch.id, text: nil, error: nil, promptTokens: count)
+            } catch {
+                try? await controlPlane.reportDispatch(
+                    id: dispatch.id, text: nil, error: String(describing: error))
+            }
+            return
+        }
+
         let started = Date()
         do {
             // Refuse early rather than time out. A prompt beyond what this node

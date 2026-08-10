@@ -201,6 +201,12 @@ public actor ControlPlane {
                                cachedTokens: Int = 0,
                                toolCalls: [ToolCall] = []) async throws {
         var body: [String: JSONValue] = [:]
+        // A count has no text and is still a success. Reported separately so
+        // the control plane is not left deciding whether an empty answer means
+        // failure.
+        if text == nil, error == nil {
+            body["result"] = .object(["promptTokens": .number(Double(promptTokens))])
+        }
         if let text {
             body["result"] = .object([
                 "text": .string(text),

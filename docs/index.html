@@ -231,6 +231,9 @@
   <tr><td><code>POST /v1/chat/completions</code></td><td>OpenAI-compatible</td><td class="ok">working</td></tr>
   <tr><td>Tool use</td><td><code>tool_use</code> blocks, <code>tool_result</code> loop, streamed deltas</td><td class="ok">working</td></tr>
   <tr><td><code>GET /v1/models</code></td><td>Models and their context windows</td><td class="ok">working</td></tr>
+  <tr><td><code>POST /v1/messages/count_tokens</code></td><td>Counted by the node's own tokeniser, tools included</td><td class="ok">working</td></tr>
+  <tr><td>Prompt caching</td><td>Conversation prefix reused between turns</td><td class="ok">working</td></tr>
+  <tr><td>Cancel on client disconnect</td><td>Stops generation rather than finishing work nobody wants</td><td class="ok">working</td></tr>
   <tr><td>Render work</td><td>Third work kind</td><td class="warn">scheduled, no runtime yet</td></tr>
 </table></div>
 <p>

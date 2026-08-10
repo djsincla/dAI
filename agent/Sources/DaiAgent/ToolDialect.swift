@@ -58,6 +58,15 @@ public struct ToolDialect: Codable, Sendable, Equatable {
     /// client would have executed twice. Conflating this with ``stop`` deleted
     /// the call instead of the noise after it.
     public var truncateAt: [String]?
+
+    /// The role a tool result must carry for this family's chat template.
+    ///
+    /// Llama's template branches on `ipython`, Qwen and most others on `tool`.
+    /// Sending a result as a `user` message renders it as ordinary prose, so
+    /// the model sees its call still unanswered and asks again - forever, if
+    /// the conversation ends on a tool result, which is the shape of every
+    /// agentic turn.
+    public var toolResultRole: String?
 }
 
 public struct ToolCall: Sendable, Equatable {
@@ -84,13 +93,15 @@ public enum ToolDialects {
         "match": { "templateContains": ["<tool_call>"] },
         "parse": { "style": "tagged-json", "open": "<tool_call>", "close": "</tool_call>",
                    "nameField": "name", "argsField": "arguments" },
-        "stop": ["</tool_call>"]
+        "stop": ["</tool_call>"],
+        "toolResultRole": "tool"
       },
       {
         "id": "mistral",
         "match": { "templateContains": ["[TOOL_CALLS]"] },
         "parse": { "style": "prefixed-json", "prefix": "[TOOL_CALLS]",
-                   "nameField": "name", "argsField": "arguments" }
+                   "nameField": "name", "argsField": "arguments" },
+        "toolResultRole": "tool"
       },
       {
         "id": "llama-3",
@@ -98,12 +109,14 @@ public enum ToolDialects {
                    "modelContains": ["llama-3", "llama3"] },
         "parse": { "style": "bare-json", "nameField": "name", "argsField": "parameters" },
         "stop": ["<|eom_id|>", "<|eot_id|>"],
-        "truncateAt": ["<|eom_id|>", "<|eot_id|>"]
+        "truncateAt": ["<|eom_id|>", "<|eot_id|>"],
+        "toolResultRole": "ipython"
       },
       {
         "id": "generic-json",
         "match": {},
-        "parse": { "style": "bare-json", "nameField": "name", "argsField": "arguments" }
+        "parse": { "style": "bare-json", "nameField": "name", "argsField": "arguments" },
+        "toolResultRole": "tool"
       }
     ]
     """

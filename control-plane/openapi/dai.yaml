@@ -423,11 +423,8 @@ paths:
                 additionalProperties: true
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
-        '422':
-          description: |
-            tool_choice required a call the model did not make. Small models
-            frequently will not, which is a property of the model rather than a
-            fault in the request.
+        '404':
+          description: No node is serving the requested model
           content:
             application/json:
               schema:

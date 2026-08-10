@@ -343,6 +343,43 @@ export function servingRoutes(db: Db, broker: Broker): Router {
     // connection is gone.
     res.on('close', () => { if (!res.writableEnded) cancel.abort() })
 
+    const id = `msg_${Date.now()}`
+
+    /**
+     * Open the stream before the work starts, and keep it alive while it runs.
+     *
+     * Nothing was written until the node had finished, so a request that took
+     * minutes - which a large prompt does - sent no bytes at all for those
+     * minutes. A client waiting on a stream that says nothing eventually gives
+     * up, and it gives up with an error of its own that names nothing on this
+     * side: the server logged a success and the caller reported a failure.
+     *
+     * The API this imitates opens with message_start immediately and sends
+     * pings while it thinks, which is what makes a long answer distinguishable
+     * from a dead connection.
+     */
+    let ping: ReturnType<typeof setInterval> | undefined
+    const send = (event: string, data: unknown) => {
+      if (res.writableEnded) return
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+    }
+    if (body.stream) {
+      res.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive',
+      })
+      send('message_start', { type: 'message_start', message: {
+        id, type: 'message', role: 'assistant', model: modelHash ?? 'default',
+        content: [], stop_reason: null, stop_sequence: null,
+        // Not yet known: the node has not read the prompt. The final
+        // message_delta carries the real figures, as it does upstream.
+        usage: { input_tokens: 0, output_tokens: 0 },
+      } })
+      ping = setInterval(() => send('ping', { type: 'ping' }), 10_000)
+      res.on('close', () => clearInterval(ping))
+    }
+
     const started = Date.now()
     const out = await broker.dispatch(choice.id, 'generate', modelHash, {
       messages,
@@ -361,12 +398,23 @@ export function servingRoutes(db: Db, broker: Broker): Router {
     // second error in the log.
     if (cancel.signal.aborted) return
 
+    clearInterval(ping)
     if (!out.ok) {
       // A prompt the node cannot read is the caller's request being too large,
       // and it will never succeed however often it is sent. 503 says the
       // opposite - transient, retry me - so a well-behaved client retries
       // forever. The API this imitates answers 400 with "prompt is too long".
       const tooLong = (out.error ?? '').includes('prompt is too long')
+      if (body.stream) {
+        // The status is already sent, so the failure has to arrive as an event.
+        // Ending the stream silently would look like an empty answer.
+        send('error', { type: 'error', error: {
+          type: tooLong ? 'invalid_request_error' : 'api_error',
+          message: out.error,
+        } })
+        res.end()
+        return
+      }
       res.status(tooLong ? 400 : 503).json({
         type: 'error',
         error: {
@@ -382,7 +430,7 @@ export function servingRoutes(db: Db, broker: Broker): Router {
       cachedTokens?: number
       toolCalls?: { name: string; arguments: unknown }[]
     }
-    const id = `msg_${started}`
+
 
     // Split the way the API this imitates splits it: every prompt token lands
     // in exactly one bucket, so a client summing them gets the prompt it sent.
@@ -399,12 +447,23 @@ export function servingRoutes(db: Db, broker: Broker): Router {
     // not be cached at all - the difference between "the next turn will be
     // fast" and "this will be slow forever". input_tokens is what was read and
     // not retained, which on this node is nothing.
+    // input_tokens is what was read this turn, and cache_read what was not.
+    //
+    // The two cannot both be reported: every token this node reads is also
+    // retained, so counting the same tokens as creation and as input would
+    // double the prompt for anyone summing them. Given that choice, input
+    // wins - the API this imitates never reports zero for a non-empty prompt,
+    // and a client tracking context from that field alone would see a
+    // conversation that never grows.
+    //
+    // cache_creation therefore stays zero, which is also what upstream reports
+    // for a request that did not ask for a cache write. Ours is implicit, and
+    // the saving is visible in cache_read either way.
     const cached = result.cachedTokens ?? 0
-    const processed = Math.max(0, (result.promptTokens ?? 0) - cached)
     const usage = {
-      input_tokens: 0,
+      input_tokens: Math.max(0, (result.promptTokens ?? 0) - cached),
       cache_read_input_tokens: cached,
-      cache_creation_input_tokens: processed,
+      cache_creation_input_tokens: 0,
       output_tokens: result.completionTokens ?? 0,
     }
 
@@ -493,24 +552,9 @@ export function servingRoutes(db: Db, broker: Broker): Router {
       // answer arrives in one text delta. Honest about it here rather than in
       // a comment nobody reads: the caller waits the same time and then gets
       // everything, so there is no incremental display.
-      res.writeHead(200, {
-        'content-type': 'text/event-stream',
-        'cache-control': 'no-cache',
-        connection: 'keep-alive',
-      })
-      const send = (event: string, data: unknown) => {
-        res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
-      }
-      send('message_start', { type: 'message_start', message: {
-        id, type: 'message', role: 'assistant', model: modelHash ?? 'default',
-        content: [], stop_reason: null, stop_sequence: null,
-        usage: {
-          input_tokens: usage.input_tokens,
-          cache_read_input_tokens: usage.cache_read_input_tokens,
-          cache_creation_input_tokens: usage.cache_creation_input_tokens,
-          output_tokens: 0,
-        },
-      } })
+      // The stream was opened and message_start sent before the work began, so
+      // that a caller waiting minutes for a large prompt sees an open
+      // connection rather than silence. Only the content follows here.
       // Each block start, delta and stop, in order. A tool_use block streams
       // its input as input_json_delta rather than as a field on the start
       // event, which is what clients parse: sending the whole thing up front

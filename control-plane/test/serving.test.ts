@@ -206,12 +206,47 @@ describe('serving over HTTP', () => {
     expect((await r.json()).accepted).toBe(false)
   })
 
-  it('lists models resident anywhere in the fleet', async () => {
+  it('does not list a model whose node cannot answer', async () => {
+    // Previously this listed anything any node had ever mentioned, so a model
+    // showed as available with nothing connected. A capability check is exactly
+    // where that misleads: a client asks what it can use, is told, and every
+    // request then fails. Stale is worse than empty, because empty is
+    // actionable.
     await fetch(`${base}/agent/v1/heartbeat`, {
       method: 'POST', headers: asNode(fx.fingerprint),
       body: JSON.stringify({ presenceState: 'LOCKED', residentModels: { 'qwen-7b': 4 } }),
     })
     const r = await fetch(`${base}/v1/models`, { headers: asUser(fx.operatorId) })
-    expect((await r.json()).data.map((m: any) => m.id)).toContain('qwen-7b')
+    expect((await r.json()).data.map((m: any) => m.id)).not.toContain('qwen-7b')
+  })
+
+  it('lists a model once its node is holding the channel open', async () => {
+    await fetch(`${base}/agent/v1/heartbeat`, {
+      method: 'POST', headers: asNode(fx.fingerprint),
+      body: JSON.stringify({
+        presenceState: 'LOCKED',
+        residentModels: { 'qwen-7b': 4 },
+        models: [{ name: 'qwen-7b', contextLength: 32768 }],
+      }),
+    })
+
+    // Park on the reverse channel, which is what makes a node routable.
+    let stop = false
+    const held = (async () => {
+      while (!stop) {
+        const r = await fetch(`${base}/agent/v1/dispatch`, { headers: asNode(fx.fingerprint) })
+        if (r.status === 200) await r.json()
+      }
+    })()
+    await new Promise((r) => setTimeout(r, 250))
+
+    const r = await fetch(`${base}/v1/models`, { headers: asUser(fx.operatorId) })
+    const models = (await r.json()).data as any[]
+    expect(models.map((m) => m.id)).toContain('qwen-7b')
+    // The window is advertised so a client does not have to assume one.
+    expect(models.find((m) => m.id === 'qwen-7b').context_length).toBe(32768)
+
+    stop = true
+    await Promise.race([held, new Promise((r) => setTimeout(r, 1500))])
   })
 })

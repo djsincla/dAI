@@ -39,11 +39,23 @@ public actor MLXRuntime {
     ///
     /// Overridable so the daemon can be pointed at its own state directory,
     /// which it must be: a service account has no usable home.
-    public static var modelDirectory: URL {
+    /// The hub's base directory, which is not where the weights sit.
+    ///
+    /// HubApi appends `models/<repo>` to whatever base it is given, so pointing
+    /// this at the directory the weights are in produces `models/models/...`
+    /// and a config.json that cannot be found. DAI_MODEL_DIR names the base;
+    /// ``modelDirectory`` is where the files actually land.
+    public static var hubBase: URL {
         if let dir = ProcessInfo.processInfo.environment["DAI_MODEL_DIR"], !dir.isEmpty {
             return URL(fileURLWithPath: dir)
         }
         return URL.cachesDirectory
+    }
+
+    /// Where a model's files are, which is what reads config.json and
+    /// tokenizer_config.json.
+    public static var modelDirectory: URL {
+        hubBase.appendingPathComponent("models")
     }
 
     public var isLoaded: Bool { container != nil }
@@ -62,7 +74,7 @@ public actor MLXRuntime {
         // configuration appeared to control. Setting downloadBase is the only
         // thing that actually moves it.
         container = try await LLMModelFactory.shared.loadContainer(
-            hub: HubApi(downloadBase: Self.modelDirectory,
+            hub: HubApi(downloadBase: Self.hubBase,
                         useOfflineMode: !Self.fetchAllowed),
             configuration: ModelConfiguration(id: modelId))
         return Date().timeIntervalSince(t0)

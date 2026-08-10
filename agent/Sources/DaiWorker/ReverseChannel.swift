@@ -149,19 +149,41 @@ public actor ReverseChannel {
             // two: a single request has no seam to yield at, so its length is
             // the only thing bounding how long a returning user waits.
             let requested = dispatch.body["max_tokens"]?.intValue ?? 512
-            let out = try await gpu.complete(prompt: promptFrom(dispatch.body),
-                                             maxTokens: min(requested, maxTokens))
+            let out = try await gpu.complete(
+                prompt: promptFrom(dispatch.body),
+                maxTokens: min(requested, maxTokens),
+                tools: dispatch.body["tools"]?.arrayValue,
+                messages: chatFrom(dispatch.body))
             let elapsed = Date().timeIntervalSince(started)
-            log(String(format: "answered in %.2fs (%d prompt, %d generated)",
-                       elapsed, out.promptTokens, out.completionTokens))
+            log(String(format: "answered in %.2fs (%d prompt, %d generated%@)",
+                       elapsed, out.promptTokens, out.completionTokens,
+                       out.toolCalls.isEmpty ? ""
+                         : ", \(out.toolCalls.count) tool call"
+                           + (out.toolCalls.count == 1 ? "" : "s")))
             try await controlPlane.reportDispatch(
                 id: dispatch.id, text: out.text, error: nil,
-                promptTokens: out.promptTokens, completionTokens: out.completionTokens)
+                promptTokens: out.promptTokens, completionTokens: out.completionTokens,
+                toolCalls: out.toolCalls)
         } catch {
             log("failed: \(error)")
             try? await controlPlane.reportDispatch(
                 id: dispatch.id, text: nil, error: String(describing: error))
         }
+    }
+
+    /// The conversation as roles and content, for the chat template.
+    ///
+    /// Preferred over the flattened prompt whenever the template can be
+    /// applied: the template is what renders tool definitions and tool results
+    /// in the form the model was trained on, and flattening throws that away.
+    private func chatFrom(_ body: JSONValue) -> [[String: String]]? {
+        guard case let .array(messages)? = body["messages"] else { return nil }
+        let mapped = messages.compactMap { message -> [String: String]? in
+            guard let role = message["role"]?.stringValue else { return nil }
+            guard let content = textOf(message["content"]) else { return nil }
+            return ["role": role, "content": content]
+        }
+        return mapped.isEmpty ? nil : mapped
     }
 
     /// Flatten a messages array into a prompt.
@@ -187,9 +209,26 @@ public actor ReverseChannel {
         guard let content else { return nil }
         if let text = content.stringValue { return text }
         if case let .array(blocks) = content {
-            let parts = blocks.compactMap { $0["text"]?.stringValue }
+            let parts = blocks.compactMap { block -> String? in
+                if let text = block["text"]?.stringValue { return text }
+                // A tool result comes back as its own block type. Rendering it
+                // as text is what lets the loop continue: the model has to see
+                // what its call returned or it will simply ask again.
+                if block["type"]?.stringValue == "tool_result" {
+                    let body = textOf(block["content"]) ?? ""
+                    let id = block["tool_use_id"]?.stringValue ?? ""
+                    return "[tool_result \(id)]\n\(body)"
+                }
+                if block["type"]?.stringValue == "tool_use" {
+                    let name = block["name"]?.stringValue ?? ""
+                    let input = block["input"].map { String(describing: $0.anyValue) } ?? ""
+                    return "[tool_use \(name)] \(input)"
+                }
+                return nil
+            }
             return parts.isEmpty ? nil : parts.joined(separator: "\n")
         }
+        if case .object = content { return String(describing: content.anyValue) }
         return nil
     }
 }

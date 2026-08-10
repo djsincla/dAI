@@ -57,4 +57,32 @@ public enum JSONValue: Codable, Sendable, Equatable {
     public var intValue: Int? { if case let .number(n) = self { return Int(n) }; return nil }
 }
 
+public extension JSONValue {
+    /// The Foundation representation, for APIs that take `[String: Any]`.
+    ///
+    /// Needed because tool specifications cross into the chat template as
+    /// untyped dictionaries, and `[[String: Any]]` is not Sendable so it cannot
+    /// be carried there directly.
+    var anyValue: Any {
+        switch self {
+        case .null: return NSNull()
+        case let .bool(v): return v
+        case let .number(v): return v == v.rounded() && abs(v) < 9e15 ? Int(v) : v
+        case let .string(v): return v
+        case let .array(v): return v.map(\.anyValue)
+        case let .object(v): return v.mapValues(\.anyValue)
+        }
+    }
+
+    var objectValue: [String: JSONValue]? {
+        if case let .object(o) = self { return o }
+        return nil
+    }
+
+    var arrayValue: [JSONValue]? {
+        if case let .array(a) = self { return a }
+        return nil
+    }
+}
+
 public typealias WorkItem = JSONValue

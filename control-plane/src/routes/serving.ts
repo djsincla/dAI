@@ -190,6 +190,8 @@ export function servingRoutes(db: Db, broker: Broker): Router {
       system?: unknown
       max_tokens?: number
       stream?: boolean
+      tools?: unknown[]
+      tool_choice?: { type: string; name?: string }
     }
 
     const modelHash = body.model ?? null
@@ -220,7 +222,16 @@ export function servingRoutes(db: Db, broker: Broker): Router {
 
     const started = Date.now()
     const out = await broker.dispatch(choice.id, 'generate', modelHash, {
-      messages, max_tokens: maxTokens, model: modelHash,
+      messages,
+      max_tokens: maxTokens,
+      model: modelHash,
+      // Passed down rather than dropped. Discarding these was the difference
+      // between an agent and a chat box: the model never learned the tools
+      // existed, so it invented plausible-looking syntax instead of calling
+      // anything, and tool_choice made no difference because nothing was
+      // reaching the model either way.
+      tools: body.tools,
+      tool_choice: body.tool_choice,
     })
 
     if (!out.ok) {
@@ -231,13 +242,37 @@ export function servingRoutes(db: Db, broker: Broker): Router {
       return
     }
 
-    const result = out.body as { text: string; promptTokens?: number; completionTokens?: number }
+    const result = out.body as {
+      text: string; promptTokens?: number; completionTokens?: number
+      toolCalls?: { name: string; arguments: unknown }[]
+    }
     const id = `msg_${started}`
     const usage = {
       input_tokens: result.promptTokens ?? 0,
       output_tokens: result.completionTokens ?? 0,
     }
-    const stopReason = (result.completionTokens ?? 0) >= maxTokens ? 'max_tokens' : 'end_turn'
+
+    // Content blocks, in the order a client expects: any prose first, then the
+    // calls. A tool_use block carries an id the client quotes back on the
+    // matching tool_result, which is how a conversation with several calls in
+    // flight stays coherent.
+    const calls = result.toolCalls ?? []
+    const content: unknown[] = []
+    if (result.text.trim().length > 0) content.push({ type: 'text', text: result.text })
+    calls.forEach((call, i) => {
+      content.push({
+        type: 'tool_use',
+        id: `toolu_${started}_${i}`,
+        name: call.name,
+        input: call.arguments ?? {},
+      })
+    })
+    if (content.length === 0) content.push({ type: 'text', text: result.text })
+
+    // tool_use takes precedence over max_tokens: a client that sees anything
+    // else will treat the calls as commentary and never execute them.
+    const stopReason = calls.length > 0 ? 'tool_use'
+      : (result.completionTokens ?? 0) >= maxTokens ? 'max_tokens' : 'end_turn'
 
     if (body.stream) {
       // Replayed as a stream rather than streamed as it is produced.
@@ -261,15 +296,32 @@ export function servingRoutes(db: Db, broker: Broker): Router {
         content: [], stop_reason: null, stop_sequence: null,
         usage: { input_tokens: usage.input_tokens, output_tokens: 0 },
       } })
-      send('content_block_start', {
-        type: 'content_block_start', index: 0,
-        content_block: { type: 'text', text: '' },
+      // Each block start, delta and stop, in order. A tool_use block streams
+      // its input as input_json_delta rather than as a field on the start
+      // event, which is what clients parse: sending the whole thing up front
+      // leaves them waiting for deltas that never arrive.
+      content.forEach((block: any, index: number) => {
+        if (block.type === 'text') {
+          send('content_block_start', {
+            type: 'content_block_start', index,
+            content_block: { type: 'text', text: '' },
+          })
+          send('content_block_delta', {
+            type: 'content_block_delta', index,
+            delta: { type: 'text_delta', text: block.text },
+          })
+        } else {
+          send('content_block_start', {
+            type: 'content_block_start', index,
+            content_block: { type: 'tool_use', id: block.id, name: block.name, input: {} },
+          })
+          send('content_block_delta', {
+            type: 'content_block_delta', index,
+            delta: { type: 'input_json_delta', partial_json: JSON.stringify(block.input ?? {}) },
+          })
+        }
+        send('content_block_stop', { type: 'content_block_stop', index })
       })
-      send('content_block_delta', {
-        type: 'content_block_delta', index: 0,
-        delta: { type: 'text_delta', text: result.text },
-      })
-      send('content_block_stop', { type: 'content_block_stop', index: 0 })
       send('message_delta', {
         type: 'message_delta',
         delta: { stop_reason: stopReason, stop_sequence: null },
@@ -285,7 +337,7 @@ export function servingRoutes(db: Db, broker: Broker): Router {
       type: 'message',
       role: 'assistant',
       model: modelHash ?? 'default',
-      content: [{ type: 'text', text: result.text }],
+      content,
       stop_reason: stopReason,
       stop_sequence: null,
       usage,

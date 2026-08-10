@@ -175,6 +175,29 @@ import Testing
         #expect(out.calls.isEmpty)
     }
 
+    @Test("finds a complete call nested inside an unterminated one")
+    func nestedInsideUnterminated() {
+        // Observed from a 32B under a forced tool choice: it restated the whole
+        // call inside its own arguments and stopped before closing the outer
+        // object. The inner call is exactly what was asked for.
+        let out = dialect("generic-json").parseCalls(
+            from: #"{"name": "get_weather", "arguments": {"name": "get_weather", "arguments": {"city": "Paris"}}"#)
+        #expect(out.calls.count == 1)
+        #expect(out.calls[0].name == "get_weather")
+    }
+
+    @Test("strips the scaffolding a model echoes back")
+    func stripsScaffolding() {
+        // Observed alongside a correct call: the model echoed an empty tools
+        // block and the opening marker, which made a clean reply look like a
+        // leak of the plumbing.
+        let out = dialect("hermes-qwen").parseCalls(from:
+            "<tool_call><tools>\n\n</tools>"
+            + #"<tool_call>{"name": "Read", "arguments": {"p": "x"}}</tool_call>"#)
+        #expect(out.calls.count == 1)
+        #expect(out.text.isEmpty)
+    }
+
     @Test("dialects can be replaced without rebuilding")
     func dialectsAreData() throws {
         // The point of the file: a fleet adopting a new model family should not

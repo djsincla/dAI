@@ -52,7 +52,12 @@ export class Broker {
 
   constructor(
     private readonly pollTimeoutMs = 25_000,
-    private readonly requestTimeoutMs = 120_000,
+    // Long enough for a large model to read a large prompt. A 32B reads at
+    // roughly 64 tokens a second here, so a 32k window is minutes of prompt
+    // processing before a single token is generated. Configurable because that
+    // figure is a property of the hardware, not of this code.
+    private readonly requestTimeoutMs =
+      Number(process.env.DAI_REQUEST_TIMEOUT_MS ?? 600_000),
   ) {}
 
   get inFlightCounts(): Map<string, number> {

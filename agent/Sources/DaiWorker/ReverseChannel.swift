@@ -143,14 +143,17 @@ public actor ReverseChannel {
             // can read inside the budget produces the same failure either way,
             // but one takes two minutes to say so and gives the caller nothing
             // to act on.
-            if let limit = await gpu.contextLength {
+            if MLXRuntime.adaptiveContextEnabled, let limit = await gpu.contextLength {
                 let approximate = approximatePromptTokens(dispatch.body)
                 if approximate > limit {
                     log("refusing ~\(approximate) prompt tokens; this node can read \(limit)")
                     try await controlPlane.reportDispatch(
                         id: dispatch.id, text: nil,
-                        error: "prompt is about \(approximate) tokens and this node can "
-                             + "process \(limit) within the answer budget")
+                        // Phrased so the control plane can recognise it: this
+                        // is the caller's request being too large, not the node
+                        // failing, and the two need different status codes.
+                        error: "prompt is too long: about \(approximate) tokens, and this "
+                             + "node can process \(limit) within the answer budget")
                     return
                 }
             }
@@ -168,7 +171,8 @@ public actor ReverseChannel {
                 prompt: promptFrom(dispatch.body),
                 maxTokens: min(requested, maxTokens),
                 tools: dispatch.body["tools"]?.arrayValue,
-                messages: chatFrom(dispatch.body, dialect: await gpu.toolDialect))
+                messages: chatFrom(dispatch.body, dialect: await gpu.toolDialect),
+                forceTool: forcedTool(dispatch.body))
             let elapsed = Date().timeIntervalSince(started)
             // The prompt rate is logged because it is what sizes the advertised
             // window, and a window nobody can explain is one nobody trusts.
@@ -197,6 +201,13 @@ public actor ReverseChannel {
             try? await controlPlane.reportDispatch(
                 id: dispatch.id, text: nil, error: String(describing: error))
         }
+    }
+
+    /// The tool the caller insisted on, if it named one.
+    private func forcedTool(_ body: JSONValue) -> String? {
+        guard let choice = body["tool_choice"] else { return nil }
+        guard choice["type"]?.stringValue == "tool" else { return nil }
+        return choice["name"]?.stringValue
     }
 
     /// A rough token count, for deciding whether to attempt a request at all.

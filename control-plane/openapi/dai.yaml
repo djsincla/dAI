@@ -390,6 +390,57 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
 
+  /v1/messages/count_tokens:
+    post:
+      tags: [serving]
+      summary: How many tokens a request would cost
+      description: |
+        Counted by a node's own tokeniser and chat template rather than
+        estimated centrally. Tools are included, since their schemas are
+        rendered into the prompt and are frequently the larger half of it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, messages]
+              properties:
+                model: { type: string }
+                system: {}
+                tools: { type: array, items: { type: object, additionalProperties: true } }
+                messages:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required: [role, content]
+                    properties:
+                      role: { type: string }
+                      content: {}
+      responses:
+        '200':
+          description: The token count
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [input_tokens]
+                properties:
+                  input_tokens: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No node is serving the requested model
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '503':
+          description: No node can serve this right now
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
   /v1/messages:
     post:
       tags: [serving]

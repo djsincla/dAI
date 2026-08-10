@@ -154,6 +154,27 @@ import Testing
         #expect(out.text.contains("Hello there."))
     }
 
+    @Test("reads a bare call from a model that ignores its own tags")
+    func bareFallback() {
+        // Qwen2.5-Coder ships a template built around <tool_call> and then
+        // emits the object without it. Before the fallback the call arrived as
+        // prose, so the client saw an assistant describing a call rather than
+        // making one.
+        let out = dialect("hermes-qwen").parseCalls(
+            from: #"{"name": "Read", "arguments": {"file_path": "x", "limit": 24}}"#)
+        #expect(out.calls.count == 1)
+        #expect(out.calls[0].name == "Read")
+    }
+
+    @Test("the fallback still refuses to invent a call")
+    func fallbackDoesNotInvent() {
+        // The fallback must not become a licence to guess: prose describing a
+        // tool is still prose.
+        let out = dialect("hermes-qwen").parseCalls(
+            from: "You should call the Read tool with a file_path of x.")
+        #expect(out.calls.isEmpty)
+    }
+
     @Test("dialects can be replaced without rebuilding")
     func dialectsAreData() throws {
         // The point of the file: a fleet adopting a new model family should not

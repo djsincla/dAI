@@ -59,9 +59,15 @@ export function servingRoutes(db: Db, broker: Broker): Router {
 
     const models = new Map<string, { context: number; resident: boolean }>()
     for (const row of rows as any[]) {
-      // A node that is not holding the reverse channel open cannot be routed
-      // to, so its models are not on offer however recently it spoke.
-      if (!broker.isConnected(row.node_id)) continue
+      // Recent heartbeat, not currently parked on the channel.
+      //
+      // These are different facts and conflating them broke the listing in the
+      // other direction: a node reading a large prompt is not parked for
+      // minutes at a time, so the model it was actively serving vanished from
+      // the catalogue and the request was answered "no node is serving that,
+      // available: none". Heartbeat says the node exists and holds the model;
+      // being parked says it is free this instant, which is a routing
+      // question rather than a catalogue one.
       const seen = models.get(row.name)
       models.set(row.name, {
         context: Math.max(seen?.context ?? 0, row.context ?? 0),
@@ -240,11 +246,22 @@ export function servingRoutes(db: Db, broker: Broker): Router {
     const choice = selectNode(connected, 'generate', modelHash)
 
     if (isRefusal(choice)) {
-      // 503 with the Anthropic error shape. This is the normal daytime answer
-      // for a fleet of machines people are using, not a fault.
+      // Busy is not the same as gone, and saying the wrong one sends people
+      // looking for a crash. A node reading a large prompt is not parked on the
+      // channel for minutes at a time - 19,243 tokens measured at 377 seconds -
+      // so it is heartbeating, healthy, and unavailable, which read as
+      // "no active nodes are connected" and looked exactly like a dead fleet.
+      const busy = connected.length === 0 && candidates.length > 0
       res.status(503).json({
         type: 'error',
-        error: { type: 'overloaded_error', message: choice.detail },
+        error: {
+          type: 'overloaded_error',
+          message: busy
+            ? `every node is busy: ${candidates.length} healthy, `
+              + 'all mid-request. A large prompt occupies a node for the whole '
+              + 'time it takes to read it.'
+            : choice.detail,
+        },
       })
       return
     }

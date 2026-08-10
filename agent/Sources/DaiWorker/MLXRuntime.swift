@@ -14,6 +14,8 @@ import MLXLMCommon
 public actor MLXRuntime {
     private let modelId: String
     private var container: ModelContainer?
+    /// Kept across requests so a conversation is not re-read every turn.
+    private let promptCache = PromptCache()
 
     public init(modelId: String) { self.modelId = modelId }
 
@@ -82,6 +84,7 @@ public actor MLXRuntime {
 
     public func unload() -> TimeInterval {
         let t0 = Date()
+        promptCache.clear()
         container = nil
         // Releasing the container is not enough on its own: MLX keeps a buffer
         // cache that would otherwise stay resident on a machine whose owner has
@@ -121,6 +124,8 @@ public actor MLXRuntime {
         /// application and so understates the wait by two orders of magnitude.
         public var promptSeconds: Double = 0
         public var generateSeconds: Double = 0
+        /// Prompt tokens that did not have to be read again.
+        public var reusedTokens: Int = 0
     }
 
     public func generate(prompt: String, maxTokens: Int) async throws -> String {
@@ -181,6 +186,7 @@ public actor MLXRuntime {
         // across a concurrency boundary, and both of these are built above.
         let conversation = built
         let prefill = opening
+        let cache = promptCache
 
         // Converted inside, because [[String: Any]] is not Sendable and cannot
         // cross into the closure.
@@ -192,14 +198,26 @@ public actor MLXRuntime {
             // format - hand-writing Llama's would be guessing at something the
             // model already ships.
             let specs = tools?.compactMap { $0.anyValue as? [String: Any] }
-            let input = try await context.processor.prepare(
+            let full = try await context.processor.prepare(
                 input: .init(messages: conversation, tools: specs))
+
+            // Reuse whatever of this prompt has already been read. The saving
+            // is the whole prefix a client resends every turn, which for an
+            // agentic conversation is nearly all of it.
+            let allTokens = full.text.tokens.asArray(Int.self)
+            let parameters = GenerateParameters(maxTokens: maxTokens, temperature: 0)
+            let plan = cache.plan(for: allTokens, model: context.model,
+                                  parameters: parameters)
+            let input = plan.reused > 0
+                ? LMInput(text: .init(tokens: MLXArray(plan.toProcess)))
+                : full
+
             // Greedy. Determinism matters for batch work, where the same item
             // dispatched to a different node after a requeue should not produce
             // a different answer.
             let stream = try MLXLMCommon.generate(
-                input: input,
-                parameters: GenerateParameters(maxTokens: maxTokens, temperature: 0),
+                input: input, cache: plan.cache,
+                parameters: parameters,
                 context: context)
 
             // The prefill is prepended to whatever the model produces, so the
@@ -217,7 +235,12 @@ public actor MLXRuntime {
                     // Reported by MLX at the end of the stream rather than
                     // estimated from the text, so the numbers are the model's
                     // own rather than a guess about its tokeniser.
-                    promptTokens = info.promptTokenCount
+                    // MLX counts what it processed, which with a warm cache is
+                    // only the new tokens: a 4,233 token prompt reported as 6.
+                    // The caller is tracking how full its context is, so it
+                    // needs the size of the prompt it sent, not the size of the
+                    // work this happened to avoid.
+                    promptTokens = info.promptTokenCount + plan.reused
                     completionTokens = info.generationTokenCount
                     promptSeconds = info.promptTime
                     generateSeconds = info.generateTime
@@ -237,13 +260,14 @@ public actor MLXRuntime {
                 return Completion(text: text, promptTokens: promptTokens,
                                   completionTokens: completionTokens,
                                   promptSeconds: promptSeconds,
-                                  generateSeconds: generateSeconds)
+                                  generateSeconds: generateSeconds,
+                                  reusedTokens: plan.reused)
             }
             let parsed = dialect.parseCalls(from: text)
             return Completion(text: parsed.text, promptTokens: promptTokens,
                               completionTokens: completionTokens,
                               toolCalls: parsed.calls, promptSeconds: promptSeconds,
-                              generateSeconds: generateSeconds)
+                              generateSeconds: generateSeconds, reusedTokens: plan.reused)
         }
     }
 

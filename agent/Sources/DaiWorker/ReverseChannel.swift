@@ -186,8 +186,13 @@ public actor ReverseChannel {
             let elapsed = Date().timeIntervalSince(started)
             // The prompt rate is logged because it is what sizes the advertised
             // window, and a window nobody can explain is one nobody trusts.
-            log(String(format: "prompt %d tokens in %.1fs wall; window now %@",
+            log(String(format: "prompt %d tokens in %.1fs wall%@; window %@",
                        out.promptTokens, elapsed,
+                       out.reusedTokens > 0
+                         ? String(format: ", %d of them reused (%.0f%% cached)",
+                                  out.reusedTokens,
+                                  Double(out.reusedTokens) / Double(max(out.promptTokens, 1)) * 100)
+                         : "",
                        (await gpu.contextLength).map(String.init) ?? "unknown"))
             log(String(format: "answered in %.2fs (%d prompt, %d generated%@)",
                        elapsed, out.promptTokens, out.completionTokens,

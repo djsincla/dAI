@@ -1,23 +1,30 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import YAML from 'yaml'
-import { describe, expect, it } from 'vitest'
-import { appFor, freshDb } from './helpers.js'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { agentRoutes } from '../src/routes/agent.js'
+import { adminRoutes } from '../src/routes/admin.js'
+import { compatRoutes, servingRoutes } from '../src/routes/serving.js'
+import { Broker } from '../src/lib/broker.js'
+import { Ca, loadOrCreateCa } from '../src/lib/ca.js'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 
 /**
  * Every route the server answers must be described by the document that
  * describes the server.
  *
- * This exists because a route was added, worked when called directly, and
- * 404'd in production: the agent surface validates against the OpenAPI
- * document, so a path missing from it is unreachable however correct the
- * handler is. The agent read that 404 as "no, do not cancel" and kept
- * generating - the failure surfaced minutes away from its cause, as a node that
- * would not stop.
+ * This exists because a route was added, worked when called directly, and was
+ * unreachable in production: the agent surface validates against the OpenAPI
+ * document, so a path missing from it answers 404 however correct the handler
+ * is. The node read that 404 as "no, do not cancel" and kept generating - a
+ * failure that surfaced minutes from its cause, as a machine that would not
+ * stop.
  *
- * A conformance test is the cheapest possible guard against that, and it covers
- * a whole class rather than one instance: nothing here knows what any route
- * does, only that both halves agree it exists.
+ * Nothing here knows what any route does, only that both halves agree it
+ * exists. That is the point: it covers a class rather than an instance, and it
+ * is the cheapest guard available against a whole category of silent
+ * unreachability.
  */
 describe('routes and specification agree', () => {
   const spec = YAML.parse(
@@ -25,84 +32,78 @@ describe('routes and specification agree', () => {
       paths: Record<string, Record<string, unknown>>
     }
 
-  /** Express writes `:id`; OpenAPI writes `{id}`. */
+  /**
+   * Mount points, which must match server.ts.
+   *
+   * Listed rather than discovered because Express 5 keeps a matcher function
+   * where Express 4 kept a readable regexp, so the prefix is no longer
+   * recoverable from a mounted router. A short list that must be kept honest is
+   * a better trade than an introspection trick that breaks on the next minor
+   * version - and the list is itself checked below.
+   */
+  let mounts: [string, any][] = []
+
+  /** The routers only need a db to close over; none of this calls it. */
+  const fakeDb = () => ({ query: async () => ({ rows: [] }) }) as any
+
+  let caDir: string
+
+  beforeAll(async () => {
+    // A real CA, because the constructor parses what it is given and an empty
+    // string fails before any route is registered.
+    caDir = mkdtempSync(join(tmpdir(), 'dai-conformance-'))
+    const ca = new Ca(await loadOrCreateCa(join(caDir, 'ca.crt'), join(caDir, 'ca.key')))
+    mounts = [
+      ['/agent/v1', agentRoutes(fakeDb(), new Broker(), ca)],
+      ['/admin/v1', adminRoutes(fakeDb(), ca)],
+      ['/v1', servingRoutes(fakeDb(), new Broker())],
+      ['/api', compatRoutes(fakeDb(), new Broker())],
+    ]
+  })
+
   const normalise = (path: string) =>
     path.replace(/:([A-Za-z0-9_]+)/g, '{$1}').replace(/\/$/, '') || '/'
 
-  /**
-   * Walk the router tree. Mounted routers carry their prefix in the layer's
-   * regexp rather than as a string, so the prefix is recovered from it: the
-   * alternative is maintaining a second list of mount points, which would rot
-   * in exactly the way this test exists to prevent.
-   */
-  function routesOf(app: any): { method: string; path: string }[] {
-    const found: { method: string; path: string }[] = []
-
-    const walk = (stack: any[], prefix: string) => {
-      for (const layer of stack ?? []) {
-        if (layer.route) {
-          const path = normalise(prefix + layer.route.path)
-          for (const method of Object.keys(layer.route.methods ?? {})) {
-            if (method === '_all') continue
-            found.push({ method: method.toUpperCase(), path })
-          }
-        } else if (layer.name === 'router' && layer.handle?.stack) {
-          const source: string = layer.regexp?.source ?? ''
-          const mount = source
-            .replace(/^\^\\\//, '/')
-            .replace(/\\\/\?\(\?=\\\/\|\$\)$/, '')
-            .replace(/\\\//g, '/')
-            .replace(/\(\?:\\\/\)\?\$/, '')
-            .replace(/\$$/, '')
-          walk(layer.handle.stack, prefix + (mount === '/' ? '' : mount))
+  function served(): Set<string> {
+    const out = new Set<string>()
+    for (const [prefix, router] of mounts) {
+      for (const layer of (router.stack ?? [])) {
+        if (!layer.route) continue
+        const path = normalise(prefix + layer.route.path)
+        for (const method of Object.keys(layer.route.methods ?? {})) {
+          if (method === '_all') continue
+          out.add(`${method.toUpperCase()} ${path}`)
         }
       }
     }
-
-    walk(app.router?.stack ?? app._router?.stack, '')
-    return found
+    return out
   }
 
-  /**
-   * Paths that are deliberately outside the document: the fleet UI, the
-   * document itself, and the liveness check that has to answer even when the
-   * validator cannot load.
-   */
-  const undocumented = (path: string) =>
-    path === '/' || path === '/fleet' || path === '/healthz'
-    || path === '/openapi.yaml' || path === '/docs' || path.startsWith('/ui')
-
-  it('describes every route the server answers', async () => {
-    const db = await freshDb()
-    const app = appFor(db)
-    const missing = routesOf(app)
-      .filter((r) => !undocumented(r.path))
-      .filter((r) => {
-        const entry = spec.paths[r.path]
-        return !entry || !(r.method.toLowerCase() in entry)
-      })
-    await db.end()
-
-    expect(missing, 'routes the server answers but the specification omits')
-      .toEqual([])
-  })
-
-  it('answers every route the specification describes', async () => {
-    const db = await freshDb()
-    const app = appFor(db)
-    const served = new Set(routesOf(app).map((r) => `${r.method} ${r.path}`))
-    await db.end()
-
-    // The other direction, which fails differently: a documented path nothing
-    // serves is a promise to a client that will 404 at the worst moment.
-    const orphaned: string[] = []
+  const documented = () => {
+    const out = new Set<string>()
     for (const [path, methods] of Object.entries(spec.paths)) {
       for (const method of Object.keys(methods)) {
         if (!['get', 'post', 'put', 'patch', 'delete'].includes(method)) continue
-        const key = `${method.toUpperCase()} ${path}`
-        if (!served.has(key)) orphaned.push(key)
+        out.add(`${method.toUpperCase()} ${path}`)
       }
     }
-    expect(orphaned, 'described in the specification but not served').toEqual([])
+    return out
+  }
+
+  it('describes every route the server answers', () => {
+    const missing = [...served()].filter((r) => !documented().has(r)).sort()
+    expect(missing, 'served but absent from the specification, so unreachable '
+      + 'on any surface the validator guards').toEqual([])
+  })
+
+  it('answers every route the specification describes', () => {
+    // The other direction fails differently: a documented path nothing serves
+    // is a promise to a client that 404s at the worst moment.
+    const orphaned = [...documented()].filter((r) => !served().has(r)).sort()
+    expect(orphaned, 'described but not served').toEqual([])
+  })
+
+  afterAll(() => {
+    if (caDir) rmSync(caDir, { recursive: true, force: true })
   })
 })

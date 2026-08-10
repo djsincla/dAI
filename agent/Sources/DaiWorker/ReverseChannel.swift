@@ -20,7 +20,7 @@ import Foundation
 /// honest about what it can serve and to release the model the moment its
 /// presence state stops permitting GPU work.
 public actor ReverseChannel {
-    private let controlPlane: ControlPlane
+    private let controlPlane: any ControlPlaneClient
     private let gpu: MLXRuntime?
     private let source: SignalSource
     private let monitor: PresenceMonitor
@@ -41,7 +41,7 @@ public actor ReverseChannel {
     /// Set from the control plane's view of this node, not assumed.
     private var isCluster = false
 
-    public init(controlPlane: ControlPlane, gpu: MLXRuntime?,
+    public init(controlPlane: any ControlPlaneClient, gpu: MLXRuntime?,
                 source: SignalSource = MacSignalSource(),
                 status: StatusPublisher = StatusPublisher(),
                 promoteAfter: TimeInterval = idlePromoteSeconds) {

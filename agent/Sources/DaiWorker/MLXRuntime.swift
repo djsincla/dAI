@@ -116,6 +116,11 @@ public actor MLXRuntime {
         /// unqualified name here would silently mean whichever the compiler
         /// preferred.
         public var toolCalls: [DaiAgent.ToolCall] = []
+        /// Time spent reading the prompt, as MLX reports it. Kept for the log
+        /// rather than for sizing, since it excludes tokenisation and template
+        /// application and so understates the wait by two orders of magnitude.
+        public var promptSeconds: Double = 0
+        public var generateSeconds: Double = 0
     }
 
     public func generate(prompt: String, maxTokens: Int) async throws -> String {
@@ -125,6 +130,30 @@ public actor MLXRuntime {
     public func complete(prompt: String, maxTokens: Int,
                          tools: [DaiAgent.JSONValue]? = nil,
                          messages: [[String: String]]? = nil) async throws -> Completion {
+        let started = Date()
+        let out = try await generateCompletion(prompt: prompt, maxTokens: maxTokens,
+                                               tools: tools, messages: messages)
+        let elapsed = Date().timeIntervalSince(started)
+
+        // Measured here rather than taken from MLX's promptTime, which reports
+        // 0.36s for a request that took thirty seconds: it times the final
+        // prefill step and not the tokenisation and template application around
+        // it. The caller waits for the whole thing, so the whole thing is what
+        // sizes the window.
+        //
+        // Generation is subtracted at the rate this model actually achieved, so
+        // a long answer is not charged to the prompt.
+        let generation = out.completionTokens > 0 && generationTokensPerSecond > 0
+            ? Double(out.completionTokens) / generationTokensPerSecond
+            : 0
+        recordGenerationRate(tokens: out.completionTokens, seconds: out.generateSeconds)
+        recordPromptRate(tokens: out.promptTokens, seconds: max(0.05, elapsed - generation))
+        return out
+    }
+
+    private func generateCompletion(prompt: String, maxTokens: Int,
+                                    tools: [DaiAgent.JSONValue]? = nil,
+                                    messages: [[String: String]]? = nil) async throws -> Completion {
         guard let container else { throw Failure.notLoaded }
         let dialect = toolDialect
         let conversation = messages ?? [["role": "user", "content": prompt]]
@@ -151,6 +180,8 @@ public actor MLXRuntime {
             var text = ""
             var promptTokens = 0
             var completionTokens = 0
+            var promptSeconds = 0.0
+            var generateSeconds = 0.0
             for await item in stream {
                 switch item {
                 case let .chunk(chunk):
@@ -161,18 +192,23 @@ public actor MLXRuntime {
                     // own rather than a guess about its tokeniser.
                     promptTokens = info.promptTokenCount
                     completionTokens = info.generationTokenCount
+                    promptSeconds = info.promptTime
+                    generateSeconds = info.generateTime
                 default:
                     break
                 }
             }
             guard let dialect, hasTools else {
                 return Completion(text: text, promptTokens: promptTokens,
-                                  completionTokens: completionTokens)
+                                  completionTokens: completionTokens,
+                                  promptSeconds: promptSeconds,
+                                  generateSeconds: generateSeconds)
             }
             let parsed = dialect.parseCalls(from: text)
             return Completion(text: parsed.text, promptTokens: promptTokens,
                               completionTokens: completionTokens,
-                              toolCalls: parsed.calls)
+                              toolCalls: parsed.calls, promptSeconds: promptSeconds,
+                              generateSeconds: generateSeconds)
         }
     }
 
@@ -215,9 +251,84 @@ public actor MLXRuntime {
     /// directory records where it stops being coherent.
     public var contextLength: Int? {
         guard let architectural = architecturalContextLength else { return nil }
-        guard let cap = ProcessInfo.processInfo.environment["DAI_USABLE_CONTEXT"],
-              let usable = Int(cap), usable > 0 else { return architectural }
-        return min(architectural, usable)
+        var limit = architectural
+        if let cap = ProcessInfo.processInfo.environment["DAI_USABLE_CONTEXT"],
+           let usable = Int(cap), usable > 0 {
+            limit = min(limit, usable)
+        }
+        if let measured = observedContextLimit {
+            limit = min(limit, measured)
+        }
+        return limit
+    }
+
+    /// Prompt tokens this node can actually process inside the answer budget.
+    ///
+    /// Measured rather than configured, because it is a property of these
+    /// weights on this hardware and nothing on disk records it. A 32B on an M2
+    /// Max processes prompt at roughly 105 tokens/sec, so its 32k architectural
+    /// window is about five minutes of prompt processing: the request times out
+    /// long before the model runs out of context. Advertising 32768 there is
+    /// not a small overstatement, it is a number no caller can reach.
+    ///
+    /// Nil until something has actually been generated. A guess before the
+    /// first measurement would be the same mistake in a different direction.
+    public var observedContextLimit: Int? {
+        guard promptTokensPerSecond > 0 else { return nil }
+        // Rounded down to something legible, and floored: a window too small to
+        // hold a system prompt is not worth advertising at all.
+        // Halved, because the rate keeps falling as the prompt grows and the
+        // measurement always comes from a shorter one than the limit it is
+        // being used to set.
+        let affordable = Int(promptTokensPerSecond * Self.answerBudgetSeconds * 0.5)
+        return max(2048, (affordable / 1024) * 1024)
+    }
+
+    /// How long an answer may take before the control plane gives up on it.
+    ///
+    /// Deliberately less than the dispatch timeout: the budget has to cover
+    /// generating the reply as well as reading the prompt, and a window sized
+    /// to the whole timeout leaves nothing for the answer.
+    static let answerBudgetSeconds: Double = {
+        let timeout = ProcessInfo.processInfo.environment["DAI_ANSWER_BUDGET_SECONDS"]
+            .flatMap(Double.init) ?? 90
+        return max(10, timeout)
+    }()
+
+    /// The slowest rate seen, not the average.
+    ///
+    /// Prompt processing is not linear in length: attention cost grows with it,
+    /// and this model measured 155 tokens/sec on an 1.8k prompt against 104 on
+    /// a 8.9k one. Averaging those, or taking the recent one, extrapolates a
+    /// short prompt into a window the node cannot actually read - which is the
+    /// same overstatement as advertising the architectural maximum, arrived at
+    /// by arithmetic instead of by not looking.
+    ///
+    /// Taking the worst observed rate errs toward offering less than the node
+    /// can do, and corrects upward only in the sense that longer prompts
+    /// produce more honest samples as they arrive.
+    private var promptTokensPerSecond: Double = 0
+
+    /// Samples below this are too short to say anything about a long prompt.
+    private static let minimumSampleTokens = 256
+
+    /// Tracked only to subtract generation from the measured wall time, so a
+    /// long answer is not mistaken for a slow prompt.
+    private var generationTokensPerSecond: Double = 0
+
+    private func recordGenerationRate(tokens: Int, seconds: Double) {
+        guard tokens > 4, seconds > 0.05 else { return }
+        let sample = Double(tokens) / seconds
+        generationTokensPerSecond = generationTokensPerSecond == 0
+            ? sample : generationTokensPerSecond * 0.7 + sample * 0.3
+    }
+
+    private func recordPromptRate(tokens: Int, seconds: Double) {
+        guard tokens >= Self.minimumSampleTokens, seconds > 0.05 else { return }
+        let sample = Double(tokens) / seconds
+        promptTokensPerSecond = promptTokensPerSecond == 0
+            ? sample
+            : min(promptTokensPerSecond, sample)
     }
 
     private var architecturalContextLength: Int? {

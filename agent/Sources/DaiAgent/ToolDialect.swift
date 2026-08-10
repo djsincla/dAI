@@ -185,7 +185,7 @@ public extension ToolDialect {
             }
         }
 
-        let parsed: ToolParse
+        var parsed: ToolParse
         switch parse.style {
         case .taggedJSON:
             parsed = parseTagged(output)
@@ -194,6 +194,20 @@ public extension ToolDialect {
         case .bareJSON:
             parsed = parseBare(output)
         }
+
+        // Models do not always follow their own template's convention.
+        // Qwen2.5-Coder ships a template built around <tool_call> tags and then
+        // emits the bare object without them, so the call arrived as prose and
+        // the client saw an assistant describing a call rather than making one.
+        //
+        // Falling back to the bare form costs nothing in safety: it still only
+        // accepts a well-formed object carrying the declared name field, so
+        // prose that merely mentions a tool is still prose.
+        if parsed.calls.isEmpty, parse.style != .bareJSON {
+            let bare = parseBare(output)
+            if !bare.calls.isEmpty { parsed = bare }
+        }
+
         return ToolParse(text: Self.stripControlTokens(parsed.text), calls: parsed.calls)
     }
 

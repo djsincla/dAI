@@ -139,6 +139,21 @@ public actor ReverseChannel {
 
         let started = Date()
         do {
+            // Refuse early rather than time out. A prompt beyond what this node
+            // can read inside the budget produces the same failure either way,
+            // but one takes two minutes to say so and gives the caller nothing
+            // to act on.
+            if let limit = await gpu.contextLength {
+                let approximate = approximatePromptTokens(dispatch.body)
+                if approximate > limit {
+                    log("refusing ~\(approximate) prompt tokens; this node can read \(limit)")
+                    try await controlPlane.reportDispatch(
+                        id: dispatch.id, text: nil,
+                        error: "prompt is about \(approximate) tokens and this node can "
+                             + "process \(limit) within the answer budget")
+                    return
+                }
+            }
             if await !gpu.isLoaded {
                 let seconds = try await gpu.load()
                 log(String(format: "loaded model in %.2fs", seconds))
@@ -155,6 +170,11 @@ public actor ReverseChannel {
                 tools: dispatch.body["tools"]?.arrayValue,
                 messages: chatFrom(dispatch.body, dialect: await gpu.toolDialect))
             let elapsed = Date().timeIntervalSince(started)
+            // The prompt rate is logged because it is what sizes the advertised
+            // window, and a window nobody can explain is one nobody trusts.
+            log(String(format: "prompt %d tokens in %.1fs wall; window now %@",
+                       out.promptTokens, elapsed,
+                       (await gpu.contextLength).map(String.init) ?? "unknown"))
             log(String(format: "answered in %.2fs (%d prompt, %d generated%@)",
                        elapsed, out.promptTokens, out.completionTokens,
                        out.toolCalls.isEmpty ? ""
@@ -177,6 +197,23 @@ public actor ReverseChannel {
             try? await controlPlane.reportDispatch(
                 id: dispatch.id, text: nil, error: String(describing: error))
         }
+    }
+
+    /// A rough token count, for deciding whether to attempt a request at all.
+    ///
+    /// Four characters per token is crude and known to be crude; it is used
+    /// only to catch prompts far beyond what this node can read, where being
+    /// wrong by a fifth changes nothing. The exact count comes from the
+    /// tokeniser afterwards.
+    private func approximatePromptTokens(_ body: JSONValue) -> Int {
+        var characters = 0
+        for message in body["messages"]?.arrayValue ?? [] {
+            characters += (textOf(message["content"]) ?? "").count
+        }
+        for tool in body["tools"]?.arrayValue ?? [] {
+            characters += String(describing: tool.anyValue).count
+        }
+        return characters / 4
     }
 
     /// Declared input schemas, keyed by tool name.

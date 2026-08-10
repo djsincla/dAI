@@ -57,7 +57,7 @@ export function servingRoutes(db: Db, broker: Broker): Router {
           AND (paused_until IS NULL OR paused_until < now())
           AND last_heartbeat > now() - interval '2 minutes'`)
 
-    const models = new Map<string, { context: number; resident: boolean }>()
+    const models = new Map<string, { context: number; resident: boolean; live: boolean }>()
     for (const row of rows as any[]) {
       // Recent heartbeat, not currently parked on the channel.
       //
@@ -72,6 +72,11 @@ export function servingRoutes(db: Db, broker: Broker): Router {
       models.set(row.name, {
         context: Math.max(seen?.context ?? 0, row.context ?? 0),
         resident: (seen?.resident ?? false) || row.resident,
+        // Whether any node holding it can answer this instant. Kept alongside
+        // residency rather than replacing it, so the catalogue can say a model
+        // exists and is momentarily unreachable - which is the truth while a
+        // node reads a long prompt.
+        live: (seen?.live ?? false) || broker.isConnected(row.node_id),
       })
     }
     return models
@@ -193,11 +198,19 @@ export function servingRoutes(db: Db, broker: Broker): Router {
       data: [...models].map(([id, m]) => ({
         id,
         object: 'model',
-        type: 'llm',
+        // A model with no context window is not a chat model. Typing everything
+        // as llm made an embedding model look like something a client could
+        // send a conversation to, and anything routing off that field would
+        // pick it.
+        type: m.context > 0 ? 'llm' : 'embeddings',
         publisher: 'dai',
         max_context_length: m.context || null,
         loaded_context_length: m.context || null,
-        state: m.resident ? 'loaded' : 'not-loaded',
+        // Reconciled with what a request would actually do. Reporting "loaded"
+        // while /v1/messages answers "no nodes connected" is two views of one
+        // fleet disagreeing, and it is exactly what makes a listing-based
+        // health check untrustworthy.
+        state: !m.live ? 'busy' : m.resident ? 'loaded' : 'not-loaded',
       })),
     })
   })

@@ -81,6 +81,15 @@
     -->
     <key>DAI_PROMOTE_SECONDS</key>
     <string>@PROMOTE@</string>
+    <!--
+      The hub base, not the directory the weights sit in: the loader appends
+      models/<repo> to whatever it is given, so naming the models directory
+      produces models/models and a config.json nothing can find.
+      DAI_MODEL_DIR is the one the agent reads; the HF variables are set for
+      any library that looks for them, and are not a substitute.
+    -->
+    <key>DAI_MODEL_DIR</key>
+    <string>@MODEL_DIR@</string>
     <key>HF_HOME</key>
     <string>@MODEL_DIR@</string>
     <key>HUGGINGFACE_HUB_CACHE</key>

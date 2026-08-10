@@ -106,6 +106,11 @@ done
 
 install -d -m 700 "$STATE_DIR" "$IDENTITY_DIR"
 install -d -m 755 "$LOG_DIR"
+
+# /Users/Shared is sticky, so the service account cannot replace a status file
+# somebody else created - and one left by a hand-run agent silently froze the
+# menu bar at whatever it last said. Removed here so the daemon owns it.
+rm -f /Users/Shared/.dai-status.json
 install -m 600 "$CA" "$IDENTITY_DIR/server-ca.crt"
 
 # Models are copied into the daemon's own state rather than referenced where
@@ -174,7 +179,7 @@ sed -e "s|@BINARY@|$BINARY_DIR/dai-agent|g" \
     -e "s|@STATE_DIR@|$STATE_DIR|g" \
     -e "s|@LOG_DIR@|$LOG_DIR|g" \
     -e "s|@USER@|$SVC_USER|g" \
-    -e "s|@MODEL_DIR@|$MODEL_DIR|g" \
+    -e "s|@MODEL_DIR@|$STATE_DIR|g" \
     -e "s|@PROMOTE@|$PROMOTE|g" \
     "$HERE/com.dai.agent.plist.in" > "$PLIST"
 chown root:wheel "$PLIST"

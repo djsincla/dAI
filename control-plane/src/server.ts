@@ -71,7 +71,12 @@ export function createApp(db: Db, surface: Surface = 'both'): Express {
   // Registered ahead of the validator: the UI is not part of the API contract,
   // and the validator rejects paths the spec does not declare.
   if (surface !== 'agent') {
-    app.get('/', (_req, res) => { res.redirect('/ui/') })
+    // The capabilities page, served from the repository copy so it cannot
+    // drift from the code it describes.
+    // Two levels up: `here` is src/, and the page lives at the repository root
+    // so it is a project document rather than an asset of this service.
+    app.get('/', (_req, res) => { res.sendFile(join(here, '..', '..', 'docs', 'index.html')) })
+    app.get('/fleet', (_req, res) => { res.redirect('/ui/') })
     app.use('/ui', express.static(join(here, '..', 'ui')))
   }
 
@@ -86,7 +91,8 @@ export function createApp(db: Db, surface: Surface = 'both'): Express {
   // every real request failed while curl worked. The API this imitates
   // tolerates unknown parameters, so imitating it means tolerating them too.
   const isServing = (p: string) => p.startsWith('/v1/') || p.startsWith('/api/')
-  const alwaysSkip = (p: string) => p === '/healthz' || p === '/openapi.yaml'
+  const alwaysSkip = (p: string) => p === '/' || p === '/fleet'
+    || p === '/healthz' || p === '/openapi.yaml'
     || p === '/docs' || p.startsWith('/ui')
 
   // Drop query parameters on the serving surface, and say what was dropped.

@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dAI - distributed AI on harvested Apple Silicon</title>
+<!--
+  Kept in the repository rather than written once, because it is a claims
+  document: every figure here is a measurement from the spike or from a run
+  against real hardware, and a page that drifts from the code becomes a list of
+  things that used to be true. Unproven things are marked as unproven in the
+  same table as the proven ones, since a capabilities page that only lists
+  successes is advertising.
+-->
+<style>
+  :root {
+    --bg: #0e0e14; --panel: #16161f; --line: #262633;
+    --ink: #e8e8f0; --dim: #9a9ab0; --accent: #7aa2f7;
+    --ok: #7ee787; --warn: #e3b341; --no: #f7768e;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #fbfbfd; --panel: #fff; --line: #e2e2ea;
+      --ink: #1a1a24; --dim: #61617a; --accent: #3355cc;
+      --ok: #1a7f37; --warn: #9a6700; --no: #cf222e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 940px; margin: 0 auto; padding: 0 24px 80px; }
+  header { padding: 72px 0 40px; border-bottom: 1px solid var(--line); }
+  h1 { font-size: 40px; margin: 0 0 8px; letter-spacing: -0.02em; }
+  .tag { color: var(--accent); font-weight: 600; }
+  .lede { font-size: 19px; color: var(--dim); max-width: 640px; margin: 16px 0 0; }
+  h2 {
+    font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--dim); margin: 56px 0 16px; font-weight: 600;
+  }
+  h3 { font-size: 17px; margin: 28px 0 8px; }
+  p { margin: 0 0 14px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 20px 22px; margin: 0 0 14px;
+  }
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  .scroll { overflow-x: auto; }
+  th {
+    text-align: left; font-weight: 600; color: var(--dim); font-size: 12px;
+    text-transform: uppercase; letter-spacing: 0.05em;
+    padding: 0 12px 8px 0; border-bottom: 1px solid var(--line); white-space: nowrap;
+  }
+  td { padding: 9px 12px 9px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  code {
+    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    padding: 1px 5px; border-radius: 4px;
+  }
+  pre {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 14px 16px; overflow-x: auto; font-size: 13px; line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; }
+  .num { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .no { color: var(--no); }
+  .pill {
+    display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 8px;
+    border-radius: 20px; border: 1px solid currentColor; white-space: nowrap;
+  }
+  .stat { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; display: block; }
+  .stat + span { color: var(--dim); font-size: 13px; }
+  .note {
+    border-left: 3px solid var(--warn); padding: 2px 0 2px 16px;
+    color: var(--dim); margin: 16px 0;
+  }
+  footer {
+    margin-top: 64px; padding-top: 24px; border-top: 1px solid var(--line);
+    color: var(--dim); font-size: 13px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1><span class="tag">dAI</span> - distributed AI on harvested Apple Silicon</h1>
+  <p class="lede">
+    Studio Macs sit idle sixteen hours a day. This schedules that capacity for AI
+    work without anyone noticing, and without a byte leaving the building.
+  </p>
+</header>
+
+<h2>The argument</h2>
+<div class="panel">
+  <p>
+    <b>Sovereignty and sunk cost, not price-performance.</b> Per token, harvested
+    Macs lose to both cloud APIs and rented GPUs, and that argument is
+    unwinnable. The two that hold: the marginal cost is electricity on hardware
+    already bought, and the data never leaves the premises.
+  </p>
+  <p style="margin:0">
+    The model is the second-GPU render farm, with one difference that decides the
+    whole design. That worked because of <i>physical</i> isolation - a card the
+    artist's session could not touch. Apple Silicon shares one memory pool and
+    one bandwidth budget, so isolation here is <b>policy, not hardware</b>. It is
+    a weaker guarantee, and it means the social problem is the real one: one
+    person noticing their machine got slow ends the programme.
+  </p>
+</div>
+
+<h2>Two tiers, because they cannot share nodes</h2>
+<div class="scroll"><table>
+  <tr><th></th><th>Harvest</th><th>Cluster</th></tr>
+  <tr><td>Hardware</td><td>Staff workstations</td><td>Dedicated boxes</td></tr>
+  <tr><td>Preemptible</td><td>Yes, instantly</td><td>Never</td></tr>
+  <tr><td>Scheduling</td><td>Independent units</td><td>Gang, topology-aware</td></tr>
+  <tr><td>Workload</td><td>Batch inference, embeddings, evals</td><td>Interactive serving, models larger than one box</td></tr>
+  <tr><td>Capacity</td><td>Swells overnight</td><td>Flat and reliable</td></tr>
+</table></div>
+<p class="note">
+  Interactive serving on harvested nodes is the most common trap and is refused
+  by design: a conversation needs a model still resident a minute from now, which
+  a preemptible tier cannot promise.
+</p>
+
+<h2>What the machine will and will not do</h2>
+<p>
+  Measured, not chosen. Every configuration tested was perceptible to a user
+  present at the machine, so GPU work is confined to states where nobody is
+  there. The Neural Engine is separate silicon and measured indistinguishable
+  from no load, which is why three of the five states permit it.
+</p>
+<div class="scroll"><table>
+  <tr><th>State</th><th>GPU</th><th>ANE</th><th>QoS</th><th>Memory ceiling</th><th>Max completion</th></tr>
+  <tr><td>ACTIVE <span class="dim">- at the keyboard</span></td><td class="no">no</td><td class="ok">yes</td><td>background</td><td>0%</td><td>256</td></tr>
+  <tr><td>PASSIVE <span class="dim">- present, not typing</span></td><td class="no">no</td><td class="ok">yes</td><td>background</td><td>15%</td><td>256</td></tr>
+  <tr><td>IDLE</td><td class="no">no</td><td class="ok">yes</td><td>background</td><td>35%</td><td>256</td></tr>
+  <tr><td>LOCKED</td><td class="ok">yes</td><td class="ok">yes</td><td>standard</td><td>70%</td><td>2048</td></tr>
+  <tr><td>ABSENT <span class="dim">- logged out</span></td><td class="ok">yes</td><td class="ok">yes</td><td>standard</td><td>85%</td><td>4096</td></tr>
+</table></div>
+<p class="note">
+  Memory ceiling is a fraction of Metal's own recommended working set, which is
+  already about 81% of unified memory - never of installed RAM. It governs what
+  fits, not politeness: a 32 GB load disturbed a viewport <i>less</i> than an
+  8 GB one at identical duty cycle.
+</p>
+
+<h2>Measured</h2>
+<div class="grid">
+  <div class="panel"><span class="stat">0</span><span>GPU units run while a user was present, across 1,970 items</span></div>
+  <div class="panel"><span class="stat">168/s</span><span>ANE items on a machine in active use</span></div>
+  <div class="panel"><span class="stat">39.5 tok/s</span><span>Llama-3.2-3B-4bit generation</span></div>
+  <div class="panel"><span class="stat">3.8s</span><span>model load; 40 ms to release it</span></div>
+</div>
+<div class="panel">
+  <table>
+    <tr><td>GPU reachable from a daemon with the screen locked</td><td class="ok">yes, 2/2 probes</td></tr>
+    <tr><td>Background QoS cost on sustained GPU work</td><td class="num">2.4x</td></tr>
+    <tr><td>Background QoS cost on bursty ANE work</td><td class="num">26x</td></tr>
+    <tr><td>Interactive p99 frame time under a 25 GB background load</td><td class="num">+82%</td></tr>
+    <tr><td>Model split across two machines over 10GbE</td><td class="num">3.7 tok/s</td></tr>
+  </table>
+</div>
+
+<h2>How a node is trusted</h2>
+<div class="grid">
+  <div class="panel">
+    <h3 style="margin-top:0">Identity in hardware</h3>
+    <p style="margin:0">
+      The node's key is generated inside the Secure Enclave and never exists
+      outside it. What is on disk is 284 bytes sealed to that machine: copied
+      elsewhere it is inert, so a certificate taken from a stolen laptop names a
+      key the thief cannot use.
+    </p>
+  </div>
+  <div class="panel">
+    <h3 style="margin-top:0">Signed, not asserted</h3>
+    <p style="margin:0">
+      A join token gets a machine into a queue and nothing more. An admin
+      approves it, and only then is a certificate issued - client-auth only, EC
+      P-256, short-lived, so a stolen machine stops being a fleet member on its
+      own.
+    </p>
+  </div>
+  <div class="panel">
+    <h3 style="margin-top:0">One machine, one node</h3>
+    <p style="margin:0">
+      Enrollment is tied to the hardware UUID, so a reinstalled machine replaces
+      its old record instead of appearing twice and having its capacity counted
+      twice.
+    </p>
+  </div>
+  <div class="panel">
+    <h3 style="margin-top:0">Least privilege</h3>
+    <p style="margin:0">
+      The daemon runs as a service account with no shell and no password, not as
+      root. It needs no entitlement, which is a consequence of reaching the
+      Enclave through CryptoKit rather than the keychain.
+    </p>
+  </div>
+</div>
+
+<h2>The person whose machine it is</h2>
+<div class="panel">
+  <p>
+    Isolation here is policy, so the only hard guarantee a machine's owner has is
+    that the off switch works. It is a file, not a request: it works with the
+    control plane unreachable and needs no privilege, because requiring
+    <code>sudo</code> to stop a background process on your own machine is the
+    same as having no button.
+  </p>
+  <p style="margin:0">
+    <b>No administrator can lift it.</b> The fleet view shows "paused by owner"
+    and offers no control, because a button that must either lie or fail is worse
+    than a plain statement that this is not yours to lift. A menu bar app shows
+    what is running, why, and what the machine has contributed.
+  </p>
+</div>
+
+<h2>Interfaces</h2>
+<div class="scroll"><table>
+  <tr><th>Surface</th><th>Shape</th><th>State</th></tr>
+  <tr><td><code>POST /admin/v1/jobs</code></td><td>Batch work in, results out, paged by position</td><td class="ok">working</td></tr>
+  <tr><td><code>POST /v1/messages</code></td><td>Anthropic, streaming and not</td><td class="ok">working</td></tr>
+  <tr><td><code>POST /v1/chat/completions</code></td><td>OpenAI-compatible</td><td class="ok">working</td></tr>
+  <tr><td>Tool use</td><td><code>tool_use</code> blocks, <code>tool_result</code> loop, streamed deltas</td><td class="ok">working</td></tr>
+  <tr><td><code>GET /v1/models</code></td><td>Models and their context windows</td><td class="ok">working</td></tr>
+  <tr><td>Render work</td><td>Third work kind</td><td class="warn">scheduled, no runtime yet</td></tr>
+</table></div>
+<p>
+  The API is described by an OpenAPI document that is the source of truth for
+  three independent implementations - the server, the Swift agent, and the tests
+  - so a mismatch surfaces between them rather than in production. Tool-call
+  dialects are data, matched on a model's chat template rather than its name, so
+  adopting a new model family is an edit rather than a release.
+</p>
+<pre><code>ANTHROPIC_BASE_URL=https://control-plane:8452 \
+ANTHROPIC_AUTH_TOKEN=&lt;session&gt; \
+ANTHROPIC_MODEL=mlx-community/Llama-3.2-3B-Instruct-4bit \
+claude</code></pre>
+
+<h2>Not done, and honestly so</h2>
+<div class="scroll"><table>
+  <tr><th>Thing</th><th>State</th></tr>
+  <tr><td>Two-node fleet acceptance test: work redistributing on yield</td><td class="no">not run</td></tr>
+  <tr><td>Logged-out operation - the reason for a daemon over an agent</td><td class="no">untested</td></tr>
+  <tr><td>Notarised installer for MDM distribution</td><td class="warn">written, needs a Developer ID</td></tr>
+  <tr><td>Throughput figures from a real embedding model</td><td class="warn">synthetic stand-in</td></tr>
+  <tr><td>Model catalogue with hash verification</td><td class="no">models staged by hand</td></tr>
+  <tr><td>Cluster tier over Thunderbolt</td><td class="no">cables not yet tested</td></tr>
+  <tr><td>Multi-instance control plane</td><td class="no">single process</td></tr>
+</table></div>
+
+<footer>
+  Figures are measurements from the validation spike or from runs against real
+  hardware, not projections. Anything unverified is listed above as unverified.
+</footer>
+
+</div>
+</body>
+</html>

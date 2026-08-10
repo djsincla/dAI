@@ -155,6 +155,7 @@
   <div class="panel"><span class="stat">168/s</span><span>ANE items on a machine in active use</span></div>
   <div class="panel"><span class="stat">39.5 tok/s</span><span>Llama-3.2-3B-4bit generation</span></div>
   <div class="panel"><span class="stat">3.8s</span><span>model load; 40 ms to release it</span></div>
+  <div class="panel"><span class="stat">~8k</span><span>tokens before a 4-bit 3B stops being coherent, against a 131k architectural window</span></div>
 </div>
 <div class="panel">
   <table>
@@ -250,7 +251,8 @@ claude</code></pre>
   <tr><td>Logged-out operation - the reason for a daemon over an agent</td><td class="no">untested</td></tr>
   <tr><td>Notarised installer for MDM distribution</td><td class="warn">written, needs a Developer ID</td></tr>
   <tr><td>Throughput figures from a real embedding model</td><td class="warn">synthetic stand-in</td></tr>
-  <tr><td>tool_choice honoured by constrained decoding</td><td class="warn">refused with 422 when the model declines</td></tr>
+  <tr><td>tool_choice honoured by constrained decoding</td><td class="warn">refused with 400 when the model declines</td></tr>
+  <tr><td>A model large enough for agentic coding</td><td class="no">a 4-bit 3B degrades from ~8k tokens</td></tr>
   <tr><td>Model catalogue with hash verification</td><td class="no">models staged by hand</td></tr>
   <tr><td>Cluster tier over Thunderbolt</td><td class="no">cables not yet tested</td></tr>
   <tr><td>Multi-instance control plane</td><td class="no">single process</td></tr>

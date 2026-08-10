@@ -109,7 +109,17 @@ final class StatusModel: ObservableObject {
         }
         if status.pausedByFleet { return "Paused by the studio" }
         if status.permitted.isEmpty { return "Standing by" }
-        if status.activity.hasPrefix("running") { return "Working" }
+        if status.activity.hasPrefix("running") || status.activity.hasPrefix("answering") {
+            return "Working"
+        }
+        // Available is not the same as waiting.
+        //
+        // A machine offering to answer requests spends nearly all of its time
+        // idle between them - a warm request finishes in half a second - so
+        // "waiting for work" is what somebody sees while the machine is being
+        // used constantly. It describes the batch queue and says nothing about
+        // the thing they are actually doing.
+        if status.permitted.contains("serve") { return "Available" }
         return "Waiting for work"
     }
 

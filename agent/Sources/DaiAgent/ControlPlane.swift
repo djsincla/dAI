@@ -187,6 +187,7 @@ public actor ControlPlane {
     public func reportDispatch(id: String, text: String?, error: String?,
                                promptTokens: Int = 0,
                                completionTokens: Int = 0,
+                               cachedTokens: Int = 0,
                                toolCalls: [ToolCall] = []) async throws {
         var body: [String: JSONValue] = [:]
         if let text {
@@ -203,6 +204,8 @@ public actor ControlPlane {
                 // conversation is never filling up.
                 "promptTokens": .number(Double(promptTokens)),
                 "completionTokens": .number(Double(completionTokens)),
+                // Prompt tokens answered from cache rather than read again.
+                "cachedTokens": .number(Double(cachedTokens)),
             ])
         }
         if let error { body["error"] = .string(error) }

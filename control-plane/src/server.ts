@@ -125,6 +125,41 @@ export function createApp(db: Db, surface: Surface = 'both'): Express {
     ignorePaths: (p: string) => alwaysSkip(p) || (opts.serving ? !isServing(p) : isServing(p)),
   })
 
+  // Everything the serving surface returns as an error wears the shape its
+  // clients parse.
+  //
+  // Auth failures, 404s and validator rejections were leaking {error, detail},
+  // which is this project's internal shape and means nothing to an Anthropic
+  // client: it sees a body it cannot read and reports the failure as something
+  // other than what happened. Applied as a wrapper rather than at each call
+  // site so the ones nobody remembers - a middleware three layers down
+  // rejecting a request - are covered too.
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (!isServing(req.path)) return next()
+    const json = res.json.bind(res)
+    res.json = (body: any) => {
+      if (res.statusCode >= 400 && body && typeof body === 'object'
+          && !('type' in body) && ('error' in body || 'detail' in body)) {
+        return json({
+          type: 'error',
+          error: {
+            // Mapped from the status, since the internal shape carries a slug
+            // where the client expects one of a fixed set.
+            type: res.statusCode === 401 || res.statusCode === 403
+              ? 'authentication_error'
+              : res.statusCode === 404 ? 'not_found_error'
+              : res.statusCode === 429 ? 'rate_limit_error'
+              : res.statusCode >= 500 ? 'api_error'
+              : 'invalid_request_error',
+            message: body.detail ?? body.message ?? String(body.error ?? 'request failed'),
+          },
+        })
+      }
+      return json(body)
+    }
+    next()
+  })
+
   app.use(validator({ serving: true }))
   app.use(validator({ serving: false }))
 

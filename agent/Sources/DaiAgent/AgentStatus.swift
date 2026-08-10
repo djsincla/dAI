@@ -48,6 +48,9 @@ public struct AgentStatus: Codable, Sendable, Equatable {
     public var yields: Int
     public var residentGb: Double
     public var lastYield: Date?
+    /// Interactive requests answered, which is a different kind of
+    /// contribution from batch items and worth showing as one.
+    public var requestsAnswered: Int = 0
 
     public init(updated: Date = Date(), presenceState: String = "unknown",
                 paused: Bool = false, pauseReason: String? = nil,
@@ -56,7 +59,8 @@ public struct AgentStatus: Codable, Sendable, Equatable {
                 jobLabel: String? = nil, jobSource: String? = nil,
                 controlPlaneReachable: Bool = false,
                 itemsCompleted: Int = 0, unitsCompleted: Int = 0, yields: Int = 0,
-                residentGb: Double = 0, lastYield: Date? = nil) {
+                residentGb: Double = 0, lastYield: Date? = nil,
+                requestsAnswered: Int = 0) {
         self.updated = updated
         self.presenceState = presenceState
         self.paused = paused
@@ -72,6 +76,7 @@ public struct AgentStatus: Codable, Sendable, Equatable {
         self.yields = yields
         self.residentGb = residentGb
         self.lastYield = lastYield
+        self.requestsAnswered = requestsAnswered
     }
 
     public static let defaultPath = "/Users/Shared/.dai-status.json"

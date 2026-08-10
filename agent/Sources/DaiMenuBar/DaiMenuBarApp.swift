@@ -136,10 +136,14 @@ final class StatusModel: ObservableObject {
         if status.permitted.isEmpty {
             return "You are using this machine, so nothing is running."
         }
-        if status.permitted == ["serve"] {
-            // A different bargain from overnight batch work, and the person at
-            // the desk is the one it differs for.
-            return "Answering requests for the studio from this machine."
+        // A machine usually does both, so the wording covers the combination
+        // rather than treating serving as an alternative to harvesting.
+        if status.permitted.contains("serve") {
+            let batch = status.permitted.contains("embed")
+                ? " It is also running Neural Engine work, which does not touch the "
+                  + "graphics your apps use."
+                : ""
+            return "Available to answer requests for the studio." + batch
         }
         if status.permitted == ["embed"] {
             // Worth saying, because it is the answer to "why is my machine
@@ -152,7 +156,9 @@ final class StatusModel: ObservableObject {
     /// Figures are worth showing whenever there are any, including after the
     /// agent stops: what somebody contributed does not become untrue because
     /// the daemon is no longer running.
-    var showsFigures: Bool { (status?.itemsCompleted ?? 0) > 0 || running }
+    var showsFigures: Bool {
+        (status?.itemsCompleted ?? 0) > 0 || (status?.requestsAnswered ?? 0) > 0 || running
+    }
 
     static func relative(_ date: Date) -> String {
         let formatter = RelativeDateTimeFormatter()
@@ -200,9 +206,15 @@ struct MenuContents: View {
                 Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 4) {
                     GridRow {
                         Text("Contributed").foregroundStyle(.secondary)
-                        Text(status.permitted == ["serve"]
-                             ? "\(status.unitsCompleted) requests answered"
-                             : "\(status.itemsCompleted) items, \(status.unitsCompleted) batches")
+                        // Both, when both have happened. They are different
+                        // kinds of contribution and collapsing them hides one.
+                        Text([
+                            status.itemsCompleted > 0
+                                ? "\(status.itemsCompleted) items" : nil,
+                            status.requestsAnswered > 0
+                                ? "\(status.requestsAnswered) requests" : nil,
+                        ].compactMap { $0 }.joined(separator: ", ")
+                            .ifEmpty("nothing yet"))
                     }
                     GridRow {
                         Text("Handed back").foregroundStyle(.secondary)
@@ -268,4 +280,12 @@ struct MenuContents: View {
         .padding(14)
         .frame(width: 320)
     }
+}
+
+
+private extension String {
+    /// Says "nothing yet" rather than showing an empty row, which reads as a
+    /// panel that failed to load rather than a machine that has not been asked
+    /// for anything.
+    func ifEmpty(_ fallback: String) -> String { isEmpty ? fallback : self }
 }

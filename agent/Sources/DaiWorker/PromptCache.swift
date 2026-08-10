@@ -55,11 +55,18 @@ final class PromptCache: @unchecked Sendable {
             return fresh(full, model: model, parameters: parameters)
         }
 
-        let shared = commonPrefix(tokens, full)
+        // One token is always left to process, even when the whole prompt is
+        // already cached.
+        //
+        // Generation continues from a token, so a prompt reused in its entirety
+        // leaves the generator nothing to start from. Bailing out to a cold
+        // read was the wrong answer to that: an identical request - the same
+        // prompt sent twice - found a complete match and threw it away, taking
+        // 21s where a near-match took 0.5s. Holding one token back costs
+        // nothing and keeps the other thousands.
+        let shared = min(commonPrefix(tokens, full), full.count - 1)
 
-        // A cache is only useful if it holds a prefix of this prompt and there
-        // is enough of it to matter. Everything else starts again.
-        guard shared >= Self.minimumReuse, shared < full.count else {
+        guard shared >= Self.minimumReuse else {
             return fresh(full, model: model, parameters: parameters)
         }
 

@@ -427,15 +427,20 @@ export function servingRoutes(db: Db, broker: Broker): Router {
     // real and large, and a client showing a context gauge had no way to know
     // any of it had happened.
     //
-    // cache_creation stays zero deliberately. In the real API that means the
-    // caller asked for a write and is charged differently for it; here caching
-    // is implicit and unbilled, and claiming creation would describe a decision
-    // nobody made.
+    // Every prompt token this node reads is also kept, so what was processed is
+    // what was written to the cache.
+    //
+    // Reporting creation as zero was defensible and unhelpful: it left a client
+    // unable to tell a cold call that populated the cache from one that could
+    // not be cached at all - the difference between "the next turn will be
+    // fast" and "this will be slow forever". input_tokens is what was read and
+    // not retained, which on this node is nothing.
     const cached = result.cachedTokens ?? 0
+    const processed = Math.max(0, (result.promptTokens ?? 0) - cached)
     const usage = {
-      input_tokens: Math.max(0, (result.promptTokens ?? 0) - cached),
+      input_tokens: 0,
       cache_read_input_tokens: cached,
-      cache_creation_input_tokens: 0,
+      cache_creation_input_tokens: processed,
       output_tokens: result.completionTokens ?? 0,
     }
 

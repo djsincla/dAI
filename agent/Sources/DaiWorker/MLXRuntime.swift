@@ -98,17 +98,36 @@ public actor MLXRuntime {
         public let text: String
         public let promptTokens: Int
         public let completionTokens: Int
+        /// Calls the model asked for, parsed out of its output.
+        ///
+        /// Qualified because MLXLMCommon has its own `ToolCall`, and an
+        /// unqualified name here would silently mean whichever the compiler
+        /// preferred.
+        public var toolCalls: [DaiAgent.ToolCall] = []
     }
 
     public func generate(prompt: String, maxTokens: Int) async throws -> String {
         try await complete(prompt: prompt, maxTokens: maxTokens).text
     }
 
-    public func complete(prompt: String, maxTokens: Int) async throws -> Completion {
+    public func complete(prompt: String, maxTokens: Int,
+                         tools: [DaiAgent.JSONValue]? = nil,
+                         messages: [[String: String]]? = nil) async throws -> Completion {
         guard let container else { throw Failure.notLoaded }
+        let dialect = toolDialect
+        let conversation = messages ?? [["role": "user", "content": prompt]]
+        // Converted inside, because [[String: Any]] is not Sendable and cannot
+        // cross into the closure.
+        let hasTools = !(tools?.isEmpty ?? true)
         return try await container.perform { context in
+            // Tools go through the model's own chat template rather than being
+            // formatted here. Every family spells this differently, and the
+            // template in the model directory is the authority on its own
+            // format - hand-writing Llama's would be guessing at something the
+            // model already ships.
+            let specs = tools?.compactMap { $0.anyValue as? [String: Any] }
             let input = try await context.processor.prepare(
-                input: .init(messages: [["role": "user", "content": prompt]]))
+                input: .init(messages: conversation, tools: specs))
             // Greedy. Determinism matters for batch work, where the same item
             // dispatched to a different node after a requeue should not produce
             // a different answer.
@@ -134,8 +153,14 @@ public actor MLXRuntime {
                     break
                 }
             }
-            return Completion(text: text, promptTokens: promptTokens,
-                              completionTokens: completionTokens)
+            guard let dialect, hasTools else {
+                return Completion(text: text, promptTokens: promptTokens,
+                                  completionTokens: completionTokens)
+            }
+            let parsed = dialect.parseCalls(from: text)
+            return Completion(text: parsed.text, promptTokens: promptTokens,
+                              completionTokens: completionTokens,
+                              toolCalls: parsed.calls)
         }
     }
 
@@ -144,6 +169,21 @@ public actor MLXRuntime {
     /// Advertised so a client does not have to assume. A client guessing high
     /// runs a conversation past what the model accepts; guessing low wastes
     /// most of the window it paid for.
+    /// The tool-call dialect this model speaks, chosen from its chat template.
+    ///
+    /// Read from disk rather than held on the loaded model, so it is available
+    /// before the first generation and does not depend on the model being
+    /// resident.
+    public var toolDialect: ToolDialect? {
+        let config = Self.modelDirectory
+            .appendingPathComponent(modelId)
+            .appendingPathComponent("tokenizer_config.json")
+        let template = (try? Data(contentsOf: config))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            .flatMap { $0?["chat_template"] as? String }
+        return ToolDialects.select(template: template, modelId: modelId)
+    }
+
     /// Read from the model's own config.json rather than the loaded object,
     /// which does not expose it. That file is the source of truth every runtime
     /// reads, and it is on disk next to the weights whether or not the model is

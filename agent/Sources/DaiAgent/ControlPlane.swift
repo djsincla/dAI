@@ -186,11 +186,18 @@ public actor ControlPlane {
 
     public func reportDispatch(id: String, text: String?, error: String?,
                                promptTokens: Int = 0,
-                               completionTokens: Int = 0) async throws {
+                               completionTokens: Int = 0,
+                               toolCalls: [ToolCall] = []) async throws {
         var body: [String: JSONValue] = [:]
         if let text {
             body["result"] = .object([
                 "text": .string(text),
+                // Structured, not text. The client has to execute these, so
+                // handing back a string it would have to re-parse just moves
+                // the guessing somewhere with less context.
+                "toolCalls": .array(toolCalls.map {
+                    .object(["name": .string($0.name), "arguments": $0.arguments])
+                }),
                 // Real counts from the runtime. A client drives its context
                 // gauge and its compaction from these, so zeros tell it the
                 // conversation is never filling up.

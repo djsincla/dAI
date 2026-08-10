@@ -349,6 +349,7 @@ case "serve":
         }
         let seconds = args.count > 4 ? Double(args[4]) ?? .infinity : .infinity
         await channel.run(maxSeconds: seconds)
+        print("serve command finished after \(seconds)s")
         await cp.shutdown()
     } catch { print("serve failed: \(error)"); exit(1) }
 

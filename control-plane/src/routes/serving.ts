@@ -266,9 +266,16 @@ export function servingRoutes(db: Db, broker: Broker): Router {
       return
     }
 
+    // Cluster nodes are not capped by presence, for the same reason they are
+    // not gated by it: the cap exists to bound how long a returning user waits
+    // for their own machine, and nobody is sitting at a dedicated box. Capping
+    // there silently truncated every answer at 256 tokens, which reads as a
+    // model that stops mid-sentence.
     const policy = POLICY[(choice.presence_state ?? 'ACTIVE') as PresenceState]
     const requested = body.max_tokens ?? 512
-    const maxTokens = Math.min(requested, policy.maxCompletionTokens)
+    const maxTokens = choice.tier === 'cluster'
+      ? requested
+      : Math.min(requested, policy.maxCompletionTokens)
 
     // The system prompt rides as a leading message. The runtime takes one
     // string, and dropping it silently would change the model's behaviour in a
@@ -276,6 +283,16 @@ export function servingRoutes(db: Db, broker: Broker): Router {
     const messages = body.system
       ? [{ role: 'system', content: body.system }, ...body.messages]
       : body.messages
+
+    // A caller who has gone should not keep a node busy. Ctrl-C in an
+    // interactive client is the common case, not an edge one, and a node is
+    // serial: whatever it is doing, nothing else can be.
+    const cancel = new AbortController()
+    // res, not req. The request stream closes once its body has been read,
+    // which for a POST is long before the caller goes anywhere, so listening
+    // there detected nothing at all. The response closing is what means the
+    // connection is gone.
+    res.on('close', () => { if (!res.writableEnded) cancel.abort() })
 
     const started = Date.now()
     const out = await broker.dispatch(choice.id, 'generate', modelHash, {
@@ -289,7 +306,11 @@ export function servingRoutes(db: Db, broker: Broker): Router {
       // reaching the model either way.
       tools: body.tools,
       tool_choice: body.tool_choice,
-    })
+    }, cancel.signal)
+
+    // Nobody is listening; saying so into a closed socket only produces a
+    // second error in the log.
+    if (cancel.signal.aborted) return
 
     if (!out.ok) {
       // A prompt the node cannot read is the caller's request being too large,

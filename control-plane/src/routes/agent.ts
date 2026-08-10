@@ -225,6 +225,17 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
     })
   })
 
+  /**
+   * Whether the caller has given up on a request this node is still running.
+   *
+   * Polled rather than pushed, because the node is inside a generation loop
+   * with no open channel to receive anything. Cheap: one small request every
+   * couple of seconds against a lookup in memory.
+   */
+  r.get('/dispatch/:dispatchId/cancelled', (req, res) => {
+    res.json({ cancelled: broker.isCancelled(req.params.dispatchId!) })
+  })
+
   r.post('/dispatch/:dispatchId/result', async (req, res) => {
     const b = req.body as { result?: unknown; error?: string }
     const accepted = broker.complete(req.params.dispatchId!, req.node!.id, {

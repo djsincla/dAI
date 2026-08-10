@@ -31,25 +31,57 @@ export function servingRoutes(db: Db, broker: Broker): Router {
    * from what nodes report rather than configured here, so it cannot drift
    * from the weights actually on disk.
    */
-  r.get('/models', async (_req, res) => {
+  /**
+   * Models this fleet can serve, and how much context each accepts.
+   *
+   * Only from nodes that could answer right now. The listing reported a model
+   * as loaded with nothing connected, because it read the last heartbeat a node
+   * ever sent, and a capability check is exactly where that misleads: a client
+   * asks what is available, is told, and every request then fails. Stale is
+   * worse than empty here, because empty is actionable.
+   *
+   * The window is advertised so a client does not have to guess: guess high and
+   * the conversation runs past what the model takes, guess low and most of it
+   * goes unused. Taken from what nodes report rather than configured here, so it
+   * cannot drift from the weights on disk.
+   */
+  async function servableModels() {
     const { rows } = await db.query(
-      `SELECT name, max(context)::int AS context
+      `SELECT id AS node_id, name,
+              COALESCE((model_context ->> name)::int, 0) AS context,
+              (resident_models ? name) AS resident
          FROM nodes,
-              LATERAL jsonb_each(
-                CASE WHEN resident_models = '{}'::jsonb THEN model_context
-                     ELSE resident_models || model_context END) AS m(name, value),
-              LATERAL (SELECT COALESCE((model_context ->> m.name)::int, 0)) AS c(context)
+              LATERAL jsonb_object_keys(resident_models || model_context) AS name
         WHERE state = 'active'
-        GROUP BY name`)
+          AND NOT user_paused
+          AND (paused_until IS NULL OR paused_until < now())
+          AND last_heartbeat > now() - interval '2 minutes'`)
+
+    const models = new Map<string, { context: number; resident: boolean }>()
+    for (const row of rows as any[]) {
+      // A node that is not holding the reverse channel open cannot be routed
+      // to, so its models are not on offer however recently it spoke.
+      if (!broker.isConnected(row.node_id)) continue
+      const seen = models.get(row.name)
+      models.set(row.name, {
+        context: Math.max(seen?.context ?? 0, row.context ?? 0),
+        resident: (seen?.resident ?? false) || row.resident,
+      })
+    }
+    return models
+  }
+
+  r.get('/models', async (_req, res) => {
+    const models = await servableModels()
     res.json({
       object: 'list',
-      data: (rows as any[]).map((m) => ({
-        id: m.name,
+      data: [...models].map(([id, m]) => ({
+        id,
         object: 'model',
         owned_by: 'dai',
-        // Both spellings. context_length is what clients look for; the other
-        // two are what the OpenAI and LM Studio shapes use, and a client that
-        // finds any of them does not have to fall back to a default.
+        // Three spellings: context_length is what clients look for, the others
+        // are the OpenAI and LM Studio shapes. A client finding any of them
+        // does not have to fall back to a default.
         context_length: m.context || null,
         max_context_length: m.context || null,
         context_window: m.context || null,
@@ -57,6 +89,14 @@ export function servingRoutes(db: Db, broker: Broker): Router {
     })
   })
 
+  /**
+   * LM Studio's model shape, served so tools written against it work unchanged.
+   *
+   * Not an endorsement of the shape. Scripts in the wild probe this path for
+   * `loaded_context_length` to size a client's context window, and asking
+   * people to patch their tooling to try a fleet is a good way to have nobody
+   * try it.
+   */
   r.post('/chat/completions', async (req, res) => {
     const body = req.body as {
       model?: string
@@ -140,34 +180,15 @@ export function servingRoutes(db: Db, broker: Broker): Router {
     })
   })
 
-  /**
-   * LM Studio's model shape, served so tools written against it work unchanged.
-   *
-   * Not an endorsement of the shape. Scripts in the wild probe this path for
-   * `loaded_context_length` to size a client's context window, and asking
-   * people to patch their tooling to try a fleet is a good way to have nobody
-   * try it.
-   */
   r.get('/v0/models', async (_req, res) => {
-    const { rows } = await db.query(
-      `SELECT name, max(context)::int AS context, bool_or(resident) AS resident
-         FROM nodes,
-              LATERAL jsonb_each(
-                CASE WHEN resident_models = '{}'::jsonb THEN model_context
-                     ELSE resident_models || model_context END) AS m(name, value),
-              LATERAL (SELECT COALESCE((model_context ->> m.name)::int, 0)) AS c(context),
-              LATERAL (SELECT resident_models ? m.name) AS r(resident)
-        WHERE state = 'active'
-        GROUP BY name`)
+    const models = await servableModels()
     res.json({
       object: 'list',
-      data: (rows as any[]).map((m) => ({
-        id: m.name,
+      data: [...models].map(([id, m]) => ({
+        id,
         object: 'model',
         type: 'llm',
         publisher: 'dai',
-        // The window the model accepts. Named as LM Studio names it, because
-        // that is what the tools reading this path look for.
         max_context_length: m.context || null,
         loaded_context_length: m.context || null,
         state: m.resident ? 'loaded' : 'not-loaded',
@@ -256,7 +277,45 @@ export function servingRoutes(db: Db, broker: Broker): Router {
     // calls. A tool_use block carries an id the client quotes back on the
     // matching tool_result, which is how a conversation with several calls in
     // flight stays coherent.
-    const calls = result.toolCalls ?? []
+    // Only calls to tools that were actually offered.
+    //
+    // A small model will name a tool nobody declared - inventing one that
+    // sounds plausible for the task - and passing that through makes the client
+    // look up something that does not exist, or worse, run something it
+    // recognises by accident. The model's prose is kept, so the reply is not
+    // silently emptied.
+    const declared = new Set((body.tools ?? []).map((t: any) => t?.name).filter(Boolean))
+    const proposed = result.toolCalls ?? []
+    const calls = declared.size > 0
+      ? proposed.filter((c) => declared.has(c.name))
+      : proposed
+    const rejected = proposed.filter((c) => !calls.includes(c))
+    if (rejected.length > 0) {
+      console.log(`[serving] dropped ${rejected.length} call(s) to undeclared tool(s): `
+        + rejected.map((c) => c.name).join(', '))
+    }
+
+    // tool_choice is a requirement, not a hint. The spec says a forced choice
+    // must produce a tool_use block, so a model that answered in prose has not
+    // satisfied the request and saying otherwise would have the client treat
+    // its commentary as an answer.
+    const forced = body.tool_choice?.type === 'tool' ? body.tool_choice.name
+      : body.tool_choice?.type === 'any' ? true : null
+    if (forced && calls.length === 0) {
+      res.status(422).json({
+        type: 'error',
+        error: {
+          type: 'invalid_request_error',
+          message: typeof forced === 'string'
+            ? `tool_choice required ${forced}, but the model did not call it. `
+              + 'Smaller models often will not: the call was either absent or '
+              + 'malformed.'
+            : 'tool_choice required a tool call and the model did not make one.',
+        },
+      })
+      return
+    }
+
     const content: unknown[] = []
     if (result.text.trim().length > 0) content.push({ type: 'text', text: result.text })
     calls.forEach((call, i) => {

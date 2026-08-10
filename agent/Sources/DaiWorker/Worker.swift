@@ -50,7 +50,8 @@ public actor Worker {
     private var lastKinds: [WorkKind]?
     private var lastReason: String?
     private var wasPaused = false
-    private var status = AgentStatus()
+    private var pausedByFleet = false
+    private let status: StatusPublisher
 
     public struct Stats: Sendable {
         public var items = 0
@@ -62,7 +63,9 @@ public actor Worker {
 
     public init(controlPlane: ControlPlane, source: SignalSource = MacSignalSource(),
                 gpu: MLXRuntime? = nil, ane: ANERuntime? = nil,
+                status: StatusPublisher = StatusPublisher(),
                 promoteAfter: TimeInterval = idlePromoteSeconds) {
+        self.status = status
         self.controlPlane = controlPlane
         self.source = source
         self.monitor = PresenceMonitor(promoteAfter: promoteAfter)
@@ -143,17 +146,14 @@ public actor Worker {
     /// identical in the menu bar otherwise, and mean opposite things.
     private func publish(_ reading: PresenceMonitor.Reading, permitted: [WorkKind],
                          activity: String, pause: PauseSwitch.State) async {
-        status.updated = Date()
-        status.presenceState = reading.state.rawValue
-        status.paused = pause.paused
-        status.pauseReason = pause.reason
-        status.permitted = permitted.map(\.rawValue)
-        status.activity = activity
-        status.itemsCompleted = stats.items
-        status.unitsCompleted = stats.units
-        status.yields = stats.yields
-        status.residentGb = await (gpu?.isLoaded ?? false) ? (await gpu?.residentGb ?? 0) : 0
-        status.write()
+        status.updateBatch(
+            presence: reading.state.rawValue,
+            permitted: permitted.map(\.rawValue),
+            activity: activity,
+            paused: pause.paused, pauseReason: pause.reason,
+            pausedByFleet: pausedByFleet,
+            items: stats.items, units: stats.units, yields: stats.yields,
+            residentGb: await (gpu?.isLoaded ?? false) ? (await gpu?.residentGb ?? 0) : 0)
     }
 
     private func log(_ message: String) {
@@ -168,7 +168,7 @@ public actor Worker {
         do {
             let served = try await controlPlane.fetchPolicy()
             policy = mergePolicy(local: defaultPolicy, served: served)
-            status.controlPlaneReachable = true
+            status.markReachable()
             log("policy merged with control plane (stricter of the two wins)")
         } catch {
             // The local table is the conservative one, so starting on it is
@@ -189,7 +189,7 @@ public actor Worker {
             let pause = pauseSwitch.read()
             await publish(reading, permitted: pause.paused ? [] : availableKinds(statePolicy),
                           activity: pause.paused ? "paused by you"
-                                    : status.pausedByFleet ? "paused by the fleet" : "waiting",
+                                    : pausedByFleet ? "paused by the fleet" : "waiting",
                           pause: pause)
             if pause.paused {
                 if !wasPaused {
@@ -270,7 +270,7 @@ public actor Worker {
                 // lease is the first and only sign. Without this the machine
                 // sat reporting "waiting for work" to its owner while the fleet
                 // was refusing it, which reads as the agent being broken.
-                status.pausedByFleet = failure?.contains("node-paused") ?? false
+                pausedByFleet = failure?.contains("node-paused") ?? false
 
                 let key = kinds.map(\.rawValue).joined(separator: ",") + "|" + (failure ?? "")
                 if key != lastReason {
@@ -282,7 +282,7 @@ public actor Worker {
                 continue
             }
             lastReason = nil
-            status.pausedByFleet = false
+            pausedByFleet = false
 
             await process(lease, statePolicy: statePolicy, state: reading.state)
         }
@@ -307,11 +307,7 @@ public actor Worker {
         }
 
         applyQoS(statePolicy, kind: lease.kind)
-        status.activity = "running \(lease.kind.rawValue)"
-        status.jobLabel = lease.jobLabel
-        status.jobSource = lease.jobSource
-        status.updated = Date()
-        status.write()
+
         let started = Date()
         var completed: [WorkItem] = []
 
@@ -324,7 +320,7 @@ public actor Worker {
             guard availableKinds(current).contains(lease.kind) else {
                 let unfinished = Array(lease.items[index...])
                 stats.yields += 1
-                status.lastYield = Date()
+                status.recordYield(at: Date())
                 log("YIELD -> \(now.state.rawValue); \(completed.count) done, "
                     + "\(unfinished.count) returned")
                 try? await controlPlane.report(unitId: lease.unitId, completed: completed,
@@ -372,7 +368,7 @@ public actor Worker {
         }
         try? await controlPlane.report(unitId: lease.unitId, completed: completed,
                                        unfinished: [], seconds: seconds)
-        status.controlPlaneReachable = true
+        status.markReachable()
         log("\(lease.kind.rawValue)"
             + (lease.jobLabel.map { " [\($0)]" } ?? "")
             + (lease.jobSource == "api" ? "" : " (\(lease.jobSource))")

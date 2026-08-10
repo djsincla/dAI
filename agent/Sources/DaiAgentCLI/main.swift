@@ -240,7 +240,12 @@ case "work":
         // constant left in the daemon path would quietly ship as the default.
         let promote = ProcessInfo.processInfo.environment["DAI_PROMOTE_SECONDS"]
             .flatMap(Double.init) ?? idlePromoteSeconds
-        let worker = Worker(controlPlane: cp, gpu: gpu, ane: ane, promoteAfter: promote)
+        // One writer, fed by both loops: each was overwriting the other's view
+        // of the same file, and the batch loop writes far more often, so a
+        // machine answering requests reported "waiting for work" throughout.
+        let status = StatusPublisher()
+        let worker = Worker(controlPlane: cp, gpu: gpu, ane: ane,
+                            status: status, promoteAfter: promote)
 
         // Batch and serving run side by side in one process, because a node
         // does both and they cannot share a loop: an interactive request must
@@ -249,7 +254,8 @@ case "work":
         // installing the daemon quietly turned serving off, which is how a
         // machine ended up harvesting all day while reporting no chat model.
         if gpu != nil {
-            let channel = ReverseChannel(controlPlane: cp, gpu: gpu, promoteAfter: promote)
+            let channel = ReverseChannel(controlPlane: cp, gpu: gpu,
+                                         status: status, promoteAfter: promote)
             if let servedPolicy = try? await cp.fetchPolicy() {
                 await channel.setPolicy(mergePolicy(local: defaultPolicy, served: servedPolicy))
             }

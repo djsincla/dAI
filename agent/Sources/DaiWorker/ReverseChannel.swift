@@ -34,7 +34,7 @@ public actor ReverseChannel {
     /// and saying which matters more to the person at the desk than to anyone
     /// else: "answering requests for the studio" and "running batch work" are
     /// different bargains.
-    private var status = AgentStatus()
+    private let status: StatusPublisher
     private var served = 0
 
     private var policy: [PresenceState: StatePolicy] = defaultPolicy
@@ -43,7 +43,9 @@ public actor ReverseChannel {
 
     public init(controlPlane: ControlPlane, gpu: MLXRuntime?,
                 source: SignalSource = MacSignalSource(),
+                status: StatusPublisher = StatusPublisher(),
                 promoteAfter: TimeInterval = idlePromoteSeconds) {
+        self.status = status
         self.controlPlane = controlPlane
         self.gpu = gpu
         self.source = source
@@ -112,8 +114,9 @@ public actor ReverseChannel {
         while Date() < deadline {
             let gate = mayServe()
 
-            await publish(gate.state, activity: gate.ok ? "ready to answer requests"
-                                                        : "standing by")
+            // nil means "nothing to say": the batch loop's activity stands,
+            // rather than this one claiming the panel while idle.
+            await publish(gate.state, activity: nil)
             guard gate.ok else {
                 // Not connecting at all is the honest signal: the control plane
                 // only routes to nodes holding the channel open, so dropping it
@@ -138,23 +141,20 @@ public actor ReverseChannel {
     }
 
     /// Report in, whatever the request loop is doing.
-    private func publish(_ state: PresenceState, activity: String) async {
-        let pause = pauseSwitch.read()
-        status.updated = Date()
-        status.presenceState = state.rawValue
-        status.paused = pause.paused
-        status.pauseReason = pause.reason
-        status.permitted = pause.paused ? [] : (gpu != nil ? ["serve"] : [])
-        status.activity = activity
-        status.unitsCompleted = served
-        status.residentGb = await (gpu?.isLoaded ?? false) ? (await gpu?.residentGb ?? 0) : 0
-        status.write()
+    private func publish(_ state: PresenceState, activity: String?) async {
+        status.updateServing(
+            ready: gpu != nil && !pauseSwitch.read().paused,
+            activity: activity,
+            requestsAnswered: served,
+            residentGb: await (gpu?.isLoaded ?? false) ? (await gpu?.residentGb ?? 0) : 0)
     }
 
     private func heartbeatNow() async {
         let signals = source.read()
         let state = monitor.update(signals, now: Date().timeIntervalSince1970).state
-        await publish(state, activity: status.activity)
+        // nil: a heartbeat is not an activity, and claiming one here would
+        // overwrite whatever the loop last said it was doing.
+        await publish(state, activity: nil)
         let resident: [String: Double] = await (gpu?.isLoaded ?? false)
             ? [await gpu!.name: await gpu!.residentGb] : [:]
         // Advertised whether or not the model is loaded right now: the window a
@@ -268,7 +268,7 @@ public actor ReverseChannel {
             }
 
             served += 1
-            status.itemsCompleted += out.completionTokens
+
             let elapsed = Date().timeIntervalSince(started)
             // The prompt rate is logged because it is what sizes the advertised
             // window, and a window nobody can explain is one nobody trusts.

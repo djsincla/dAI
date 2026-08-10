@@ -153,7 +153,7 @@ public actor ReverseChannel {
                 prompt: promptFrom(dispatch.body),
                 maxTokens: min(requested, maxTokens),
                 tools: dispatch.body["tools"]?.arrayValue,
-                messages: chatFrom(dispatch.body))
+                messages: chatFrom(dispatch.body, dialect: await gpu.toolDialect))
             let elapsed = Date().timeIntervalSince(started)
             log(String(format: "answered in %.2fs (%d prompt, %d generated%@)",
                        elapsed, out.promptTokens, out.completionTokens,
@@ -176,14 +176,39 @@ public actor ReverseChannel {
     /// Preferred over the flattened prompt whenever the template can be
     /// applied: the template is what renders tool definitions and tool results
     /// in the form the model was trained on, and flattening throws that away.
-    private func chatFrom(_ body: JSONValue) -> [[String: String]]? {
+    private func chatFrom(_ body: JSONValue, dialect: ToolDialect?) -> [[String: String]]? {
         guard case let .array(messages)? = body["messages"] else { return nil }
         let mapped = messages.compactMap { message -> [String: String]? in
             guard let role = message["role"]?.stringValue else { return nil }
+
+            // A message carrying tool results is not a user turn, whatever the
+            // client labelled it. Llama's template branches on `ipython` and
+            // most others on `tool`; sent as `user` the result renders as
+            // ordinary prose, the model sees its call still unanswered, and it
+            // calls again - forever, when the conversation ends on a tool
+            // result, which is every agentic turn.
+            if let results = toolResults(message["content"]), !results.isEmpty {
+                return ["role": dialect?.toolResultRole ?? "tool",
+                        "content": results.joined(separator: "\n")]
+            }
             guard let content = textOf(message["content"]) else { return nil }
             return ["role": role, "content": content]
         }
         return mapped.isEmpty ? nil : mapped
+    }
+
+    /// The bodies of any tool_result blocks, unwrapped.
+    ///
+    /// Returned bare rather than annotated: the template supplies whatever
+    /// framing the model was trained on, and adding a label of our own puts
+    /// text in front of the model it has never seen in that position.
+    private func toolResults(_ content: JSONValue?) -> [String]? {
+        guard case let .array(blocks)? = content else { return nil }
+        let results = blocks.compactMap { block -> String? in
+            guard block["type"]?.stringValue == "tool_result" else { return nil }
+            return textOf(block["content"]) ?? ""
+        }
+        return results.isEmpty ? nil : results
     }
 
     /// Flatten a messages array into a prompt.

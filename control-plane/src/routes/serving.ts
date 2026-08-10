@@ -215,7 +215,26 @@ export function servingRoutes(db: Db, broker: Broker): Router {
       tool_choice?: { type: string; name?: string }
     }
 
-    const modelHash = body.model ?? null
+    // The requested model has to exist. It was ignored entirely, so a typo or
+    // a model nobody has loaded returned a confident answer from whatever
+    // happened to be resident - the worst possible response to asking for
+    // something specific.
+    const servable = await servableModels()
+    if (!body.model || !servable.has(body.model)) {
+      res.status(404).json({
+        type: 'error',
+        error: {
+          type: 'not_found_error',
+          message: body.model
+            ? `no node is serving "${body.model}". Available: `
+              + ([...servable.keys()].join(', ') || 'none')
+            : 'model is required',
+        },
+      })
+      return
+    }
+
+    const modelHash = body.model
     const candidates = await candidatesFor(db, broker.inFlightCounts)
     const connected = candidates.filter((c) => broker.isConnected(c.id))
     const choice = selectNode(connected, 'generate', modelHash)
@@ -302,7 +321,10 @@ export function servingRoutes(db: Db, broker: Broker): Router {
     const forced = body.tool_choice?.type === 'tool' ? body.tool_choice.name
       : body.tool_choice?.type === 'any' ? true : null
     if (forced && calls.length === 0) {
-      res.status(422).json({
+      // 400, not 422: the API this imitates returns invalid_request_error with
+      // a 400, and a client keying on the status will not recognise anything
+      // else as its own fault.
+      res.status(400).json({
         type: 'error',
         error: {
           type: 'invalid_request_error',
@@ -326,7 +348,20 @@ export function servingRoutes(db: Db, broker: Broker): Router {
         input: call.arguments ?? {},
       })
     })
-    if (content.length === 0) content.push({ type: 'text', text: result.text })
+    if (content.length === 0) {
+      // Something has to be said. The model produced only calls to tools nobody
+      // declared, so dropping them correctly left nothing at all, and a reply
+      // with an empty text block renders as a blank turn: the user sees the
+      // agent do nothing and cannot tell why.
+      content.push({
+        type: 'text',
+        text: rejected.length > 0
+          ? 'The model tried to call '
+            + rejected.map((c) => `"${c.name}"`).join(', ')
+            + ', which was not among the tools provided, so the call was not made.'
+          : result.text,
+      })
+    }
 
     // tool_use takes precedence over max_tokens: a client that sees anything
     // else will treat the calls as commentary and never execute them.

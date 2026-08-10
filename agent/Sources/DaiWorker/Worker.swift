@@ -51,6 +51,8 @@ public actor Worker {
     private var lastReason: String?
     private var wasPaused = false
     private var pausedByFleet = false
+    /// A cluster node is never preempted, so presence does not gate it.
+    private var isCluster = false
     private let status: StatusPublisher
 
     public struct Stats: Sendable {
@@ -72,6 +74,12 @@ public actor Worker {
         self.pauseSwitch = PauseSwitch()
         self.gpu = gpu
         self.ane = ane
+    }
+
+    /// A cluster node is never preempted, so presence does not gate it - and
+    /// this loop must know, or it releases a model the serving loop is using.
+    public func setCluster(_ isCluster: Bool) {
+        self.isCluster = isCluster
     }
 
     // MARK: - Presence
@@ -229,7 +237,7 @@ public actor Worker {
                     + "runtimes: gpu=\(gpu != nil ? "yes" : "no") ane=\(ane != nil ? "yes" : "no"))")
             }
             if kinds.isEmpty {
-                if let gpu, await gpu.isLoaded {
+                if !isCluster, let gpu, await gpu.isLoaded {
                     let freed = await gpu.unload()
                     log("standing down in \(reading.state.rawValue); released in "
                         + String(format: "%.0fms", freed * 1000))
@@ -241,7 +249,16 @@ public actor Worker {
             // Release the GPU model as soon as GPU work stops being permitted,
             // even though ANE work continues. E4 puts reload at 1-3s, so holding
             // it against a possible return is not worth the resident memory.
-            if !kinds.contains(.generate), let gpu, await gpu.isLoaded {
+            // Never on a cluster node.
+            //
+            // The batch loop released the GPU model one second after the
+            // serving loop loaded it - presence was ACTIVE, harvest policy
+            // forbids GPU work, and nothing told this loop the node was exempt.
+            // It destroyed the prompt cache on every request: an 18s reload and
+            // a full prefill each time, turning a 0.5s warm request back into
+            // 37.5s. Two loops sharing one runtime, and only one of them knew
+            // the rules.
+            if !isCluster, !kinds.contains(.generate), let gpu, await gpu.isLoaded {
                 let freed = await gpu.unload()
                 log("GPU work not permitted in \(reading.state.rawValue); released in "
                     + String(format: "%.0fms", freed * 1000))

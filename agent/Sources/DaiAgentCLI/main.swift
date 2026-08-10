@@ -259,7 +259,13 @@ case "work":
             if let servedPolicy = try? await cp.fetchPolicy() {
                 await channel.setPolicy(mergePolicy(local: defaultPolicy, served: servedPolicy))
             }
-            if let me = try? await cp.whoami() { await channel.setCluster(me.isCluster) }
+            // Both loops need to know: they share one runtime, and a loop that
+            // thinks it must release the model will release it out from under
+            // the other.
+            if let me = try? await cp.whoami() {
+                await channel.setCluster(me.isCluster)
+                await worker.setCluster(me.isCluster)
+            }
             Task { await channel.run(maxSeconds: seconds) }
         }
 

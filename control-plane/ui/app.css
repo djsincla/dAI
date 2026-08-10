@@ -151,3 +151,13 @@ button:hover { border-color: var(--muted); }
   color: #f0d090;
   border-color: #6b5426;
 }
+
+/* Serving state. Deliberately three distinct things: a node with no model, one
+   that is occupied, and one that can answer now. Collapsing busy into
+   unavailable is what sent somebody looking for a crash that had not
+   happened. */
+.serving { font-size: 0.9em; }
+.serving.none { color: #6b6b85; }
+.serving.busy { color: #e3b341; }
+.serving.answering { color: #7aa2f7; font-weight: 600; }
+.serving.ready { color: #7ee787; }

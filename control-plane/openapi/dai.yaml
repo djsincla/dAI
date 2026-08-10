@@ -1005,15 +1005,21 @@ components:
         models:
           type: array
           description: |
-            What each model this node can serve accepts. Reported rather than
-            configured centrally, so the advertised window cannot drift from the
-            weights actually on disk.
-          items:
-            type: object
-            required: [name, contextLength]
-            properties:
-              name: { type: string }
-              contextLength: { type: integer }
+            Model names this node can serve, for the fleet view. A heartbeat
+            carries the same name with its context window; here only the names
+            are needed.
+          items: { type: string }
+        residentModels:
+          type: array
+          items: { type: string }
+        serving:
+          type: boolean
+          description: |
+            Holding the reverse channel open, so it could answer now. Distinct
+            from being healthy: a node reading a large prompt is neither idle
+            nor gone, and reporting it as unavailable sends people looking for a
+            crash.
+        inFlight: { type: integer }
         userPaused:
           type: boolean
           description: |

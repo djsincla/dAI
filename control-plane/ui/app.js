@@ -12,6 +12,10 @@
  * policy is too aggressive for a particular machine.
  */
 
+import {
+  capacityOf, isSynthetic, kindsFor, pauseAction, progressOf, servingFor,
+} from './view.js'
+
 const $ = (sel) => document.querySelector(sel)
 const REFRESH_MS = 5000
 
@@ -130,16 +134,15 @@ function renderJobs(jobs) {
   $('#jobs-empty').hidden = jobs.length > 0
 
   for (const j of jobs) {
-    const total = j.counts.pending + j.counts.leased + j.counts.done + j.counts.failed
-    const pct = total ? Math.round((j.counts.done / total) * 100) : 0
-    const synthetic = j.source && j.source !== 'api' && j.source !== 'cli'
+    const progress = progressOf(j)
+    const synthetic = isSynthetic(j)
     const tr = document.createElement('tr')
     tr.innerHTML = `
       <td>${escape(j.label ?? '(unlabelled)')}</td>
       <td><span class="kind ${j.kind === 'embed' ? 'on-ane' : 'on-gpu'}">${escape(j.kind)}</span></td>
       <td><span class="pill ${synthetic ? 'synthetic' : ''}">${escape(j.source ?? 'api')}</span></td>
       <td>${escape(j.submittedBy ?? '&mdash;')}</td>
-      <td class="num">${j.counts.done}/${total} (${pct}%)</td>
+      <td class="num">${progress.done}/${progress.total} (${progress.percent}%)</td>
       <td><span class="pill ${escape(j.state)}">${escape(j.state)}</span></td>`
     body.append(tr)
   }
@@ -153,6 +156,10 @@ function renderNodes(nodes, details) {
     // n.state included so the row redraws when it changes: without it the
     // button kept its old label after a successful pause.
     n.id, n.hostname, n.presenceState, n.state, n.userPaused,
+    // Serving state included, or a node that starts or stops answering never
+    // redraws and keeps its old label indefinitely - the bug the pause button
+    // had before its state joined this list.
+    n.serving, n.inFlight, (n.models ?? []).join(','),
     details.get(n.id)?.headroomGb, details.get(n.id)?.yields7d,
   ]))
   if (signature === lastNodeSignature) return
@@ -167,7 +174,9 @@ function renderNodes(nodes, details) {
     // A machine its owner paused runs nothing, whatever its presence says, so
     // showing it as available capacity would be a lie the fleet view tells
     // about a decision somebody made deliberately.
-    const gpu = n.state === 'active' && GPU_STATES.has(n.presenceState) && !n.userPaused
+    const kinds = kindsFor(n)
+    const serving = servingFor(n)
+    const action = pauseAction(n)
     const tr = document.createElement('tr')
     tr.innerHTML = `
       <td><b>${escape(n.hostname)}</b></td>
@@ -176,22 +185,24 @@ function renderNodes(nodes, details) {
       <td class="num">${d ? `${fmt(d.headroomGb)} GB` : '&mdash;'}</td>
       <td><span class="pill ${escape(n.presenceState ?? '')}">${escape(n.presenceState ?? 'unknown')}</span></td>
       <td><span class="kinds">
-        ${n.userPaused ? '<span class="kind paused-by-user">paused by owner</span>' : `
-        <span class="kind on-ane">embed</span>
-        ${gpu ? '<span class="kind on-gpu">generate</span><span class="kind on-gpu">render</span>' : ''}`}
+        ${action.kind === 'none' ? '<span class="kind paused-by-user">paused by owner</span>' : `
+        ${kinds.map((k) => `<span class="kind ${k === 'embed' ? 'on-ane' : 'on-gpu'}">${k}</span>`).join('')}`}
       </span></td>
+      <td><span class="serving ${serving.state}">${escape(serving.label)}</span>${
+        serving.models.length > 0
+          ? `<div class="muted">${escape(serving.models.map((m) => m.split('/').pop()).join(', '))}</div>`
+          : ''}</td>
       <td class="num">${d ? d.yields7d : '&mdash;'}</td>
       <td><span class="pill ${n.state === 'paused' ? 'paused' : ''}">${escape(n.state)}</span></td>
       ${n.userPaused
         // No admin control offered, because there is none. The button would
         // have to either lie or fail, and a disabled control at least says the
         // truth: this is not yours to lift.
-        ? '<td><span class="muted" title="Only the person at that machine can resume it">owner paused</span></td>'
+        ? `<td><span class="muted" title="Only the person at that machine can resume it">${escape(action.label)}</span></td>`
         // Reflects the state rather than assuming one. It always said "Pause",
         // so pausing a node left a button that appeared to do nothing and there
         // was no way back: a one-way door dressed as a toggle.
-        : `<td><button data-action="${n.state === 'paused' ? 'resume' : 'pause'}"
-                      data-node="${n.id}">${n.state === 'paused' ? 'Resume' : 'Pause'}</button></td>`}`
+        : `<td><button data-action="${action.kind}" data-node="${n.id}">${escape(action.label)}</button></td>`}`
     tr.addEventListener('click', (ev) => {
       if (ev.target.closest('button')) return
       openNode(n.id)

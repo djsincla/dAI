@@ -183,7 +183,7 @@ export function createApp(db: Db, surface: Surface = 'both'): Express {
     app.use('/agent/v1', aclMiddleware(agentAcl, 'agent'), agentRoutes(db, broker, ca))
   }
   if (surface !== 'agent') {
-    app.use('/admin/v1', aclMiddleware(adminAcl, 'admin'), adminRoutes(db, ca))
+    app.use('/admin/v1', aclMiddleware(adminAcl, 'admin'), adminRoutes(db, ca, broker))
     // OpenAI-compatible surface. Separate from /admin because its callers are
     // applications rather than people, and it will want its own rate limits and
     // availability treatment.

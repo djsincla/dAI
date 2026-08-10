@@ -200,7 +200,27 @@ public actor MLXRuntime {
     /// which does not expose it. That file is the source of truth every runtime
     /// reads, and it is on disk next to the weights whether or not the model is
     /// currently loaded.
+    /// The window worth advertising, which is not the same as the one the
+    /// model was built with.
+    ///
+    /// config.json reports the architectural maximum. A quantised 3B was
+    /// bisected as coherent to about 8k and degrading from there: echoing its
+    /// prompt by 10k, looping by 12k, collapsing to punctuation by 20k. Telling
+    /// a client 131072 invites it to fill a window the model cannot use, and
+    /// the failure then looks like a server fault rather than a model limit.
+    ///
+    /// So the advertised figure is capped by DAI_USABLE_CONTEXT when set. It is
+    /// a judgement about a specific model on specific weights, which is why it
+    /// is configuration rather than something inferred: nothing in the model
+    /// directory records where it stops being coherent.
     public var contextLength: Int? {
+        guard let architectural = architecturalContextLength else { return nil }
+        guard let cap = ProcessInfo.processInfo.environment["DAI_USABLE_CONTEXT"],
+              let usable = Int(cap), usable > 0 else { return architectural }
+        return min(architectural, usable)
+    }
+
+    private var architecturalContextLength: Int? {
         let config = Self.modelDirectory
             .appendingPathComponent(modelId)
             .appendingPathComponent("config.json")

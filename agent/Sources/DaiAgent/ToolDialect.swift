@@ -72,6 +72,11 @@ public struct ToolDialect: Codable, Sendable, Equatable {
 public struct ToolCall: Sendable, Equatable {
     public let name: String
     public let arguments: JSONValue
+
+    public init(name: String, arguments: JSONValue) {
+        self.name = name
+        self.arguments = arguments
+    }
 }
 
 /// What a model actually said: prose, calls, or both.

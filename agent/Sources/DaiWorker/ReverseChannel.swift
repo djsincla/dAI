@@ -160,15 +160,35 @@ public actor ReverseChannel {
                        out.toolCalls.isEmpty ? ""
                          : ", \(out.toolCalls.count) tool call"
                            + (out.toolCalls.count == 1 ? "" : "s")))
+            // Coerced against the schema the caller declared, so a field the
+            // model spelled as a string ("24" for an integer) does not make the
+            // client reject a call it otherwise got right.
+            let schemas = toolSchemas(dispatch.body)
+            let calls = out.toolCalls.map { call in
+                ToolCall(name: call.name,
+                         arguments: ToolSchema.coerce(call.arguments, to: schemas[call.name]))
+            }
             try await controlPlane.reportDispatch(
                 id: dispatch.id, text: out.text, error: nil,
                 promptTokens: out.promptTokens, completionTokens: out.completionTokens,
-                toolCalls: out.toolCalls)
+                toolCalls: calls)
         } catch {
             log("failed: \(error)")
             try? await controlPlane.reportDispatch(
                 id: dispatch.id, text: nil, error: String(describing: error))
         }
+    }
+
+    /// Declared input schemas, keyed by tool name.
+    private func toolSchemas(_ body: JSONValue) -> [String: JSONValue] {
+        guard let tools = body["tools"]?.arrayValue else { return [:] }
+        var out: [String: JSONValue] = [:]
+        for tool in tools {
+            guard let name = tool["name"]?.stringValue else { continue }
+            // Both spellings: Anthropic calls it input_schema, OpenAI parameters.
+            out[name] = tool["input_schema"] ?? tool["parameters"]
+        }
+        return out
     }
 
     /// The conversation as roles and content, for the chat template.

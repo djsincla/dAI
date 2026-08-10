@@ -138,8 +138,14 @@ export function createApp(db: Db, surface: Surface = 'both'): Express {
     if (!isServing(req.path)) return next()
     const json = res.json.bind(res)
     res.json = (body: any) => {
-      if (res.statusCode >= 400 && body && typeof body === 'object'
-          && !('type' in body) && ('error' in body || 'detail' in body)) {
+      // Only this project's internal shape, which is {error: "slug", detail}.
+      // A body whose `error` is already an object is a structured error someone
+      // wrote on purpose - the OpenAI surface has its own, and rewrapping it
+      // replaced a correct shape with a different correct shape, which is how
+      // this broke two tests that were right all along.
+      const internal = body && typeof body === 'object'
+        && typeof (body as any).error === 'string'
+      if (res.statusCode >= 400 && internal) {
         return json({
           type: 'error',
           error: {

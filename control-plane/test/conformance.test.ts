@@ -55,7 +55,7 @@ describe('routes and specification agree', () => {
     const ca = new Ca(await loadOrCreateCa(join(caDir, 'ca.crt'), join(caDir, 'ca.key')))
     mounts = [
       ['/agent/v1', agentRoutes(fakeDb(), new Broker(), ca)],
-      ['/admin/v1', adminRoutes(fakeDb(), ca)],
+      ['/admin/v1', adminRoutes(fakeDb(), ca, new Broker())],
       ['/v1', servingRoutes(fakeDb(), new Broker())],
       ['/api', compatRoutes(fakeDb(), new Broker())],
     ]

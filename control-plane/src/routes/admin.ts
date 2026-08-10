@@ -3,8 +3,9 @@ import type { Db } from '../lib/db.js'
 import { mayPauseNode, requireRole, userAuth } from '../lib/auth.js'
 import { POLICY, type PresenceState } from '../lib/policy.js'
 import type { Ca } from '../lib/ca.js'
+import type { Broker } from '../lib/broker.js'
 
-export function adminRoutes(db: Db, ca: Ca): Router {
+export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
   const r = Router()
   r.use(userAuth(db))
 
@@ -12,7 +13,7 @@ export function adminRoutes(db: Db, ca: Ca): Router {
     const { rows } = await db.query(
       `SELECT id, hostname, chip, memory_gb, metal_working_set_gb, tier, state,
               owner_user_id, presence_state, last_heartbeat, capability_profiles,
-              user_paused, user_paused_at
+              user_paused, user_paused_at, resident_models, model_context
          -- Superseded records are history, not fleet. They are the previous
          -- enrollment of a machine that is still here under a newer identity,
          -- so listing them shows the same hardware twice, which is the problem
@@ -31,6 +32,17 @@ export function adminRoutes(db: Db, ca: Ca): Router {
       presenceState: n.presence_state,
       userPaused: n.user_paused ?? false,
       userPausedAt: n.user_paused_at ? new Date(n.user_paused_at).toISOString() : null,
+      // What this node can answer with, and whether it could answer now.
+      //
+      // The fleet view could say a machine was busy and not what with, which is
+      // a poor answer for an operator and no answer at all for the person whose
+      // machine it is. Serving is separate from presence: a node holding the
+      // channel open is available, and one mid-request is neither idle nor
+      // gone.
+      models: Object.keys({ ...(n.model_context ?? {}), ...(n.resident_models ?? {}) }),
+      residentModels: Object.keys(n.resident_models ?? {}),
+      serving: broker.isConnected(n.id),
+      inFlight: broker.inFlightCounts.get(n.id) ?? 0,
       lastHeartbeat: n.last_heartbeat,
       capabilityProfiles: n.capability_profiles,
     })))
@@ -288,6 +300,17 @@ export function adminRoutes(db: Db, ca: Ca): Router {
       presenceState: n.presence_state,
       userPaused: n.user_paused ?? false,
       userPausedAt: n.user_paused_at ? new Date(n.user_paused_at).toISOString() : null,
+      // What this node can answer with, and whether it could answer now.
+      //
+      // The fleet view could say a machine was busy and not what with, which is
+      // a poor answer for an operator and no answer at all for the person whose
+      // machine it is. Serving is separate from presence: a node holding the
+      // channel open is available, and one mid-request is neither idle nor
+      // gone.
+      models: Object.keys({ ...(n.model_context ?? {}), ...(n.resident_models ?? {}) }),
+      residentModels: Object.keys(n.resident_models ?? {}),
+      serving: broker.isConnected(n.id),
+      inFlight: broker.inFlightCounts.get(n.id) ?? 0,
       onAcPower: n.on_ac_power, thermalOk: n.thermal_ok,
       lastHeartbeat: n.last_heartbeat, capabilityProfiles: n.capability_profiles,
       allowedCidrs: n.allowed_cidrs,

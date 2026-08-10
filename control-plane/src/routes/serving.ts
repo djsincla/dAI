@@ -275,9 +275,17 @@ export function servingRoutes(db: Db, broker: Broker): Router {
     })
 
     if (!out.ok) {
-      res.status(503).json({
+      // A prompt the node cannot read is the caller's request being too large,
+      // and it will never succeed however often it is sent. 503 says the
+      // opposite - transient, retry me - so a well-behaved client retries
+      // forever. The API this imitates answers 400 with "prompt is too long".
+      const tooLong = (out.error ?? '').includes('prompt is too long')
+      res.status(tooLong ? 400 : 503).json({
         type: 'error',
-        error: { type: 'api_error', message: out.error },
+        error: {
+          type: tooLong ? 'invalid_request_error' : 'api_error',
+          message: out.error,
+        },
       })
       return
     }

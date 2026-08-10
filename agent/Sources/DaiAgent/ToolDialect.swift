@@ -67,6 +67,15 @@ public struct ToolDialect: Codable, Sendable, Equatable {
     /// the conversation ends on a tool result, which is the shape of every
     /// agentic turn.
     public var toolResultRole: String?
+
+    /// The opening of a tool call in this dialect, used to force one.
+    ///
+    /// tool_choice is a guarantee in the API this imitates, and leaving it to
+    /// the model's discretion is not an implementation of it - a 32B declined
+    /// just as a 3B did, so the error text blaming model size was wrong about
+    /// its own cause. Prefilling the assistant turn with the start of a call
+    /// leaves the model with nothing to continue except the call.
+    public var callPrefix: String?
 }
 
 public struct ToolCall: Sendable, Equatable {
@@ -99,7 +108,8 @@ public enum ToolDialects {
         "parse": { "style": "tagged-json", "open": "<tool_call>", "close": "</tool_call>",
                    "nameField": "name", "argsField": "arguments" },
         "stop": ["</tool_call>"],
-        "toolResultRole": "tool"
+        "toolResultRole": "tool",
+        "callPrefix": "<tool_call>"
       },
       {
         "id": "mistral",
@@ -115,7 +125,8 @@ public enum ToolDialects {
         "parse": { "style": "bare-json", "nameField": "name", "argsField": "parameters" },
         "stop": ["<|eom_id|>", "<|eot_id|>"],
         "truncateAt": ["<|eom_id|>", "<|eot_id|>"],
-        "toolResultRole": "ipython"
+        "toolResultRole": "ipython",
+        "callPrefix": "<|python_tag|>"
       },
       {
         "id": "generic-json",
@@ -208,7 +219,23 @@ public extension ToolDialect {
             if !bare.calls.isEmpty { parsed = bare }
         }
 
-        return ToolParse(text: Self.stripControlTokens(parsed.text), calls: parsed.calls)
+        return ToolParse(text: cleaned(parsed.text), calls: parsed.calls)
+    }
+
+    /// Strip the scaffolding a model leaves behind once its calls are read out.
+    ///
+    /// Models echo the framing they were given: an empty `<tools></tools>`
+    /// block, or the opening marker when a call has already been consumed from
+    /// after it. None of that is anything a reader should see, and it makes an
+    /// otherwise clean reply look like a leak of the plumbing.
+    private func cleaned(_ text: String) -> String {
+        var out = text
+        out = out.replacingOccurrences(
+            of: "<tools>[\\s\\S]*?</tools>", with: "", options: .regularExpression)
+        for marker in [parse.open, parse.close, callPrefix].compactMap({ $0 }) {
+            out = out.replacingOccurrences(of: marker, with: "")
+        }
+        return Self.stripControlTokens(out)
     }
 
     /// Remove the model's own control tokens from prose.
@@ -278,8 +305,14 @@ public extension ToolDialect {
             }
             text += output[index..<open]
             guard let close = balancedEnd(of: output, from: open) else {
-                text += output[open...]
-                break
+                // Unbalanced from here, which happens whenever generation stops
+                // mid-object. A well-formed call often sits nested inside it -
+                // a model repeating the structure leaves the outer one open and
+                // the inner one complete - so advance rather than abandoning
+                // the rest of the output.
+                text += output[open..<output.index(after: open)]
+                index = output.index(after: open)
+                continue
             }
             let candidate = String(output[open...close])
             if let call = call(fromJSON: candidate) {

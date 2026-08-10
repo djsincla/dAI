@@ -129,10 +129,12 @@ public actor MLXRuntime {
 
     public func complete(prompt: String, maxTokens: Int,
                          tools: [DaiAgent.JSONValue]? = nil,
-                         messages: [[String: String]]? = nil) async throws -> Completion {
+                         messages: [[String: String]]? = nil,
+                         forceTool: String? = nil) async throws -> Completion {
         let started = Date()
         let out = try await generateCompletion(prompt: prompt, maxTokens: maxTokens,
-                                               tools: tools, messages: messages)
+                                               tools: tools, messages: messages,
+                                               forceTool: forceTool)
         let elapsed = Date().timeIntervalSince(started)
 
         // Measured here rather than taken from MLX's promptTime, which reports
@@ -153,10 +155,33 @@ public actor MLXRuntime {
 
     private func generateCompletion(prompt: String, maxTokens: Int,
                                     tools: [DaiAgent.JSONValue]? = nil,
-                                    messages: [[String: String]]? = nil) async throws -> Completion {
+                                    messages: [[String: String]]? = nil,
+                                    forceTool: String? = nil) async throws -> Completion {
         guard let container else { throw Failure.notLoaded }
         let dialect = toolDialect
-        let conversation = messages ?? [["role": "user", "content": prompt]]
+        var built = messages ?? [["role": "user", "content": prompt]]
+
+        // Forcing a call by instruction as well as by prefill. The prefill is
+        // the part that actually binds, but a model that has been told plainly
+        // produces better arguments than one that has merely been cornered.
+        var opening = ""
+        if let forceTool, let dialect {
+            built.append([
+                "role": "user",
+                "content": "Call the \(forceTool) tool now. Reply with the call and nothing else.",
+            ])
+            // Only the marker, not the JSON skeleton. Supplying
+            // {"name": ..., "arguments": led the model to restate the whole
+            // structure inside its own arguments - a call nested in a call -
+            // because the prefix reads as an example rather than as a
+            // beginning. The tag alone leaves it to write one object.
+            opening = dialect.callPrefix ?? ""
+        }
+        // Bound before the closure: Swift 6 will not carry a mutable capture
+        // across a concurrency boundary, and both of these are built above.
+        let conversation = built
+        let prefill = opening
+
         // Converted inside, because [[String: Any]] is not Sendable and cannot
         // cross into the closure.
         let hasTools = !(tools?.isEmpty ?? true)
@@ -177,7 +202,9 @@ public actor MLXRuntime {
                 parameters: GenerateParameters(maxTokens: maxTokens, temperature: 0),
                 context: context)
 
-            var text = ""
+            // The prefill is prepended to whatever the model produces, so the
+            // parser sees a complete call rather than its second half.
+            var text = prefill
             var promptTokens = 0
             var completionTokens = 0
             var promptSeconds = 0.0
@@ -198,6 +225,14 @@ public actor MLXRuntime {
                     break
                 }
             }
+            // Raw output, behind a flag. Every tool-parsing problem so far has
+            // been a question of what the model actually emitted, and answering
+            // it by reasoning from the parsed result has been wrong more often
+            // than right.
+            if ProcessInfo.processInfo.environment["DAI_LOG_RAW"] == "1" {
+                FileHandle.standardError.write(Data("raw: \(text)\n".utf8))
+            }
+
             guard let dialect, hasTools else {
                 return Completion(text: text, promptTokens: promptTokens,
                                   completionTokens: completionTokens,
@@ -256,10 +291,24 @@ public actor MLXRuntime {
            let usable = Int(cap), usable > 0 {
             limit = min(limit, usable)
         }
-        if let measured = observedContextLimit {
+        // Opt-in, and off by default, because the first thing it did was make
+        // the node unusable. It measured a 32B at 6144 tokens against a 32768
+        // architectural window, which is defensible as a latency statement and
+        // useless as a product: a coding client's system prompt and tool
+        // schemas alone run 10-16k, so no conversation fit at all and every
+        // request was refused before it started.
+        //
+        // A slow answer is a worse experience than a fast one. No answer is not
+        // an experience.
+        if Self.adaptiveContextEnabled, let measured = observedContextLimit {
             limit = min(limit, measured)
         }
         return limit
+    }
+
+    /// Whether the measured limit is allowed to shrink what this node offers.
+    static var adaptiveContextEnabled: Bool {
+        ProcessInfo.processInfo.environment["DAI_ADAPTIVE_CONTEXT"] == "1"
     }
 
     /// Prompt tokens this node can actually process inside the answer budget.

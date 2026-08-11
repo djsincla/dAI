@@ -505,3 +505,60 @@ CREATE TABLE IF NOT EXISTS work_outputs (
 );
 
 CREATE INDEX IF NOT EXISTS work_outputs_job_idx ON work_outputs(job_id, created_at);
+
+-- ---------------------------------------------------------------------------
+-- Job attachments, and not keeping them
+--
+-- This replaces the scene catalogue, which was the wrong lifetime. A catalogue
+-- is right for models: a few GB, fetched once, shared by every job that uses
+-- them, worth keeping. A scene is tens of GB, belongs to whoever submitted it,
+-- and is worthless the moment the job ends. Catalogued the same way, it would
+-- sit on the control plane and on forty workstations forever, and nobody would
+-- have a reason to look.
+--
+-- So content arrives with a job, is kept while the job needs it, and is
+-- deleted when it does not. Content-addressed, so a resubmission of the same
+-- shot uploads only what changed, and so two jobs sharing a texture library
+-- store it once.
+
+CREATE TABLE IF NOT EXISTS attachment_blobs (
+    sha256       text PRIMARY KEY,
+    size_bytes   bigint NOT NULL,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    -- Touched whenever a job references it, so a blob shared by a long series
+    -- of jobs is not aged out from under the last one.
+    last_used_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- What a job needs on a machine, and where it goes once it is there.
+--
+-- `path` is relative to the job's own working set, never absolute. The
+-- submitter's paths are its own: /Volumes/artist-home means nothing on the
+-- machine that will render, and a path from a submission that could be written
+-- to would be the same hole as a work unit naming a file.
+CREATE TABLE IF NOT EXISTS job_attachments (
+    job_id    uuid NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    path      text NOT NULL,
+    sha256    text NOT NULL REFERENCES attachment_blobs(sha256),
+    data_flow text NOT NULL DEFAULT 'IN' CHECK (data_flow IN ('IN','OUT','INOUT')),
+    PRIMARY KEY (job_id, path)
+);
+
+CREATE INDEX IF NOT EXISTS job_attachments_blob_idx ON job_attachments(sha256);
+
+-- The template as submitted, kept verbatim.
+--
+-- Not because anything reads it back to run the job - the command in it is
+-- deliberately never executed - but because when somebody asks why a job did
+-- what it did, the answer is what they sent, not this system's reading of it.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS openjd_template jsonb;
+
+-- Which attachment the adapter opens. Chosen once, at submission, from the
+-- template's IN paths, rather than worked out on each node: two machines
+-- guessing differently would render two different scenes under one job.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS entry_path text;
+
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS completed_at timestamptz;
+
+-- When the frames were handed back, which starts the clock on deleting them.
+ALTER TABLE work_outputs ADD COLUMN IF NOT EXISTS collected_at timestamptz;

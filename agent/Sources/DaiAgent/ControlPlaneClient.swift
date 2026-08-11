@@ -20,7 +20,7 @@ public protocol ControlPlaneClient: Actor {
     func leaseWork(kinds: [WorkKind]) async throws -> ControlPlane.Lease?
     var lastLeaseReason: String? { get }
     func report(unitId: String, completed: [WorkItem], unfinished: [WorkItem],
-                seconds: Double, failed: Bool) async throws -> Int
+                seconds: Double, failed: Bool) async throws -> ControlPlane.ReportOutcome
     func awaitDispatch() async throws -> ControlPlane.Dispatch?
     func reportDispatch(id: String, text: String?, error: String?,
                         promptTokens: Int, completionTokens: Int,
@@ -36,6 +36,8 @@ public protocol ControlPlaneClient: Actor {
     func renew(csrPEM: String) async throws -> ControlPlane.Renewed
     func sceneManifest(id: String) async throws -> ControlPlane.SceneManifest
     func downloadSceneFile(sceneId: String, path: String, to destination: URL) async throws -> String
+    func jobAttachments(jobId: String) async throws -> ControlPlane.SceneManifest
+    func downloadBlob(sha256: String, to destination: URL) async throws -> String
     @discardableResult
     func uploadOutput(unitId: String, name: String, file: URL) async throws -> Int
 }
@@ -62,7 +64,8 @@ public extension ControlPlaneClient {
 
     @discardableResult
     func report(unitId: String, completed: [WorkItem], unfinished: [WorkItem],
-                seconds: Double, failed: Bool = false) async throws -> Int {
+                seconds: Double, failed: Bool = false) async throws
+        -> ControlPlane.ReportOutcome {
         try await report(unitId: unitId, completed: completed, unfinished: unfinished,
                          seconds: seconds, failed: failed)
     }

@@ -5,6 +5,7 @@ import { agentAuth } from '../lib/auth.js'
 import { poolsFor } from '../lib/pools.js'
 import { repositoryRoot, safePath } from '../lib/repository.js'
 import { outputsRoot, sceneById, scenesRoot } from '../lib/scenes.js'
+import { blobPath, finishIfDone, manifestFor, outputPath } from '../lib/attachments.js'
 import { buildPath, desiredBuildFor } from '../lib/agentBuilds.js'
 import { POLICY, type WorkKind } from '../lib/policy.js'
 import { LeaseConflict, leaseWork, reportResult } from '../lib/work.js'
@@ -206,6 +207,49 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
   })
 
   /**
+   * What a job needs on this machine.
+   *
+   * The manifest, not the bytes. A node compares it with what it already holds
+   * and fetches only the gaps, which is what makes the second frame of a job on
+   * the same machine nearly free - and content is tens of gigabytes, so "nearly
+   * free" is the difference between a fleet that renders and one that spends
+   * its evening copying.
+   */
+  r.get('/jobs/:jobId/attachments', async (req, res) => {
+    const { rows } = await db.query(
+      `SELECT entry_path FROM jobs WHERE id = $1`, [req.params.jobId])
+    if (rows.length === 0) {
+      res.status(404).json({ error: 'not_found', detail: 'no such job' })
+      return
+    }
+    res.json({ entry: rows[0]!.entry_path, files: await manifestFor(db, req.params.jobId!) })
+  })
+
+  /**
+   * One piece of content, by its hash.
+   *
+   * Checked against what some job actually references before the disk is
+   * touched, so the store cannot be enumerated by a node guessing hashes, and
+   * so content whose last job has finished is already unreachable before the
+   * reaper gets to it.
+   */
+  r.get('/blobs/:sha256', async (req, res) => {
+    const sha256 = req.params.sha256!.toLowerCase()
+    const { rows } = await db.query(
+      `SELECT 1 FROM job_attachments WHERE sha256 = $1 LIMIT 1`, [sha256])
+    if (rows.length === 0) {
+      res.status(404).json({ error: 'not_found', detail: 'no live job references that content' })
+      return
+    }
+    const full = blobPath(sha256)
+    if (!full || !existsSync(full)) {
+      res.status(404).json({ error: 'not_found', detail: 'referenced but not stored' })
+      return
+    }
+    res.sendFile(full)
+  })
+
+  /**
    * The scene manifest, so a node can work out what it is missing.
    *
    * The manifest rather than the bytes. A node compares this with what it has
@@ -269,7 +313,7 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
     // The name lands on disk, so it is held to the same allow-list as every
     // other caller-supplied path segment rather than trusted for having come
     // from a node we authenticated.
-    const dest = safePath(outputsRoot(), unit.job_id, name)
+    const dest = outputPath(unit.job_id, name)
     if (!dest) {
       res.status(400).json({ error: 'bad_request', detail: 'that output name cannot be a file' })
       return
@@ -585,7 +629,28 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
         `INSERT INTO activity_log (node_id, event, detail) VALUES ($1,'work.result',$2)`,
         [req.node!.id, JSON.stringify({ unitId: req.params.unitId, ...out })],
       )
-      res.json(out)
+      // Asked here rather than on a timer. The moment the last unit stops is
+      // the moment the job's inputs are dead, and holding tens of gigabytes of
+      // somebody else's scene for the length of a polling interval is holding
+      // it for no reason at all.
+      const { rows: which } = await db.query(
+        `SELECT job_id FROM work_units WHERE id = $1`, [req.params.unitId])
+      let jobFinished = false
+      if (which[0]?.job_id) {
+        const done = await finishIfDone(db, which[0].job_id as string)
+        jobFinished = done.finished
+        if (done.finished) {
+          await db.query(
+            `INSERT INTO activity_log (node_id, event, detail) VALUES ($1,'job.finished',$2)`,
+            [req.node!.id, JSON.stringify({ jobId: which[0].job_id,
+                                            blobsDeleted: done.blobsDeleted })],
+          )
+        }
+      }
+      // Told to the node, so it can delete its own copy of the job's content
+      // rather than waiting to be swept. The machine belongs to somebody else
+      // and tens of gigabytes of a finished job is not the agent's to keep.
+      res.json({ ...out, jobFinished })
     } catch (err) {
       if (err instanceof LeaseConflict) {
         res.status(409).json({ error: 'lease_conflict', detail: err.message })

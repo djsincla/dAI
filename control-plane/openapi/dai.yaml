@@ -207,6 +207,69 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
 
+  /agent/v1/jobs/{jobId}/attachments:
+    get:
+      tags: [agent]
+      summary: What a job needs on this machine
+      description: |
+        The manifest, not the bytes. A node compares it with what it already
+        holds and fetches only the gaps, which is what makes the second frame of
+        a job on the same machine nearly free.
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The manifest
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [files]
+                properties:
+                  entry:
+                    type: string
+                    nullable: true
+                    description: |
+                      The file the adapter opens, from the job rather than from
+                      the work unit.
+                  files:
+                    type: array
+                    items:
+                      type: object
+                      required: [path, sha256]
+                      properties:
+                        path: { type: string }
+                        sha256: { type: string }
+                        sizeBytes: { type: integer, format: int64 }
+                        dataFlow: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /agent/v1/blobs/{sha256}:
+    get:
+      tags: [agent]
+      summary: One piece of a job's content, by its hash
+      description: |
+        Served only while some live job references it, so the store cannot be
+        enumerated by guessing hashes, and content whose last job has finished
+        is already unreachable before the reaper deletes it.
+      parameters:
+        - name: sha256
+          in: path
+          required: true
+          schema: { type: string, pattern: '^[0-9a-fA-F]{64}$' }
+      responses:
+        '200':
+          description: The content
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /agent/v1/scenes/{sceneId}:
     get:
       tags: [agent]
@@ -523,6 +586,14 @@ paths:
                 required: [requeued]
                 properties:
                   requeued: { type: integer, minimum: 0 }
+                  jobFinished:
+                    type: boolean
+                    description: |
+                      Whether that was the last unit of the job. Told to the
+                      node so it can delete its own copy of the job's content
+                      rather than waiting to be swept: the machine belongs to
+                      somebody else, and tens of gigabytes of a finished job is
+                      not the agent's to keep.
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409':
@@ -1704,6 +1775,145 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
 
         '401': { $ref: '#/components/responses/Unauthorized' }
+  /admin/v1/blobs/{sha256}:
+    put:
+      tags: [admin]
+      summary: Upload one piece of a job's content, named by its own hash
+      description: |
+        Content-addressed, so a resubmission after a lighting tweak uploads the
+        file that changed rather than the bundle, and two jobs sharing a texture
+        library store it once. The bytes are hashed on arrival and refused if
+        they do not match the name they were sent under: accepting them would
+        put the wrong content under a name some job is about to fetch, and every
+        machine would render it without complaint.
+
+        Nothing uploaded here is kept once the jobs referencing it have
+        finished.
+      parameters:
+        - name: sha256
+          in: path
+          required: true
+          schema: { type: string, pattern: '^[0-9a-fA-F]{64}$' }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '200':
+          description: Stored
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sha256, sizeBytes]
+                properties:
+                  sha256: { type: string }
+                  sizeBytes: { type: integer, format: int64 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /admin/v1/blobs/missing:
+    post:
+      tags: [admin]
+      summary: Which of these the fleet does not already hold
+      description: |
+        Asked before uploading, so a submitter sends only what is new. This is
+        what makes resubmitting a shot cheap.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sha256s]
+              properties:
+                sha256s:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200':
+          description: The ones to send
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [missing]
+                properties:
+                  missing:
+                    type: array
+                    items: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /admin/v1/jobs/openjd:
+    post:
+      tags: [admin]
+      summary: Submit an Open Job Description job template
+      description: |
+        OpenJD is the open specification for portable render jobs, so a studio's
+        existing submitter can point at this fleet without knowing what it is.
+        The parameter space, range expressions, job parameters and their data
+        flow are the specification as written.
+
+        **One deliberate departure.** OpenJD describes a step's work as
+        `script.actions.onRun.command` with `args` - an executable and its
+        arguments - which is correct for a farm you own. These machines belong
+        to the people sitting at them, borrowed on the promise that the agent
+        does what it says and nothing else. Running a command from a submission
+        would make "submit a job" mean "run this binary on fifty of your
+        colleagues' workstations".
+
+        So `command` is resolved to an adapter this fleet has, and never
+        executed. A template naming something with no adapter is refused here,
+        once, rather than accepted and failed on every machine in turn.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [poolId, template]
+              properties:
+                poolId: { type: string, format: uuid }
+                template:
+                  type: object
+                  description: An OpenJD job template, `jobtemplate-2023-09`.
+                  additionalProperties: true
+                parameterValues:
+                  type: object
+                  description: Values for the template's job parameters.
+                  additionalProperties: true
+                attachments:
+                  type: array
+                  description: |
+                    Where each uploaded blob goes inside the job's working set.
+                    Paths are relative and constrained: the submitter's own
+                    paths mean nothing on the machine that will render.
+                  items:
+                    type: object
+                    required: [path, sha256]
+                    properties:
+                      path: { type: string }
+                      sha256: { type: string }
+                      dataFlow: { type: string, enum: [IN, OUT, INOUT] }
+                entryPath:
+                  type: string
+                  description: |
+                    Which attachment the adapter opens. Worked out from the
+                    attachments when exactly one is a scene; required when there
+                    is any doubt, because two machines guessing differently
+                    would render two different scenes under one job.
+                source: { type: string }
+      responses:
+        '201':
+          description: Submitted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
   /admin/v1/scenes:
     get:
       tags: [admin]
@@ -2089,6 +2299,12 @@ components:
             Content hash from the signed catalogue. A work unit carries data and
             references a model; it cannot name an interpreter, a path, or a
             command. That bounds the blast radius of a compromised control plane.
+        jobId:
+          type: string
+          format: uuid
+          description: |
+            Which job this unit belongs to, so a node can ask what content the
+            job needs and, when the job ends, know what it may delete.
         sceneId:
           type: string
           nullable: true

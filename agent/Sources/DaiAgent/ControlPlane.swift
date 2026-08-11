@@ -302,6 +302,22 @@ public actor ControlPlane {
                               nodeCAPEM: d["nodeCaPem"]?.stringValue)
     }
 
+    public struct ReportOutcome: Sendable {
+        public let requeued: Int
+        /// Whether that was the last unit of the job.
+        ///
+        /// Told rather than inferred, so a node can delete its copy of the
+        /// job's content the moment it becomes rubbish. Waiting to be swept
+        /// would leave tens of gigabytes of somebody else's finished work on
+        /// somebody else's workstation, and the agent is a guest there.
+        public let jobFinished: Bool
+
+        public init(requeued: Int, jobFinished: Bool = false) {
+            self.requeued = requeued
+            self.jobFinished = jobFinished
+        }
+    }
+
     public struct Renewed: Sendable {
         public let certPEM: String
         public let rekeyed: Bool
@@ -551,6 +567,32 @@ public actor ControlPlane {
         return bytes.count
     }
 
+    /// What a job needs on this machine, and which file the adapter opens.
+    public func jobAttachments(jobId: String) async throws -> SceneManifest {
+        let id = jobId.addingPercentEncoding(withAllowedCharacters: .daiPathSegment) ?? jobId
+        let (code, data) = try await request("GET", "agent/v1/jobs/\(id)/attachments")
+        guard code == 200 else { throw Failure.http(code, "fetching attachments for \(jobId)") }
+        let d = json(data)
+        let files = (d["files"]?.arrayValue ?? []).compactMap { item -> SceneManifest.File? in
+            guard let o = item.objectValue, let path = o["path"]?.stringValue,
+                  let sha = o["sha256"]?.stringValue else { return nil }
+            return SceneManifest.File(path: path,
+                                      sizeBytes: o["sizeBytes"]?.intValue ?? 0,
+                                      sha256: sha)
+        }
+        return SceneManifest(id: jobId, entry: d["entry"]?.stringValue ?? "", files: files)
+    }
+
+    /// One piece of content, by its hash. Written to `<destination>.partial`,
+    /// like every other transfer here, so the caller decides to accept it only
+    /// after checking what arrived.
+    public func downloadBlob(sha256: String, to destination: URL) async throws -> String {
+        let root = base.absoluteString.hasSuffix("/")
+            ? String(base.absoluteString.dropLast()) : base.absoluteString
+        return try await stream("\(root)/agent/v1/blobs/\(sha256)",
+                                to: destination, describing: sha256)
+    }
+
     // MARK: - Agent builds
 
     public struct DesiredBuild: Sendable {
@@ -681,17 +723,21 @@ public actor ControlPlane {
         /// unit. The unit says which frame; the job says of what. Keeping those
         /// two apart is what stops a submission naming the content it wants.
         public var sceneId: String?
+        /// Which job this unit belongs to. A node asks the job what content it
+        /// needs, and is told by the job when it may delete it again.
+        public var jobId: String?
         public let items: [WorkItem]
 
         public init(jobLabel: String? = nil, jobSource: String = "api",
                     unitId: String, kind: WorkKind, modelHash: String? = nil,
-                    sceneId: String? = nil, items: [WorkItem]) {
+                    sceneId: String? = nil, jobId: String? = nil, items: [WorkItem]) {
             self.jobLabel = jobLabel
             self.jobSource = jobSource
             self.unitId = unitId
             self.kind = kind
             self.modelHash = modelHash
             self.sceneId = sceneId
+            self.jobId = jobId
             self.items = items
         }
     }
@@ -734,7 +780,8 @@ public actor ControlPlane {
                      jobSource: d["jobSource"]?.stringValue ?? "api",
                      unitId: id, kind: kind,
                      modelHash: d["modelHash"]?.stringValue,
-                     sceneId: d["sceneId"]?.stringValue, items: items)
+                     sceneId: d["sceneId"]?.stringValue,
+                     jobId: d["jobId"]?.stringValue, items: items)
     }
 
     /// Report completed items and hand back what was not reached.
@@ -745,13 +792,15 @@ public actor ControlPlane {
     @discardableResult
     public func report(unitId: String, completed: [WorkItem],
                        unfinished: [WorkItem], seconds: Double,
-                       failed: Bool = false) async throws -> Int {
+                       failed: Bool = false) async throws -> ReportOutcome {
         let (_, data) = try await request("POST", "agent/v1/work/\(unitId)/result",
                                           body: .object([
             "completed": .array(completed), "unfinished": .array(unfinished),
             "seconds": .number(seconds), "failed": .bool(failed),
         ]))
-        return json(data)["requeued"]?.intValue ?? 0
+        let d = json(data)
+        return ReportOutcome(requeued: d["requeued"]?.intValue ?? 0,
+                             jobFinished: d["jobFinished"]?.boolValue ?? false)
     }
 }
 

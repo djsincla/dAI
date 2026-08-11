@@ -61,3 +61,6 @@ agent/vendor/mlx-swift-examples/.git-fork/
 # frames are the output, which the requester takes and the fleet then forgets.
 control-plane/scenes/
 control-plane/outputs/
+# Content that arrived with a job. Held while the job runs and deleted after,
+# which is the point of it - nothing here should ever reach a commit.
+control-plane/blobs/

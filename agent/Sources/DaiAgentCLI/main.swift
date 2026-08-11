@@ -401,6 +401,9 @@ case "work":
         let renderer = RenderRuntime()
         let scenes = renderer == nil ? nil
             : SceneSync(controlPlane: cp, base: SceneSync.defaultBase(), log: { print($0) })
+        let attachments = renderer == nil ? nil
+            : AttachmentSync(controlPlane: cp, base: AttachmentSync.defaultBase(),
+                             log: { print($0) })
         if let renderer {
             print("renderer: \(await renderer.rendererPath)")
         } else {
@@ -409,7 +412,8 @@ case "work":
 
         let worker = Worker(controlPlane: cp, gpu: gpu, ane: ane,
                             status: status, modelSync: modelSync,
-                            renderer: renderer, scenes: scenes, renewer: renewer,
+                            renderer: renderer, scenes: scenes, attachments: attachments,
+                            renewer: renewer,
                             promoteAfter: promote)
 
         // Batch and serving run side by side in one process, because a node
@@ -578,6 +582,8 @@ case "render":
 
         let scenes = SceneSync(controlPlane: cp, base: SceneSync.defaultBase(),
                                log: { print($0) })
+        let attachments = AttachmentSync(controlPlane: cp, base: AttachmentSync.defaultBase(),
+                                         log: { print($0) })
         let deadline = Date().addingTimeInterval(args.count > 3 ? Double(args[3]) ?? 120 : 120)
         var done = 0
         while Date() < deadline {
@@ -585,10 +591,19 @@ case "render":
                 print("no render work: \(await cp.lastLeaseReason ?? "unknown")")
                 break
             }
-            guard let sceneId = lease.sceneId else {
-                print("unit \(lease.unitId) names no scene"); break
+            // Content comes with the job. A queue that spans the change still
+            // drains: a unit submitted against the old scene catalogue is
+            // fetched the old way.
+            let ready: (entry: URL, root: URL)
+            if let jobId = lease.jobId {
+                let got = try await attachments.ensure(jobId: jobId)
+                ready = (got.entry, got.root)
+            } else if let sceneId = lease.sceneId {
+                let got = try await scenes.ensure(sceneId: sceneId)
+                ready = (got.entry, got.root)
+            } else {
+                print("unit \(lease.unitId) names no content"); break
             }
-            let ready = try await scenes.ensure(sceneId: sceneId)
             var completed: [WorkItem] = []
             let started = Date()
             for item in lease.items {
@@ -607,8 +622,12 @@ case "render":
                 completed.append(.object(["id": item["id"] ?? .null]))
                 done += 1
             }
-            _ = try await cp.report(unitId: lease.unitId, completed: completed,
-                                    unfinished: [], seconds: Date().timeIntervalSince(started))
+            let outcome = try await cp.report(
+                unitId: lease.unitId, completed: completed, unfinished: [],
+                seconds: Date().timeIntervalSince(started))
+            if outcome.jobFinished, let jobId = lease.jobId {
+                await attachments.release(jobId: jobId)
+            }
         }
         print("rendered \(done) frame(s)")
         await cp.shutdown()

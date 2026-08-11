@@ -24,6 +24,9 @@ export interface Lease {
   /// content it wants. A node renders the scene the job says, at the frame the
   /// item says, and the two come from different places on purpose.
   sceneId: string | null
+  /// Which job this unit belongs to, so a node can ask what content the job
+  /// needs and, when the job ends, know what it may delete.
+  jobId: string
   items: unknown[]
   leaseExpiresAt: string
   /// What this work is and where it came from, carried down to the node.
@@ -79,7 +82,7 @@ export async function leaseWork(
 
   return tx(db, async (c: pg.PoolClient) => {
     const { rows } = await c.query(
-      `SELECT u.id, u.kind, u.payload, j.model_hash, j.scene_id, j.label, j.source
+      `SELECT u.id, u.job_id, u.kind, u.payload, j.model_hash, j.scene_id, j.label, j.source
          FROM work_units u
          JOIN jobs j ON j.id = u.job_id
         WHERE u.state = 'pending'
@@ -122,6 +125,7 @@ export async function leaseWork(
       kind: row.kind as WorkKind,
       modelHash: (row.model_hash as string | null) ?? null,
       sceneId: (row.scene_id as string | null) ?? null,
+      jobId: row.job_id as string,
       items: row.payload as unknown[],
       leaseExpiresAt: (leased[0]!.lease_expires_at as Date).toISOString(),
       jobLabel: (row.label as string | null) ?? null,
@@ -226,7 +230,24 @@ export async function reapExpiredLeases(db: Db): Promise<number> {
 export function startReaper(db: Db, intervalMs = 15_000): NodeJS.Timeout {
   const timer = setInterval(() => {
     reapExpiredLeases(db).catch((err) => console.error('reaper failed', err))
+    // The other half of not holding anything indefinitely. Releasing a job's
+    // inputs happens the moment its last unit stops, which covers every job
+    // that ends; this covers the ones that do not - frames nobody collected,
+    // and blobs left behind by a job deleted out from under them.
+    sweepExpired(db).catch((err) => console.error('expiry sweep failed', err))
   }, intervalMs)
   timer.unref()
   return timer
+}
+
+async function sweepExpired(db: Db): Promise<void> {
+  const { expireOutputs, collectGarbage } = await import('./attachments.js')
+  const expired = await expireOutputs(db)
+  if (expired.deleted.length > 0) {
+    console.log(`expired ${expired.deleted.length} output(s) past their retention`)
+  }
+  const collected = await collectGarbage(db)
+  if (collected.blobsDeleted > 0) {
+    console.log(`deleted ${collected.blobsDeleted} unreferenced blob(s)`)
+  }
 }

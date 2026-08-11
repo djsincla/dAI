@@ -14,6 +14,22 @@
   new components and they rendered as dark blocks on a white page.
 */
 
+/*
+  `hidden` means hidden, whatever a layout rule says.
+ 
+  The browser's own rule is `[hidden] { display: none }`, an attribute selector,
+  which any class that sets `display` outranks. `.gate` and `.gate-card` both
+  set `display: grid`, so the sign-in overlay ignored `hidden` entirely: it
+  covered the console permanently and showed the sign-in form and the
+  change-password form stacked on top of each other, because the second is
+  marked hidden in the markup and was never actually hidden.
+ 
+  Declared once, here, rather than by giving every such rule a matching
+  `[hidden]` variant, since the next component to set `display` would bring the
+  bug straight back.
+*/
+[hidden] { display: none !important; }
+
 :root {
   color-scheme: light dark;
 
@@ -524,11 +540,15 @@ th.sortable.desc::after { content: ' \2193'; opacity: 1; color: var(--accent); }
 .gate {
   position: fixed; inset: 0; z-index: 40;
   display: grid; place-items: center; padding: 24px;
-  background: var(--ground);
+  /* An opaque ground, not a scrim. This covered nothing at all until now: it
+     asked for a --ground token that has never existed, so the declaration was
+     invalid and the gate rendered transparent - a sign-in card floating over a
+     console the reader could see but not use. */
+  background: var(--bg);
 }
 .gate-card {
   width: min(400px, 100%);
-  background: var(--panel); border: 1px solid var(--rule);
+  background: var(--panel); border: 1px solid var(--line);
   border-radius: var(--radius); box-shadow: var(--shadow);
   padding: 30px 32px; display: grid; gap: 14px;
 }

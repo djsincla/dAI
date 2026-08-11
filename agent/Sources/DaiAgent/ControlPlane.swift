@@ -302,6 +302,36 @@ public actor ControlPlane {
                               nodeCAPEM: d["nodeCaPem"]?.stringValue)
     }
 
+    public struct Renewed: Sendable {
+        public let certPEM: String
+        public let rekeyed: Bool
+        public let serverCAPEM: String?
+        public let nodeCAPEM: String?
+    }
+
+    /// Ask for a fresh certificate over the identity this node already has.
+    ///
+    /// Authenticated by the certificate being replaced, so there is no token
+    /// and no human. Certificates are short-lived on purpose - a machine that
+    /// leaves the building should stop being a fleet member on its own - and
+    /// that property is only affordable if the machines still here renew
+    /// unattended.
+    public func renew(csrPEM: String) async throws -> Renewed {
+        let (code, data) = try await request("POST", "agent/v1/renew",
+                                             body: .object(["csrPem": .string(csrPEM)]))
+        guard code == 200 else {
+            throw Failure.http(code, String(data: data, encoding: .utf8) ?? "renewal refused")
+        }
+        let d = json(data)
+        guard let cert = d["certPem"]?.stringValue else {
+            throw Failure.http(code, "renewal response carried no certificate")
+        }
+        return Renewed(certPEM: cert,
+                       rekeyed: d["rekeyed"]?.boolValue ?? false,
+                       serverCAPEM: d["serverCaPem"]?.stringValue,
+                       nodeCAPEM: d["nodeCaPem"]?.stringValue)
+    }
+
     // MARK: - Policy
 
     /// The served policy table, in the agent's shape.

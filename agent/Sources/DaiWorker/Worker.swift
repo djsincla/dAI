@@ -33,7 +33,10 @@ public actor Worker {
         }
     }
 
-    private let controlPlane: any ControlPlaneClient
+    /// Replaced when the certificate is renewed. Renewal retires the old
+    /// certificate the moment the new one is issued, so a client still holding
+    /// the old one would start being told it is unknown.
+    private var controlPlane: any ControlPlaneClient
     private let source: SignalSource
     private let monitor: PresenceMonitor
     private let pauseSwitch: PauseSwitch
@@ -64,6 +67,10 @@ public actor Worker {
     /// with no model directory configured has nowhere to put them.
     private var modelSync: ModelSync?
 
+    /// Keeps this node's certificate current. Optional because a test, and a
+    /// one-shot run, has no identity on disk to renew.
+    private let renewer: (any CertificateRenewing)?
+
     /// One transfer at a time. Without this the loop would launch another every
     /// pass while the first was still running, and a slow link would end up
     /// fetching the same model a dozen times over.
@@ -87,8 +94,10 @@ public actor Worker {
                 pauseSwitch: PauseSwitch = PauseSwitch(),
                 status: StatusPublisher = StatusPublisher(),
                 modelSync: ModelSync? = nil,
+                renewer: (any CertificateRenewing)? = nil,
                 sleepAssertion: SleepAssertion = SleepAssertion(),
                 promoteAfter: TimeInterval = idlePromoteSeconds) {
+        self.renewer = renewer
         self.sleepAssertion = sleepAssertion
         self.modelSync = modelSync
         self.status = status
@@ -178,6 +187,24 @@ public actor Worker {
         for (id, why) in outcome.failed { log("model \(id) failed: \(why)") }
     }
 
+    /// Keep the certificate current.
+    ///
+    /// In the loop rather than on a timer of its own, because this is the loop
+    /// that runs for as long as the machine is a fleet member. The renewer
+    /// decides whether anything is actually due, and rate-limits its own
+    /// retries, so calling it every pass costs a comparison.
+    ///
+    /// Awaited rather than detached, unlike a model transfer. Renewal is one
+    /// small request, and the client it hands back has to be in place before
+    /// the next heartbeat goes out on the certificate that was just retired.
+    private func renewIfDue() async {
+        guard let renewer else { return }
+        if let replacement = await renewer.renewIfDue(now: Date()) {
+            controlPlane = replacement
+            log("now presenting the renewed certificate")
+        }
+    }
+
     private func syncIfDue(_ reading: PresenceMonitor.Reading) async {
         let now = Date().timeIntervalSince1970
         guard now - lastHeartbeat >= 30 else { return }
@@ -245,6 +272,7 @@ public actor Worker {
         while Date() < deadline {
             let reading = presence()
             let statePolicy = policy[reading.state] ?? reading.policy
+            await renewIfDue()
             await syncIfDue(reading)
             await syncModelsIfDue(reading)
 

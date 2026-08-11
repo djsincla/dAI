@@ -24,6 +24,19 @@ function makeCsr(cn = 'whatever-the-node-asked-for',
   return { csr: readFileSync(`${dir}/r.csr`, 'utf8'), dir }
 }
 
+/**
+ * A fresh CSR from a key that already exists.
+ *
+ * This is the ordinary renewal case: the key lives in the Secure Enclave, has
+ * no way to leave the machine and no reason to change, so what a node asks for
+ * at renewal is a new certificate over the same key.
+ */
+function csrForExistingKey(dir: string, cn = 'whatever-the-node-asked-for'): string {
+  execSync(`openssl req -new -key ${dir}/k.pem -out ${dir}/renew.csr ` +
+           `-subj "/CN=${cn}" 2>/dev/null`)
+  return readFileSync(`${dir}/renew.csr`, 'utf8')
+}
+
 describe('certificate authority', () => {
   let caDir: string
   let ca: Ca
@@ -304,6 +317,133 @@ describe('enrollment and issuance over HTTP', () => {
     const { rows } = await db.query(`SELECT cert_fingerprint FROM nodes WHERE id=$1`, [e.nodeId])
     expect(rows[0].cert_fingerprint).toBe(fingerprintOfPem(issued.certPem))
     rmSync(e.dir, { recursive: true, force: true })
+  })
+
+  /**
+   * Renewal, which is what makes short-lived certificates affordable.
+   *
+   * Thirty-day certificates are a deliberate choice: a machine that leaves the
+   * building should stop being a fleet member on its own. That is only workable
+   * if the machines still in the building renew without anybody visiting them.
+   */
+  async function approvedNode() {
+    const e = await enroll()
+    await fetch(`${base}/admin/v1/nodes/${e.nodeId}/approve`, {
+      method: 'POST', headers: asUser(fx.operatorToken) })
+    const poll = await fetch(`${base}/agent/v1/enroll/${e.nodeId}`, {
+      headers: { 'x-enrollment-token': e.enrollmentToken } })
+    const issued = await poll.json()
+    return { ...e, certPem: issued.certPem as string }
+  }
+
+  const renew = (fingerprint: string, csrPem: string) =>
+    fetch(`${base}/agent/v1/renew`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-node-fingerprint': fingerprint },
+      body: JSON.stringify({ csrPem }),
+    })
+
+  it('renews without an admin, and the new certificate is the one that works', async () => {
+    const node = await approvedNode()
+    const before = fingerprintOfPem(node.certPem)
+
+    const r = await renew(before, csrForExistingKey(node.dir))
+    expect(r.status).toBe(200)
+    const renewed = await r.json()
+    expect(renewed.certPem).not.toBe(node.certPem)
+    expect(new Date(renewed.notAfter).getTime()).toBeGreaterThan(Date.now())
+
+    // The point of the exercise: the node authenticates with the new
+    // certificate, and the old one stops being an identity. A renewal that left
+    // both working would mean a copy taken before renewal outlived it.
+    const after = fingerprintOfPem(renewed.certPem)
+    expect((await fetch(`${base}/agent/v1/policy`,
+      { headers: { 'x-node-fingerprint': after } })).status).toBe(200)
+    expect((await fetch(`${base}/agent/v1/policy`,
+      { headers: { 'x-node-fingerprint': before } })).status).toBe(401)
+    rmSync(node.dir, { recursive: true, force: true })
+  })
+
+  it('hands back both CAs, so a node picks up what it was never given', async () => {
+    // Nodes enrolled before machines talked to each other have no node CA on
+    // disk, and cannot be the listening half of a split model without it.
+    // Renewal is how they acquire it, rather than being re-enrolled by hand.
+    const node = await approvedNode()
+    const renewed = await (await renew(
+      fingerprintOfPem(node.certPem), csrForExistingKey(node.dir))).json()
+    writeFileSync(join(node.dir, 'node.crt'), renewed.certPem)
+    writeFileSync(join(node.dir, 'node-ca.crt'), renewed.nodeCaPem)
+    expect(execSync(
+      `openssl verify -CAfile ${node.dir}/node-ca.crt ${node.dir}/node.crt`).toString(),
+    ).toContain('OK')
+    rmSync(node.dir, { recursive: true, force: true })
+  })
+
+  it('records whether the key changed', async () => {
+    // The Enclave key does not normally change, so a renewal that carries a new
+    // one is worth a line in the log: it is the only trace of a machine's key
+    // being rebuilt.
+    const node = await approvedNode()
+    const same = await (await renew(
+      fingerprintOfPem(node.certPem), csrForExistingKey(node.dir))).json()
+    expect(same.rekeyed).toBe(false)
+
+    const other = makeCsr('whatever', 'ec')
+    const changed = await (await renew(fingerprintOfPem(same.certPem), other.csr)).json()
+    expect(changed.rekeyed).toBe(true)
+
+    const { rows } = await db.query(
+      `SELECT detail FROM activity_log WHERE node_id=$1 AND event='node.renewed'
+        ORDER BY at`, [node.nodeId])
+    expect(rows.map((r: any) => r.detail.rekeyed)).toEqual([false, true])
+    rmSync(node.dir, { recursive: true, force: true })
+    rmSync(other.dir, { recursive: true, force: true })
+  })
+
+  it('will not renew a revoked node', async () => {
+    // Otherwise revocation lasts until the certificate expires and no longer,
+    // because the stolen machine renews itself back into the fleet.
+    const node = await approvedNode()
+    await fetch(`${base}/admin/v1/nodes/${node.nodeId}/revoke`,
+      { method: 'POST', headers: asUser(fx.operatorToken) })
+    const r = await renew(fingerprintOfPem(node.certPem), csrForExistingKey(node.dir))
+    expect(r.status).toBe(401)
+    expect((await r.json()).detail).toMatch(/revoked/)
+    rmSync(node.dir, { recursive: true, force: true })
+  })
+
+  it('will not renew a certificate that has already expired', async () => {
+    // Renewal extends an identity, it does not resurrect one. A certificate
+    // that lapsed unnoticed belongs to a machine nobody has accounted for in a
+    // month, and that should need a human.
+    const node = await approvedNode()
+    await db.query(`UPDATE nodes SET cert_not_after = now() - interval '1 day' WHERE id=$1`,
+      [node.nodeId])
+    const r = await renew(fingerprintOfPem(node.certPem), csrForExistingKey(node.dir))
+    expect(r.status).toBe(401)
+    rmSync(node.dir, { recursive: true, force: true })
+  })
+
+  it('will not renew a node whose hardware has come back as a new record', async () => {
+    // Two live certificates on one machine would make the fleet count its
+    // capacity twice and hand the same work to itself.
+    const node = await approvedNode()
+    await db.query(`UPDATE nodes SET state='superseded' WHERE id=$1`, [node.nodeId])
+    const r = await renew(fingerprintOfPem(node.certPem), csrForExistingKey(node.dir))
+    expect(r.status).toBe(403)
+    expect((await r.json()).detail).toMatch(/superseded/)
+    rmSync(node.dir, { recursive: true, force: true })
+  })
+
+  it('refuses a CSR it cannot sign rather than issuing something else', async () => {
+    const node = await approvedNode()
+    const r = await renew(fingerprintOfPem(node.certPem), 'not a csr')
+    expect(r.status).toBe(400)
+    // The certificate it already holds must keep working, or a malformed
+    // request would take a machine out of the fleet.
+    expect((await fetch(`${base}/agent/v1/policy`,
+      { headers: { 'x-node-fingerprint': fingerprintOfPem(node.certPem) } })).status).toBe(200)
+    rmSync(node.dir, { recursive: true, force: true })
   })
 
   it('will not hand the certificate over twice', async () => {

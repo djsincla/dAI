@@ -9,7 +9,7 @@ import { POLICY, type WorkKind } from '../lib/policy.js'
 import { LeaseConflict, leaseWork, reportResult } from '../lib/work.js'
 import { clientIp, nodeNetworkAllowed } from '../lib/netacl.js'
 import type { Broker } from '../lib/broker.js'
-import { type Ca, newEnrollmentToken } from '../lib/ca.js'
+import { type Ca, newEnrollmentToken, publicKeyIdOf } from '../lib/ca.js'
 import { existsSync, readFileSync } from 'node:fs'
 
 const KINDS: WorkKind[] = ['embed', 'generate', 'render']
@@ -127,6 +127,79 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
       [req.node!.id, JSON.stringify({ ip: clientIp(req) })],
     )
     res.status(403).json({ error: 'forbidden', detail: 'node not permitted from this network' })
+  })
+
+  /**
+   * Renew this node's certificate.
+   *
+   * No human in the loop, unlike approval. The node is calling over mTLS with
+   * the certificate it already holds, which proves it controls the key that
+   * certificate names. There is nothing left for an admin to decide that was
+   * not decided when the node was approved.
+   *
+   * This exists because certificates are deliberately short-lived - a machine
+   * that leaves the building should stop being a fleet member on its own. That
+   * property is only affordable if renewal is automatic. Without it, expiry is
+   * indistinguishable from an outage and the remedy is walking to every machine
+   * once a month.
+   *
+   * A node that has *already* expired does not get here: `agentAuth` rejects it
+   * first. That is deliberate. Renewal extends an identity, it does not
+   * resurrect one, and a certificate that lapsed unnoticed is a machine nobody
+   * has accounted for in a month.
+   */
+  r.post('/renew', async (req, res) => {
+    const csrPem = (req.body as { csrPem?: string })?.csrPem ?? ''
+
+    // Superseded means this hardware already came back as a different node
+    // record. Renewing the old one would put two live certificates on one
+    // machine and make the fleet count its capacity twice.
+    const { rows: current } = await db.query(
+      `SELECT state, cert_pem, hostname FROM nodes WHERE id = $1`, [req.node!.id])
+    const node = current[0] as { state: string; cert_pem: string; hostname: string }
+    if (node.state !== 'active') {
+      res.status(403).json({ error: 'forbidden',
+                             detail: `a ${node.state} node cannot renew` })
+      return
+    }
+
+    let signed
+    try {
+      signed = await ca.sign(csrPem, req.node!.id, node.hostname)
+    } catch (err) {
+      res.status(400).json({ error: 'bad_request',
+                             detail: `cannot sign CSR: ${(err as Error).message}` })
+      return
+    }
+
+    // Ordinarily the key does not change: it lives in the Secure Enclave and
+    // cannot leave. A machine that has had to rebuild that key would otherwise
+    // need a full re-enrollment, so a new one is accepted and recorded. The
+    // record is the only trace of a machine's key changing, so it is written
+    // whether or not anybody is watching for it.
+    const rekeyed = node.cert_pem
+      ? publicKeyIdOf(csrPem) !== publicKeyIdOf(node.cert_pem)
+      : false
+
+    await db.query(
+      `UPDATE nodes SET cert_pem=$2, cert_fingerprint=$3, cert_not_after=$4 WHERE id=$1`,
+      [req.node!.id, signed.certPem, signed.fingerprint, signed.notAfter],
+    )
+    await db.query(
+      `INSERT INTO activity_log (node_id, event, detail) VALUES ($1,'node.renewed',$2)`,
+      [req.node!.id, JSON.stringify({ notAfter: signed.notAfter, rekeyed })],
+    )
+
+    res.json({
+      certPem: signed.certPem,
+      notAfter: signed.notAfter.toISOString(),
+      rekeyed,
+      // Both CAs, so a rotated CA reaches the fleet without anybody visiting
+      // it, and so that nodes enrolled before peer connections existed acquire
+      // the node CA on their next renewal rather than needing re-enrolling.
+      serverCaPem,
+      nodeCaPem: ca.certPem,
+    })
   })
 
   /**

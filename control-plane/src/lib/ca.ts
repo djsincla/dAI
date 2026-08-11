@@ -220,6 +220,24 @@ export function fingerprintOfPem(certPem: string): string {
   return hex.match(/.{2}/g)!.join(':')
 }
 
+/**
+ * A stable identifier for the public key inside a certificate or a CSR.
+ *
+ * Used to tell a renewal from a rekey. The two are treated differently only in
+ * what gets written to the activity log, but that distinction is the whole
+ * record of a machine's key changing, so it should not be guessed at.
+ *
+ * Hashes the SubjectPublicKeyInfo rather than the raw key, which is what every
+ * other tool means by a key fingerprint, so a value here can be compared with
+ * one from openssl.
+ */
+export function publicKeyIdOf(pem: string): string {
+  const body = pem.includes('CERTIFICATE REQUEST')
+    ? new x509.Pkcs10CertificateRequest(pem).publicKey.rawData
+    : new x509.X509Certificate(pem).publicKey.rawData
+  return createHash('sha256').update(Buffer.from(body)).digest('hex')
+}
+
 /** One-time secret a node uses to collect its certificate after approval. */
 export function newEnrollmentToken(): string {
   return randomBytes(24).toString('base64url')

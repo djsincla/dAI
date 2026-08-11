@@ -98,6 +98,20 @@ instruments cover different contention paths:
   ping); prefill is bandwidth-bound and saturates the gigabit link at 928 Mbps.
   By contrast the harvest tier is interconnect-insensitive - 0.95 efficiency over
   the same WiFi (E3).
+- **Thunderbolt is wider, not quicker, and that decides which techniques it
+  helps.** Measured at **0.85 ms RTT and 324 MB/s** - 2.8x the bandwidth of the
+  USB gigabit adapter but **1.8x its round trip**, against an earlier estimate of
+  0.1 ms that was optimistic by ~8.5x. It is a bandwidth upgrade, so it does
+  nothing for latency-bound tensor parallelism and everything for moving models
+  and scenes around the building (E7).
+- **A model that fits on neither machine runs across both.** A 72B needing
+  41.1 GB exceeds the smaller machine's 37.4 GB working set outright; split, it
+  runs at **21.3 GB on each** and 6.3 tok/s against 7.3 alone - a **13.2%**
+  toll, holding at **14.3%** for a 32B. Time to first token nearly halves,
+  because prompt reading parallelises. Splitting is a capability, not an
+  optimisation: never split what already fits. The per-token toll **doubles as
+  the model doubles** (5.8, 10.1, 21.0 ms), so it does not amortise away - the
+  percentage only stays flat because the model's own work grows too (E7).
 - **Sharding is a memory technique, not a speed technique.** End-to-end on GbE:
   **11.69 tok/s sharded across two nodes vs 77.46 tok/s on one** - a 6.6x
   slowdown to save 43% of per-node memory (2.28 GB vs 3.99 GB). Never split for
@@ -122,15 +136,14 @@ instruments cover different contention paths:
   clean mid-unit yield on unlock. ANE throughput was identical present or absent
   (30.2 vs 31.1 items/s), because the politeness machinery costs nothing on a
   path that needs none.
-- **Model *depth* is the cluster tier's binding constraint, not size.** The
-  admission gate refused a 110B model that fits the pool (55 < 59 GB) because at
-  80 layers it projects 3.68 tok/s against an 8 tok/s floor - tensor parallelism
-  pays ~2 all-reduces per layer per token. Solving for the depth that clears
-  that floor: **~1 layer on WiFi, ~38 on gigabit, ~230 on Thunderbolt.** Since a
-  70B has 80 layers and anything shallower fits on one node anyway, **the set of
-  models that both need the cluster tier and pass admission at gigabit is
-  empty.** This corrects E6's conclusion that Thunderbolt was an optimisation -
-  that generalised from a 28-layer 7B. For this tier it is a requirement.
+- **Model *depth* was the binding constraint on the technique, not on the
+  fleet.** The admission gate refused a 110B model that fits the pool (55 < 59
+  GB) because at 80 layers it projects 3.68 tok/s against an 8 tok/s floor -
+  *tensor* parallelism pays ~2 all-reduces per layer per token, so depth is
+  fatal. **Pipeline parallelism pays one crossing per token whatever the depth**,
+  and E7 splits an 80-layer 72B across the pair at a 13.2% cost. The constraint
+  was the technique. The admission gate's arithmetic remains correct for the
+  technique it models and should not be applied to a pipeline split.
 - **A logged-in machine now contributes.** The worker runs two runtimes and
   advertises which *kinds* of work its current policy permits; the coordinator
   keeps typed queues and serves only those. In IDLE with a mixed corpus the GPU
@@ -207,14 +220,20 @@ spike/
   e5_ane/              ANE vs GPU contention, with placement verification (E5)
   e3_fleet/            coordinator + worker; heterogeneous scheduling (E3)
   e6_split/            all-reduce latency and the split-model ceiling (E6)
+  e7_thunderbolt/      Thunderbolt measured; a 72B split across two Macs (E7)
+  cluster/             admission control for the cluster tier
   presence/            user-presence detection: the agent's primary control
 control-plane/         API-first TypeScript service (see its own README)
   openapi/dai.yaml     source of truth for both clients
   src/                 dispatch, leases, policy, auth
-  test/                34 tests against real Postgres
+  test/                438 tests against real Postgres
+agent/                 the Swift agent that runs on each machine
+  Sources/             presence, work loop, MLX and render runtimes, split model
+  Tests/               196 tests
 docs/
   PLAN.md              full design: tiers, use cases, architecture, verification
   CONTROL_PLANE.md     control plane spec: data model, RBAC, APIs, testing
+  SPLIT_MODEL_ERRORS.md  the Swift split model, and what went wrong building it
 ```
 
 ## Running the spike

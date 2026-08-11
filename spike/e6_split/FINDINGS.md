@@ -5,6 +5,22 @@
 Ethernet 10.0.0.0/24 (~0.48 ms RTT). Thunderbolt attempted, no link established.
 **Method:** measured all-reduce latency via MLX ring backend, 60 iterations after warmup
 
+> **Superseded in part - see `spike/e7_thunderbolt/FINDINGS.md`.**
+>
+> Thunderbolt later came up and was measured at **0.85 ms RTT / 324 MB/s**. Two
+> things below need reading with that in mind.
+>
+> Thunderbolt is *higher* latency than the gigabit adapter used here, not lower.
+> This file's conclusion that the cluster tier does not require Thunderbolt
+> therefore holds, and for a stronger reason than it was given: Thunderbolt
+> would have made the all-reduce measured here slower, not faster.
+>
+> Everything below measures **tensor** parallelism, which pays two all-reduces
+> per layer per token. E7 measures **pipeline** parallelism, which pays one
+> crossing per token whatever the depth, and splits an 80-layer 72B at a 13.2%
+> cost. Where this file says model depth is the binding constraint, that is a
+> property of the technique rather than of the fleet.
+
 ## Result: the interconnect decides everything
 
 Measured on two interconnects between the same two machines, same code:
@@ -17,8 +33,9 @@ Measured on two interconnects between the same two machines, same code:
 | **comm-only token ceiling** | | **1.07 tok/s** | **31.72 tok/s** | **30x** |
 
 The GbE link is a USB gigabit Ethernet adapter (AX88179A, `1000baseT
-full-duplex`) on a private 10.0.0.0/24 - **not** Thunderbolt, which still shows
-no device connected on either machine.
+full-duplex`) on a private 10.0.0.0/24 - **not** Thunderbolt, which showed no
+device connected on either machine at the time of this run. It came up later and
+is measured in E7: 0.85 ms RTT, which is *slower* than this adapter.
 
 Two regimes are visible in the GbE column:
 

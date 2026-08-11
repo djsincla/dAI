@@ -123,7 +123,8 @@ func gpuRunsAtFullDutyAndStandardQoSWhenUnobserved(state: PresenceState) {
     // machine had no Metal toolchain.
     let absent = defaultPolicy[.absent]!
     #expect(permittedKinds(policy: absent).contains(.render))
-    #expect(runnableKinds(absent, hasGPU: true, hasANE: true).contains(.render) == false)
+    #expect(runnableKinds(absent, hasGPU: true, hasANE: true, hasRenderer: false)
+        .contains(.render) == false)
 }
 
 @Test func nothingOffersAKindItCannotRun() {
@@ -138,16 +139,31 @@ func gpuRunsAtFullDutyAndStandardQoSWhenUnobserved(state: PresenceState) {
 
     // Present at a machine: GPU work is forbidden whatever runtimes exist.
     let active = defaultPolicy[.active]!
-    #expect(runnableKinds(active, hasGPU: true, hasANE: true) == [.embed])
+    #expect(runnableKinds(active, hasGPU: true, hasANE: true, hasRenderer: true) == [.embed])
 }
 
-@Test func renderIsDeclaredButNotImplemented() {
-    // Stated as a value rather than left to be inferred from a throw in the
-    // batch loop. When a render runtime lands, this test is the thing that
-    // fails and points at every place that has to agree.
-    #expect(WorkKind.render.isImplemented == false)
-    #expect(WorkKind.embed.isImplemented)
-    #expect(WorkKind.generate.isImplemented)
+@Test func everyDeclaredKindIsImplemented() {
+    // This test previously asserted the opposite for render, and failing was
+    // its job: it is what pointed at every place that had to agree on the day a
+    // render runtime landed. Kept for the next kind, which will also be
+    // declared before it works.
+    for kind in WorkKind.allCases { #expect(kind.isImplemented) }
+}
+
+@Test func renderNeedsARendererRatherThanAGPU() {
+    // A machine can have Blender and no Metal toolchain, or the reverse.
+    // Treating them as one capability would offer every render unit in the
+    // queue to a machine that can only generate.
+    let absent = defaultPolicy[.absent]!
+    #expect(runnableKinds(absent, hasGPU: true, hasANE: false, hasRenderer: false) == [.generate])
+    #expect(runnableKinds(absent, hasGPU: false, hasANE: false, hasRenderer: true) == [.render])
+    #expect(runnableKinds(absent, hasGPU: true, hasANE: true, hasRenderer: true)
+        == [.embed, .generate, .render])
+
+    // Somebody is at the machine: rendering is GPU work and waits, whatever is
+    // installed.
+    #expect(runnableKinds(defaultPolicy[.active]!, hasGPU: true, hasANE: true,
+                          hasRenderer: true) == [.embed])
 }
 
 @Test func permittedKindsMatchTheTable() {

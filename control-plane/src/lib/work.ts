@@ -18,6 +18,12 @@ export interface Lease {
   unitId: string
   kind: WorkKind
   modelHash: string | null
+  /// The scene a render unit belongs to.
+  ///
+  /// Carried on the lease rather than in the payload, so a unit cannot name the
+  /// content it wants. A node renders the scene the job says, at the frame the
+  /// item says, and the two come from different places on purpose.
+  sceneId: string | null
   items: unknown[]
   leaseExpiresAt: string
   /// What this work is and where it came from, carried down to the node.
@@ -73,7 +79,7 @@ export async function leaseWork(
 
   return tx(db, async (c: pg.PoolClient) => {
     const { rows } = await c.query(
-      `SELECT u.id, u.kind, u.payload, j.model_hash, j.label, j.source
+      `SELECT u.id, u.kind, u.payload, j.model_hash, j.scene_id, j.label, j.source
          FROM work_units u
          JOIN jobs j ON j.id = u.job_id
         WHERE u.state = 'pending'
@@ -115,6 +121,7 @@ export async function leaseWork(
       unitId: row.id as string,
       kind: row.kind as WorkKind,
       modelHash: (row.model_hash as string | null) ?? null,
+      sceneId: (row.scene_id as string | null) ?? null,
       items: row.payload as unknown[],
       leaseExpiresAt: (leased[0]!.lease_expires_at as Date).toISOString(),
       jobLabel: (row.label as string | null) ?? null,

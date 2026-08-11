@@ -34,6 +34,10 @@ public protocol ControlPlaneClient: Actor {
     /// renewal loop is exactly the kind of thing that fails once a month and is
     /// never noticed, so it has to be testable without a control plane.
     func renew(csrPEM: String) async throws -> ControlPlane.Renewed
+    func sceneManifest(id: String) async throws -> ControlPlane.SceneManifest
+    func downloadSceneFile(sceneId: String, path: String, to destination: URL) async throws -> String
+    @discardableResult
+    func uploadOutput(unitId: String, name: String, file: URL) async throws -> Int
 }
 
 extension ControlPlane: ControlPlaneClient {}

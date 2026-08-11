@@ -22,16 +22,21 @@ public actor Worker {
     enum Failure: Error, CustomStringConvertible {
         case noGPURuntime
         case noANERuntime
-        case renderNotImplemented
+        case noRenderer
+        case noScene
+        case notAFrame
         public var description: String {
             switch self {
             case .noGPURuntime:
                 return "this node has no GPU runtime; generate work should not have been leased to it"
             case .noANERuntime:
                 return "this node has no ANE runtime; embed work should not have been leased to it"
-            case .renderNotImplemented:
-                return "render work is not implemented; this node never offers it and should "
-                    + "not have been leased any"
+            case .noRenderer:
+                return "this node has no renderer; render work should not have been leased to it"
+            case .noScene:
+                return "the unit is render work but its job names no scene"
+            case .notAFrame:
+                return "a render item carried no frame number"
             }
         }
     }
@@ -74,6 +79,13 @@ public actor Worker {
     /// one-shot run, has no identity on disk to renew.
     private let renewer: (any CertificateRenewing)?
 
+    /// Renders frames, when this machine has a renderer. Optional for the same
+    /// reason the GPU runtime is: a machine without one is an ordinary fleet
+    /// member that does AI work and never offers the render kind.
+    private let renderer: RenderRuntime?
+    /// Fetches the scene a render unit needs, on the critical path.
+    private let scenes: SceneSync?
+
     /// One transfer at a time. Without this the loop would launch another every
     /// pass while the first was still running, and a slow link would end up
     /// fetching the same model a dozen times over.
@@ -97,10 +109,14 @@ public actor Worker {
                 pauseSwitch: PauseSwitch = PauseSwitch(),
                 status: StatusPublisher = StatusPublisher(),
                 modelSync: ModelSync? = nil,
+                renderer: RenderRuntime? = nil,
+                scenes: SceneSync? = nil,
                 renewer: (any CertificateRenewing)? = nil,
                 sleepAssertion: SleepAssertion = SleepAssertion(),
                 promoteAfter: TimeInterval = idlePromoteSeconds) {
         self.renewer = renewer
+        self.renderer = renderer
+        self.scenes = scenes
         self.sleepAssertion = sleepAssertion
         self.modelSync = modelSync
         self.status = status
@@ -137,7 +153,8 @@ public actor Worker {
     /// spelled out again, so there is one definition of what this machine will
     /// attempt and the diagnostic commands cannot disagree with the loop.
     private func availableKinds(_ p: StatePolicy) -> [WorkKind] {
-        runnableKinds(p, hasGPU: gpu != nil, hasANE: ane != nil)
+        runnableKinds(p, hasGPU: gpu != nil, hasANE: ane != nil,
+                      hasRenderer: renderer != nil && scenes != nil)
     }
 
     private func applyQoS(_ p: StatePolicy, kind: WorkKind) {
@@ -186,6 +203,61 @@ public actor Worker {
         guard let outcome else { return }
         for id in outcome.fetched { log("fetched model \(id)") }
         for (id, why) in outcome.failed { log("model \(id) failed: \(why)") }
+    }
+
+    /// One frame: fetch what the scene needs, render it, hand it back.
+    ///
+    /// The upload is part of the item rather than part of the report. A frame
+    /// that rendered and did not arrive is a unit that has to be done again, and
+    /// reporting the item complete before the bytes are safe would lose it
+    /// quietly - the job would read 100% and the sequence would have a hole.
+    private func renderOne(_ item: WorkItem, lease: ControlPlane.Lease) async throws {
+        guard let renderer, let scenes else { throw Failure.noRenderer }
+        guard let sceneId = lease.sceneId else { throw Failure.noScene }
+        // The one value a submission contributes to a command line, and it is a
+        // number before it gets anywhere near one.
+        guard let frame = item["frame"]?.intValue else { throw Failure.notAFrame }
+
+        // Stopped mid-frame, not between frames. A render is minutes long and
+        // the loop's own yield check only runs between items, so without this a
+        // machine whose owner sat down would keep a GPU busy until the frame
+        // finished. The whole basis for borrowing these machines is that they
+        // are given back at once.
+        let watchdog = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                guard let self else { return }
+                if await !self.stillPermits(.render) {
+                    await renderer.stop()
+                    return
+                }
+            }
+        }
+        defer { watchdog.cancel() }
+
+        let ready = try await scenes.ensure(sceneId: sceneId)
+        // Written beside the scene rather than into it, so a re-registered
+        // scene never picks up somebody's output as one of its own files.
+        let out = ready.root.deletingLastPathComponent()
+            .appendingPathComponent("out/\(lease.unitId)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: out) }
+
+        let outcome = try await renderer.render(scene: ready.entry, frame: frame, into: out,
+                                                samples: item["samples"]?.intValue)
+        let bytes = try await controlPlane.uploadOutput(
+            unitId: lease.unitId, name: outcome.file.lastPathComponent, file: outcome.file)
+        log(String(format: "frame %d in %.1fs, %.1fMB returned",
+                   frame, outcome.seconds, Double(bytes) / 1_048_576))
+    }
+
+    /// Whether this kind is still allowed, right now.
+    ///
+    /// Read fresh rather than from the value the unit started with. That value
+    /// was true when somebody was not at the machine, and the question being
+    /// asked is whether they are now.
+    private func stillPermits(_ kind: WorkKind) -> Bool {
+        let now = presence()
+        return availableKinds(policy[now.state] ?? now.policy).contains(kind)
     }
 
     /// Keep the certificate current.
@@ -426,9 +498,22 @@ public actor Worker {
         }
 
         applyQoS(statePolicy, kind: lease.kind)
+        // Clear any stop from a previous unit. A renderer is latched off when
+        // the machine is wanted back, and this unit exists only because it was
+        // leased, which means render is permitted again. Clearing it here rather
+        // than inside `render` keeps the latch honest: a stop issued while a
+        // frame is starting must not be lost to a reset racing it.
+        if lease.kind == .render { await renderer?.resume() }
 
         let started = Date()
         var completed: [WorkItem] = []
+        // Items that were attempted and did not finish. Returned rather than
+        // dropped: a dropped item leaves the unit marked done with a hole in
+        // it, which for rendering is a missing frame in a sequence nobody
+        // notices until it is played back. Requeuing is bounded - a unit that
+        // fails everywhere runs out of attempts and fails properly, which is
+        // what a broken payload should do.
+        var failed: [WorkItem] = []
 
         for (index, item) in lease.items.enumerated() {
             // Re-check that *this* kind is still permitted, not merely that some
@@ -467,16 +552,12 @@ public actor Worker {
                     _ = try await gpu.generate(prompt: prompt,
                                                maxTokens: statePolicy.maxCompletionTokens)
                 case .render:
-                    // Fails rather than falling through to the line below that
-                    // marks an item completed. A work kind that silently
-                    // succeeds without doing anything is worse than one that
-                    // errors: the job reports 100% done, the output is missing,
-                    // and nothing anywhere says why.
-                    throw Failure.renderNotImplemented
+                    try await renderOne(item, lease: lease)
                 }
                 completed.append(.object(["id": item["id"] ?? .null]))
             } catch {
                 log("item failed: \(error)")
+                failed.append(item)
             }
 
             // E2 found duty cycle a real, monotonic lever independent of QoS.
@@ -499,12 +580,14 @@ public actor Worker {
             capability[key] = Double(completed.count) / seconds
         }
         try? await controlPlane.report(unitId: lease.unitId, completed: completed,
-                                       unfinished: [], seconds: seconds)
+                                       unfinished: failed, seconds: seconds)
         status.markReachable()
         log("\(lease.kind.rawValue)"
             + (lease.jobLabel.map { " [\($0)]" } ?? "")
             + (lease.jobSource == "api" ? "" : " (\(lease.jobSource))")
-            + ": \(completed.count) items in "
+            + ": \(completed.count) items"
+            + (failed.isEmpty ? "" : ", \(failed.count) returned")
+            + " in "
             + String(format: "%.2fs", seconds)
             + " (\(String(format: "%.2f", Double(completed.count) / max(seconds, 0.001)))/s) "
             + "state=\(state.rawValue)")

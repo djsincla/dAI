@@ -241,9 +241,15 @@ struct PipelineChannelSocketTests {
         try await earlier.connect(host: "127.0.0.1", port: port,
                                   tls: fx.clientContext, serverName: "localhost")
 
-        for i in 0..<8 { try await earlier.send(hiddenState(UInt8(i))) }
-        for i in 0..<8 {
-            #expect(try await later.receive() == hiddenState(UInt8(i)), "token \(i) out of order")
+        // Enough of them, and small enough, that they arrive across many reads
+        // rather than one. Eight was not: they landed in a single buffer, were
+        // delivered by a single task, and the ordering bug underneath only
+        // showed up when a busy machine split them across reads.
+        let count = 200
+        for i in 0..<count { try await earlier.send(hiddenState(UInt8(i % 251))) }
+        for i in 0..<count {
+            #expect(try await later.receive() == hiddenState(UInt8(i % 251)),
+                    "token \(i) out of order")
         }
 
         await earlier.close()

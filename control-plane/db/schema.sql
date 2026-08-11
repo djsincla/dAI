@@ -434,3 +434,74 @@ CREATE TABLE IF NOT EXISTS auth_tokens (
 );
 
 CREATE INDEX IF NOT EXISTS auth_tokens_user_idx ON auth_tokens(user_id, kind);
+
+-- ---------------------------------------------------------------------------
+-- Rendering
+--
+-- Rendering needed no separate codebase and no separate fleet: the same
+-- presence detection, policy engine, enrollment and leasing already carry it.
+-- What it needed was a runtime, somewhere for scenes to live, and somewhere for
+-- frames to come back to. The first is in the agent; these are the other two.
+
+-- A scene is content, catalogued exactly like a model: named, hashed per file,
+-- fetched over the LAN rather than carried by hand.
+--
+-- Scenes differ from models in what they cost. A model is a few GB, cached once
+-- and shared by every job that uses it. A scene is tens of GB, differs per job,
+-- and is dead the moment the job completes. That difference is why scenes are
+-- their own catalogue rather than a `kind` on models: nothing here should be
+-- assignable to a pool or counted as residency, because a scene that stayed on
+-- forty machines after its job finished would fill them.
+CREATE TABLE IF NOT EXISTS scenes (
+    id          text PRIMARY KEY,
+    -- The file the renderer opens. Recorded here rather than derived from a
+    -- payload, because this is the one string from a scene that reaches a
+    -- command line, and a unit must never be able to name a path.
+    entry       text NOT NULL,
+    size_bytes  bigint NOT NULL,
+    -- What the scene itself says its range is, so a job asking for frames
+    -- outside it is refused at submission rather than rendering black.
+    frame_start integer,
+    frame_end   integer,
+    renderer    text NOT NULL DEFAULT 'blender',
+    imported_at timestamptz NOT NULL DEFAULT now(),
+    imported_by uuid REFERENCES users(id),
+    CONSTRAINT scenes_renderer_check CHECK (renderer IN ('blender'))
+);
+
+-- Per file, for the same reason model files are: the failure worth catching is
+-- one truncated file out of two hundred, and a whole-bundle hash detects it
+-- without being able to say which part to fetch again.
+CREATE TABLE IF NOT EXISTS scene_files (
+    scene_id   text NOT NULL REFERENCES scenes(id) ON DELETE CASCADE,
+    path       text NOT NULL,
+    size_bytes bigint NOT NULL,
+    sha256     text NOT NULL,
+    PRIMARY KEY (scene_id, path)
+);
+
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS scene_id text REFERENCES scenes(id) ON DELETE SET NULL;
+
+-- Where the work comes back to.
+--
+-- The half of the work model that only rendering needed. An embed or a generate
+-- unit returns a number or some text and the result column holds it; a render
+-- unit returns a picture, and a job whose output exists only on whichever
+-- machine happened to render it has not really been done.
+--
+-- Unique per job and name, and written last-wins on purpose. A render unit is
+-- idempotent - frame 12 of scene S is the same pixels wherever it runs - so a
+-- requeued unit legitimately produces a file that already exists, and refusing
+-- the second copy would fail a job for succeeding twice.
+CREATE TABLE IF NOT EXISTS work_outputs (
+    job_id     uuid NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    name       text NOT NULL,
+    unit_id    uuid REFERENCES work_units(id) ON DELETE SET NULL,
+    node_id    uuid REFERENCES nodes(id) ON DELETE SET NULL,
+    size_bytes bigint NOT NULL,
+    sha256     text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (job_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS work_outputs_job_idx ON work_outputs(job_id, created_at);

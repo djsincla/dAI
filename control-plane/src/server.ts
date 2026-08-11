@@ -3,7 +3,7 @@ import * as OpenApiValidator from 'express-openapi-validator'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createPool, type Db } from './lib/db.js'
+import { createPool, ensureBootstrapAdmin, type Db } from './lib/db.js'
 import { agentRoutes } from './routes/agent.js'
 import { adminRoutes } from './routes/admin.js'
 import { authRoutes } from './routes/auth.js'
@@ -224,6 +224,19 @@ export function createApp(db: Db, surface: Surface = 'both'): Express {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const db = createPool()
+
+  // The account a fresh deployment starts with, made here rather than only by
+  // `migrate()`. Nothing on the running path called migrate, so a real
+  // deployment never got a bootstrap account at all: the schema was applied by
+  // hand, the seeding step was not, and the console had no credential that
+  // would sign in. Only the test databases, which do call migrate, ever had
+  // one - which is the worst place for this to work and nowhere else.
+  //
+  // Safe to run every start: it returns immediately once any account has a
+  // password, so it cannot resurrect itself on an established fleet or
+  // undo somebody's password change.
+  await ensureBootstrapAdmin(db)
+
   startReaper(db)
 
   for (const note of describeAcls(new Acl(process.env.DAI_AGENT_CIDRS),

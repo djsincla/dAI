@@ -125,6 +125,75 @@ case "enroll":
     do { try await Enroll.run(controlPlane: url, joinToken: args[3], caPath: ca, waitSeconds: wait) }
     catch { print("enrollment failed: \(error)"); exit(1) }
 
+case "renew":
+    // usage: dai-agent renew <control-plane-url> [--force]
+    //
+    // The daemon does this on its own. The command exists for the machine that
+    // has been off for a month, for a fleet that has just changed what it puts
+    // in a certificate, and because "renew it now and tell me what happened" is
+    // the first thing anybody wants when a node stops authenticating.
+    guard args.count > 2 else {
+        print("usage: dai-agent renew <url> [--force]")
+        print("  Renews when the certificate is two thirds through its life.")
+        print("  --force renews regardless, which is what to use after the")
+        print("  fleet has changed what a node certificate has to contain.")
+        exit(2)
+    }
+    do {
+        let dir = Enroll.identityDir()
+        let certPath = dir.appendingPathComponent("node.crt")
+        let identity = try NodeIdentity.load(certificate: certPath,
+                                             enclaveKey: Enroll.keyPath(dir))
+        let ca = try String(contentsOf: dir.appendingPathComponent("ca.crt"), encoding: .utf8)
+        let cp = try ControlPlane(base: URL(string: args[2])!, identity: identity, serverCAPEM: ca)
+
+        let window = try Renewal.validity(certificatePEM: identity.certificatePEM)
+        let force = args.contains("--force")
+        let due = Renewal.due(notBefore: window.notBefore, notAfter: window.notAfter, now: Date())
+        print("current certificate expires \(window.notAfter)")
+        guard force || due else {
+            print("not due yet; renews at two thirds of its life, or use --force")
+            await cp.shutdown()
+            exit(0)
+        }
+
+        let key = try EnclaveKey.loadOrCreate(at: Enroll.keyPath(dir))
+        let csr = try CSR.create(commonName: MachineName.current(), key: key)
+        let renewed: ControlPlane.Renewed
+        do {
+            renewed = try await cp.renew(csrPEM: csr)
+        } catch {
+            // Shut the client down before reporting. Letting it fall out of
+            // scope during error handling aborts the process on a deinit
+            // assertion, and the message that reaches the operator is about a
+            // leaked HTTP client rather than about their certificate.
+            await cp.shutdown()
+            print("renewal refused: \(error)")
+            exit(1)
+        }
+        try renewed.certPEM.write(to: certPath, atomically: true, encoding: .utf8)
+        if let serverCA = renewed.serverCAPEM {
+            try serverCA.write(to: dir.appendingPathComponent("ca.crt"),
+                               atomically: true, encoding: .utf8)
+        }
+        if let nodeCA = renewed.nodeCAPEM {
+            try nodeCA.write(to: dir.appendingPathComponent("node-ca.crt"),
+                             atomically: true, encoding: .utf8)
+        }
+        let now = try Renewal.validity(certificatePEM: renewed.certPEM)
+        print("renewed; expires \(now.notAfter)\(renewed.rekeyed ? " (new key)" : "")")
+        // The running daemon is still presenting the certificate that has just
+        // been retired, and will not notice until its own renewal check comes
+        // round. Said rather than done: restarting somebody's daemon as a side
+        // effect of a read-out command is not this command's business.
+        print("restart the daemon to pick it up: "
+            + "sudo launchctl kickstart -k system/com.dai.agent")
+        await cp.shutdown()
+    } catch {
+        print("renewal failed: \(error)")
+        exit(1)
+    }
+
 case "timing":
     // Written to find where a 61s stall was going, which turned out to be a
     // keychain prompt nobody could answer. Kept because "the request timed out"
@@ -184,7 +253,19 @@ case "status":
         let ca = try String(contentsOf: dir.appendingPathComponent("ca.crt"), encoding: .utf8)
         let cp = try ControlPlane(base: URL(string: args[2])!, identity: identity, serverCAPEM: ca)
 
-        let served = try await cp.fetchPolicy()
+        // Shut the client down before reporting a failure. Letting it fall out
+        // of scope during error handling trips a deinit assertion, and what
+        // reaches the operator is a message about a leaked HTTP client instead
+        // of the reason their node was refused - which is the whole point of
+        // running this command.
+        let served: [PresenceState: StatePolicy]
+        do {
+            served = try await cp.fetchPolicy()
+        } catch {
+            await cp.shutdown()
+            print("status failed: \(error)")
+            exit(1)
+        }
         let merged = mergePolicy(local: defaultPolicy, served: served)
         print("authenticated by client certificate")
         print("served policy states: \(served.keys.map(\.rawValue).sorted().joined(separator: ", "))")
@@ -278,8 +359,21 @@ case "work":
         // the same directory the runtime reads from, so a fetched model is
         // loadable without anything moving it afterwards.
         let modelSync = ModelSync(controlPlane: cp, base: MLXRuntime.hubBase, status: status)
+        // Certificates last thirty days, so a daemon that runs for longer than
+        // that has to renew or stop being a fleet member. The address and the
+        // CA are known here and nowhere else, which is why the renewer is given
+        // a way to build its replacement client rather than the ingredients.
+        let base = URL(string: args[2])!
+        let renewer = CertificateRenewer(
+            directory: dir, keyPath: Enroll.keyPath(dir), client: cp,
+            rebuild: { identity, serverCA in
+                try ControlPlane(base: base, identity: identity,
+                                 serverCAPEM: serverCA ?? ca)
+            },
+            log: { print($0) })
         let worker = Worker(controlPlane: cp, gpu: gpu, ane: ane,
-                            status: status, modelSync: modelSync, promoteAfter: promote)
+                            status: status, modelSync: modelSync, renewer: renewer,
+                            promoteAfter: promote)
 
         // Batch and serving run side by side in one process, because a node
         // does both and they cannot share a loop: an interactive request must

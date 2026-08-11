@@ -28,6 +28,12 @@ public protocol ControlPlaneClient: Actor {
     func isDispatchCancelled(id: String) async -> Bool
     func assignedModels() async throws -> [ControlPlane.AssignedModel]
     func downloadModelFile(modelId: String, path: String, to destination: URL) async throws -> String
+    /// Trade the certificate this client is presenting for a fresh one.
+    ///
+    /// On the protocol rather than only on the concrete client because the
+    /// renewal loop is exactly the kind of thing that fails once a month and is
+    /// never noticed, so it has to be testable without a control plane.
+    func renew(csrPEM: String) async throws -> ControlPlane.Renewed
 }
 
 extension ControlPlane: ControlPlaneClient {}

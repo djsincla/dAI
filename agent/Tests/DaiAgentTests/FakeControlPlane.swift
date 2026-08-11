@@ -100,6 +100,19 @@ actor FakeControlPlane: ControlPlaneClient {
 
     func assignedModels() async throws -> [ControlPlane.AssignedModel] { assigned }
 
+    /// What renewal should hand back. Nil makes renewal fail, which is the
+    /// case that matters: a node whose renewal keeps failing eventually drops
+    /// out of the fleet, and the loop has to survive that rather than stop.
+    var renewal: ControlPlane.Renewed?
+    private(set) var renewalRequests: [String] = []
+    struct RenewalRefused: Error {}
+
+    func renew(csrPEM: String) async throws -> ControlPlane.Renewed {
+        renewalRequests.append(csrPEM)
+        guard let renewal else { throw RenewalRefused() }
+        return renewal
+    }
+
     func downloadModelFile(modelId: String, path: String,
                            to destination: URL) async throws -> String {
         downloads.append("\(modelId)/\(path)")
@@ -153,4 +166,5 @@ actor FailingControlPlane: ControlPlaneClient {
     func assignedModels() async throws -> [ControlPlane.AssignedModel] { throw Unreachable() }
     func downloadModelFile(modelId: String, path: String,
                            to destination: URL) async throws -> String { throw Unreachable() }
+    func renew(csrPEM: String) async throws -> ControlPlane.Renewed { throw Unreachable() }
 }

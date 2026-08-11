@@ -100,8 +100,12 @@ paths:
                   nodeCaPem:
                     type: string
                     description: |
-                      The CA that signed this node's certificate. Informational:
-                      the node does not need it to connect.
+                      The CA that signs node certificates. A node needs this to
+                      verify *another node*, which happens when one machine
+                      holds half a model and the machine holding the other half
+                      connects to it. Kept distinct from serverCaPem so that
+                      trusting a peer never widens what may pose as a control
+                      plane.
         '202':
           description: Still awaiting approval
           content:
@@ -133,6 +137,76 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
 
         '401': { $ref: '#/components/responses/Unauthorized' }
+  /agent/v1/renew:
+    post:
+      tags: [agent]
+      summary: Renew this node's certificate
+      description: |
+        Renewal is routine and needs no human. The node authenticates with the
+        certificate it already holds, which proves possession of the key it was
+        issued against, so there is nothing for an admin to decide that was not
+        decided at approval.
+
+        It exists because certificates are deliberately short-lived: a machine
+        that leaves the building should stop being a fleet member on its own.
+        Without renewal that expiry is indistinguishable from an outage, and
+        the only remedy is re-enrolling every machine by hand once a month.
+
+        A revoked or superseded node cannot renew. Expiry is checked before this
+        handler runs, so a node that has already lapsed gets 401 and must
+        re-enroll: renewal extends an identity, it does not resurrect one.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [csrPem]
+              properties:
+                csrPem:
+                  type: string
+                  description: |
+                    Ordinarily built from the same Secure Enclave key, since
+                    that key cannot leave the machine and has no reason to
+                    change. A different key is accepted and recorded, because a
+                    machine that has had to rebuild its Enclave key would
+                    otherwise need a full re-enrollment.
+      responses:
+        '200':
+          description: Renewed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [certPem, notAfter]
+                properties:
+                  certPem: { type: string }
+                  notAfter: { type: string, format: date-time }
+                  rekeyed:
+                    type: boolean
+                    description: |
+                      Whether the CSR carried a different public key from the
+                      certificate being replaced.
+                  serverCaPem:
+                    type: string
+                    nullable: true
+                    description: |
+                      Returned so a node picks up a rotated server CA without
+                      anybody visiting it.
+                  nodeCaPem:
+                    type: string
+                    description: |
+                      Returned for the same reason, and so that nodes enrolled
+                      before peer connections existed acquire it on their next
+                      renewal rather than needing to be re-enrolled.
+        '400':
+          description: The CSR could not be signed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
   /agent/v1/me:
     get:
       tags: [agent]

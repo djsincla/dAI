@@ -166,9 +166,11 @@ is the check that actually rejected it.
 
 **Operational consequence:** every certificate issued before this change is
 client-only, and every node enrolled before it has no `node-ca.crt`. Those nodes
-can be a client half of a split but not the listening half. They need
-re-enrolling. There is no renewal command yet, and certificates are issued for
-30 days, so this needs one regardless.
+can be the connecting half of a split but not the listening half.
+
+They do not need re-enrolling. Renewal now exists and hands back both CAs, so a
+node acquires what it was never given on its next renewal, or immediately with
+`dai-agent renew <url> --force`.
 
 ---
 
@@ -253,13 +255,50 @@ The Swift `step()` evaluates before handing on, with a comment saying why.
 
 | | |
 |---|---|
-| Swift | 153 tests, green under SwiftPM and xcodebuild |
-| Control plane | 340 tests |
+| Swift | 163 tests, green under SwiftPM and xcodebuild |
+| Control plane | 347 tests |
 
 The socket path is tested over loopback with a throwaway CA generated per run,
 because a Secure Enclave key cannot be created inside a test process. The
 signing differs; the handshake, framing, partial reads and peer loss above it
 are the code that ships.
+
+## Renewal
+
+Certificates last thirty days on purpose. These live on laptops that leave the
+building, and a machine that stops checking in should stop being a fleet member
+on its own rather than because somebody remembered. That is only affordable if
+the machines still here renew unattended, and until now they could not: expiry
+was indistinguishable from an outage, and the remedy was visiting every machine
+once a month.
+
+A node renews by calling `POST /agent/v1/renew` with a new CSR, authenticated by
+the certificate it already holds. That certificate proves it controls the key it
+names, so there is nothing left for an admin to decide that was not decided at
+approval. No token, no human.
+
+- **Asked at two thirds of life**, which for a thirty-day certificate leaves ten
+  days. The margin is how many consecutive failures a node can survive, and
+  these are machines that spend weekends asleep. Expressed as a fraction rather
+  than a number of days, so shortening what the CA issues tightens renewal with
+  it instead of quietly leaving nodes renewing too late.
+- **The old certificate stops working immediately.** Renewal replaces the
+  fingerprint the control plane checks, so a loop still presenting the old one
+  would be told it was unknown moments after renewing. The renewer therefore
+  hands the loop a replacement client rather than only writing a file.
+- **Refused for a revoked, superseded or already-expired node.** Renewal extends
+  an identity; it does not resurrect one. Without the first of those, revoking a
+  stolen machine would last only until it renewed itself back in.
+- **Both CAs come back**, so a rotated CA reaches the fleet without anybody
+  visiting it.
+
+The Enclave key does not change, because it cannot leave the machine and has no
+reason to. A CSR carrying a different key is accepted, for a machine that has
+had to rebuild its key, and the change is recorded: it is the only trace of that
+happening.
+
+`dai-agent renew <url>` does it by hand, with `--force` for a machine that has
+been off for a month or a fleet that has changed what a certificate must carry.
 
 ## Still missing
 
@@ -272,4 +311,3 @@ Named because they are load-bearing, not because they are nice to have.
   both. There is no re-plan and no fallback to a smaller model.
 - **Routing.** A split model should present as one servable endpoint. The half
   with the output head is the one to address, but nothing yet publishes that.
-- **Certificate renewal.** Thirty-day certificates and no renewal command.

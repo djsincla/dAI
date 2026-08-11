@@ -1,0 +1,710 @@
+<title>dAI operator guide</title>
+
+<style>
+  /* The console's own palette, so the guide and the thing it documents read as
+     one system. Teal is the only accent; amber marks a gap rather than an
+     error, because nothing here is broken. */
+  :root {
+    --teal-200: #8fd9cd;
+    --teal-500: #0f8c7e;
+    --teal-700: #0a5a53;
+
+    --ground: #f4f7f7;
+    --panel: #ffffff;
+    --panel-2: #fbfdfd;
+    --shell: #10201f;
+    --shell-ink: #d6e7e4;
+    --rule: #dde5e5;
+    --rule-strong: #c6d3d3;
+    --ink: #17232a;
+    --ink-soft: #4c5d66;
+    --muted: #5b6b73;
+
+    --accent: var(--teal-500);
+    --accent-soft: #e6f7f4;
+    --gap: #8a4b06;
+    --gap-soft: #fdf1e3;
+
+    --measure: 66ch;
+    --font-display: "SF Pro Display", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    --font-body: "SF Pro Text", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0b1416; --panel: #101d20; --panel-2: #14252a;
+      --shell: #071012; --shell-ink: #cfe4e1;
+      --rule: #1e343a; --rule-strong: #2a464e;
+      --ink: #e4efee; --ink-soft: #b7cbc9; --muted: #8aa3a5;
+      --accent: var(--teal-200); --accent-soft: #0c2a2a;
+      --gap: #f0b968; --gap-soft: #3a2810;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #0b1416; --panel: #101d20; --panel-2: #14252a;
+    --shell: #071012; --shell-ink: #cfe4e1;
+    --rule: #1e343a; --rule-strong: #2a464e;
+    --ink: #e4efee; --ink-soft: #b7cbc9; --muted: #8aa3a5;
+    --accent: var(--teal-200); --accent-soft: #0c2a2a;
+    --gap: #f0b968; --gap-soft: #3a2810;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0; background: var(--ground); color: var(--ink);
+    font: 16.5px/1.6 var(--font-body); -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 1000px; margin: 0 auto; padding: 54px 26px 96px; display: grid; gap: 40px; }
+
+  .kicker {
+    font-family: var(--font-mono); font-size: 11.5px; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--accent);
+  }
+  h1 {
+    font-family: var(--font-display); font-size: clamp(29px, 4.2vw, 40px);
+    line-height: 1.1; letter-spacing: -.025em; font-weight: 640; margin: 0;
+    text-wrap: balance; max-width: 20ch;
+  }
+  .standfirst {
+    font-size: 18.5px; line-height: 1.5; color: var(--ink-soft);
+    max-width: var(--measure); margin: 0; text-wrap: pretty;
+  }
+  .masthead { display: grid; gap: 16px; }
+
+  section { display: grid; gap: 18px; }
+  .sec-head { display: grid; gap: 7px; border-top: 1px solid var(--rule-strong); padding-top: 22px; }
+  h2 {
+    font-family: var(--font-mono); font-size: 11.5px; letter-spacing: .13em;
+    text-transform: uppercase; color: var(--muted); font-weight: 600; margin: 0;
+  }
+  h3 {
+    font-family: var(--font-display); font-size: 24px; line-height: 1.2;
+    letter-spacing: -.015em; font-weight: 620; margin: 0; text-wrap: balance; max-width: 28ch;
+  }
+  p { margin: 0; max-width: var(--measure); text-wrap: pretty; }
+
+  code {
+    font-family: var(--font-mono); font-size: .87em; background: var(--panel-2);
+    border: 1px solid var(--rule); border-radius: 3px; padding: 1px 5px;
+    word-break: break-word;
+  }
+
+  /* ---------------------------------------------------------------- steps
+     Numbered because installation genuinely is a sequence: doing step four
+     before step three fails, and the number is the reader's place in it. */
+  .steps { display: grid; gap: 26px; counter-reset: step; }
+  .step {
+    display: grid; grid-template-columns: 34px 1fr; gap: 18px;
+    counter-increment: step;
+  }
+  .step::before {
+    content: counter(step);
+    font-family: var(--font-mono); font-size: 12px; font-weight: 600;
+    color: var(--accent); background: var(--accent-soft);
+    border-radius: 50%; width: 28px; height: 28px;
+    display: grid; place-items: center; margin-top: 2px;
+  }
+  .step-body { display: grid; gap: 12px; min-width: 0; }
+  .step-body h4 {
+    margin: 0; font-family: var(--font-display); font-size: 18px;
+    font-weight: 620; letter-spacing: -.01em; text-wrap: balance;
+  }
+
+  /* ------------------------------------------------------------ terminal */
+  .cmd {
+    background: var(--shell); color: var(--shell-ink);
+    border-radius: 5px; padding: 15px 17px; overflow-x: auto;
+    font-family: var(--font-mono); font-size: 13px; line-height: 1.65;
+    white-space: pre; tab-size: 2;
+  }
+  .cmd .c { color: #7f9c98; }        /* comment */
+  .cmd .p { color: var(--teal-200); } /* prompt marker */
+  .cmd .v { color: #e8c07d; }        /* value the reader must change */
+
+  /* ------------------------------------------------------------ callouts */
+  .note {
+    border-left: 3px solid var(--accent); background: var(--panel);
+    border-radius: 0 4px 4px 0; padding: 15px 18px;
+    display: grid; gap: 6px; max-width: var(--measure);
+  }
+  .note.gap { border-left-color: var(--gap); background: var(--gap-soft); }
+  .note b {
+    font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .09em;
+    text-transform: uppercase; color: var(--accent); font-weight: 600;
+  }
+  .note.gap b { color: var(--gap); }
+  .note p { font-size: 14.5px; color: var(--ink-soft); max-width: none; }
+  .note.gap p { color: var(--ink); }
+
+  /* -------------------------------------------------------------- tables */
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 14.5px; }
+  th {
+    text-align: left; font-family: var(--font-mono); font-size: 10.5px;
+    letter-spacing: .08em; text-transform: uppercase; color: var(--muted);
+    font-weight: 600; padding: 0 16px 9px 0;
+    border-bottom: 1px solid var(--rule-strong); white-space: nowrap;
+  }
+  td { padding: 11px 16px 11px 0; border-bottom: 1px solid var(--rule); vertical-align: baseline; }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.mono, .mono { font-family: var(--font-mono); font-size: 13px; }
+
+  .toc {
+    background: var(--panel); border: 1px solid var(--rule); border-radius: 4px;
+    padding: 18px 22px; display: grid; gap: 7px; max-width: var(--measure);
+  }
+  .toc a {
+    color: var(--ink-soft); text-decoration: none; font-size: 15px;
+    display: flex; gap: 12px; align-items: baseline;
+  }
+  .toc a:hover { color: var(--accent); }
+  .toc .n { font-family: var(--font-mono); font-size: 11px; color: var(--muted); min-width: 4.2em; }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+
+  ul { margin: 0; padding-left: 1.15em; max-width: var(--measure); display: grid; gap: 7px; }
+  li { padding-left: .2em; }
+
+  footer {
+    border-top: 1px solid var(--rule-strong); padding-top: 18px;
+    font-size: 13.5px; color: var(--muted); max-width: var(--measure);
+  }
+
+  @media (max-width: 620px) {
+    .wrap { padding: 34px 18px 64px; gap: 32px; }
+    .step { grid-template-columns: 26px 1fr; gap: 13px; }
+    .step::before { width: 24px; height: 24px; font-size: 11px; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <div class="kicker">Operator guide</div>
+    <h1>Installing and running a dAI fleet</h1>
+    <p class="standfirst">
+      Standing up the control plane, putting an agent on a Mac, and running the
+      fleet day to day. Written for whoever operates the fleet, not for the
+      people whose machines are being borrowed.
+    </p>
+  </header>
+
+  <nav class="toc" aria-label="Contents">
+    <a href="#before"><span class="n">Start</span> Before you begin</a>
+    <a href="#control"><span class="n">Part 1</span> Install the control plane</a>
+    <a href="#agent"><span class="n">Part 2</span> Deploy an agent to a Mac</a>
+    <a href="#operate"><span class="n">Part 3</span> Operating and monitoring</a>
+    <a href="#wrong"><span class="n">When</span> Something goes wrong</a>
+    <a href="#remove"><span class="n">End</span> Removing an agent</a>
+  </nav>
+
+  <!-- ================================================== before you begin -->
+  <section id="before">
+    <div class="sec-head">
+      <h2>Before you begin</h2>
+      <h3>Four things that will surprise you</h3>
+    </div>
+    <p>
+      Read these first. Each one has already cost somebody an afternoon, and
+      three of them look like failures when they are not.
+    </p>
+
+    <div class="note">
+      <b>Build with xcodebuild, never swift build</b>
+      <p>
+        SwiftPM cannot compile MLX's Metal shaders. A binary built with
+        <code>swift build</code> installs fine and then aborts from C++ the first
+        time it touches the GPU, looking exactly like a missing Metal toolchain.
+        The installer refuses a build it does not recognise for this reason.
+      </p>
+    </div>
+
+    <div class="note">
+      <b>The machine enrols itself, the installer does not</b>
+      <p>
+        Generating a key in the Secure Enclave needs a session whose keybag is
+        unlocked, which an SSH session does not have even as root. So enrolment
+        happens in the daemon on first start. Over SSH you will see
+        <code>==&gt; the daemon will enrol on first start</code>. That is the
+        normal path, not an error.
+      </p>
+    </div>
+
+    <div class="note gap">
+      <b>Two steps have no interface yet</b>
+      <p>
+        Creating a join token is a direct database insert, and approving a
+        machine is a <code>curl</code> call. There is no button for either. Both
+        are shown below; neither is hidden from you, but neither is finished.
+      </p>
+    </div>
+
+    <div class="note gap">
+      <b>These steps have not been run end to end on a clean machine</b>
+      <p>
+        The commands here are taken from the scripts as they currently stand, and
+        the fleet's existing machines were installed before several fixes landed.
+        Expect to hit something. The troubleshooting section covers every failure
+        seen so far.
+      </p>
+    </div>
+
+    <p>You will need:</p>
+    <ul>
+      <li>A Mac to run the control plane, with Docker and Node.</li>
+      <li>Xcode with the Metal toolchain, on whichever machine builds the agent.</li>
+      <li>Administrator access on every Mac that will join the fleet.</li>
+      <li>Apple Silicon on the fleet machines. There is no Intel path.</li>
+    </ul>
+  </section>
+
+  <!-- ================================================== control plane ---- -->
+  <section id="control">
+    <div class="sec-head">
+      <h2>Part 1</h2>
+      <h3>Install the control plane</h3>
+    </div>
+    <p>
+      One per site. It holds the certificate authority, the work queue, the model
+      catalogue and the console, and it should live on a machine that stays on.
+    </p>
+
+    <div class="steps">
+
+      <div class="step"><div class="step-body">
+        <h4>Start the database and generate a certificate authority</h4>
+<div class="cmd"><span class="c"># in control-plane/</span>
+npm install
+npm run db:up                 <span class="c"># postgres on port 5433</span>
+./scripts/make-certs.sh       <span class="c"># CA, server and node certificates</span></div>
+        <p>
+          This creates <code>certs/ca.key</code>, which is the single most
+          important file in the system. Every node certificate traces back to it,
+          and enrolment needs the Secure Enclave, so losing it means visiting
+          every machine in person to enrol again. Back it up before you go
+          further.
+        </p>
+      </div></div>
+
+      <div class="step"><div class="step-body">
+        <h4>Start the server</h4>
+<div class="cmd">DATABASE_URL=postgres://dai:dai@localhost:5433/dai \
+DAI_MODEL_REPO=<span class="v">$PWD/models</span> \
+PORT=<span class="v">8452</span> \
+npm start</div>
+        <p>
+          It should log <code>[both] mTLS on https://localhost:8452</code>. If it
+          says <code>HTTP on :8452 (no TLS material...)</code> the certificates
+          were not found, and you have an unauthenticated dispatch endpoint.
+          Stop and fix that rather than carrying on.
+        </p>
+      </div></div>
+
+      <div class="step"><div class="step-body">
+        <h4>Write the configuration down</h4>
+        <p>
+          Those environment variables exist only in the shell that launched the
+          server. Restarting it later without them has already turned into
+          archaeology once. Put them in a file you keep, and take a backup, which
+          captures them along with the CA and the database:
+        </p>
+<div class="cmd">DATABASE_URL=postgres://dai:dai@localhost:5433/dai ./scripts/backup.sh</div>
+        <p>
+          The archive is around a megabyte. It holds the CA private key in the
+          clear, so it belongs somewhere with fewer readers than the machine it
+          came from.
+        </p>
+      </div></div>
+
+      <div class="step"><div class="step-body">
+        <h4>Get your console credential</h4>
+<div class="cmd">DATABASE_URL=postgres://dai:dai@localhost:5433/dai node scripts/token.mjs
+<span class="c"># ADMIN=dd221cb9-1658-4c90-a3b2-93ca86cf1346</span></div>
+        <p>
+          Open <code>https://localhost:8452/ui/</code>, accept the certificate
+          warning (it is your own CA), and paste that value into the session
+          field in the sidebar.
+        </p>
+        <div class="note gap">
+          <b>This credential is a user id, not a password</b>
+          <p>
+            It is the primary key of the users table, sent as a bearer token.
+            There is no password, no expiry and no revocation short of deleting
+            the user. The same id appears in the jobs list and the audit log, so
+            anyone who reads it anywhere gets full administrative access.
+            Acceptable for machines you own; not acceptable once somebody else's
+            Mac joins.
+          </p>
+        </div>
+      </div></div>
+
+    </div>
+  </section>
+
+  <!-- ================================================== agent ------------ -->
+  <section id="agent">
+    <div class="sec-head">
+      <h2>Part 2</h2>
+      <h3>Deploy an agent to a Mac</h3>
+    </div>
+    <p>
+      Repeat per machine. Steps 1 and 3 are done once for the whole fleet; the
+      rest are per machine.
+    </p>
+
+    <div class="steps">
+
+      <div class="step"><div class="step-body">
+        <h4>Build the agent</h4>
+<div class="cmd"><span class="c"># in agent/ &mdash; xcodebuild, not swift build</span>
+xcodebuild build -scheme dai-agent -destination 'platform=OS X' \
+  -configuration Release -derivedDataPath .xcbuild \
+  ENABLE_CODE_COVERAGE=NO CLANG_ENABLE_CODE_COVERAGE=NO \
+  SWIFT_ENABLE_CODE_COVERAGE=NO</div>
+        <p>
+          Products land in <code>.xcbuild/Build/Products/Release</code>: the
+          <code>dai-agent</code> binary, <code>dAI.app</code> for the menu bar,
+          and several <code>.bundle</code> directories that must travel with the
+          binary or it dies on first use.
+        </p>
+      </div></div>
+
+      <div class="step"><div class="step-body">
+        <h4>Check the machine can run it</h4>
+<div class="cmd">sudo /path/to/dai-agent preflight</div>
+        <p>
+          Run it with <code>sudo</code>. The daemon runs in session 0, which is a
+          different enough context that checking only the interactive case proves
+          less than it looks like. You want
+          <code>READY. This machine can run the agent as a daemon.</code>
+        </p>
+      </div></div>
+
+      <div class="step"><div class="step-body">
+        <h4>Create a join token</h4>
+<div class="cmd"><span class="c"># no API for this yet, so insert it directly</span>
+docker exec control-plane-postgres-1 psql -U dai -d dai \
+  -c "insert into join_tokens (token) values ('<span class="v">studio-01-join</span>')"</div>
+        <p>
+          A token gets a machine into the pending queue and nothing more. It is
+          consumed when the certificate is collected, and the agent deletes its
+          copy afterwards so it cannot be replayed to enrol a second machine.
+        </p>
+      </div></div>
+
+      <div class="step"><div class="step-body">
+        <h4>Copy the files to the machine</h4>
+<div class="cmd">ssh <span class="v">studio-01.local</span> 'mkdir -p dai/bin dai/packaging'
+scp .xcbuild/Build/Products/Release/dai-agent <span class="v">studio-01.local</span>:dai/bin/
+scp -r .xcbuild/Build/Products/Release/*.bundle <span class="v">studio-01.local</span>:dai/bin/
+scp -r .xcbuild/Build/Products/Release/dAI.app <span class="v">studio-01.local</span>:dai/bin/
+scp packaging/*.sh packaging/*.plist.in <span class="v">studio-01.local</span>:dai/packaging/
+scp ../control-plane/certs/ca.crt <span class="v">studio-01.local</span>:dai/srv-ca.crt</div>
+      </div></div>
+
+      <div class="step"><div class="step-body">
+        <h4>Run the installer</h4>
+<div class="cmd">ssh -t <span class="v">studio-01.local</span> "sudo ~/dai/packaging/install.sh \
+  --url https://<span class="v">192.168.4.24</span>:8452 \
+  --token <span class="v">studio-01-join</span> \
+  --ca ~/dai/srv-ca.crt \
+  --ane ~/dai/models/ane_embed.mlpackage \
+  --build ~/dai/bin"</div>
+        <p>
+          <code>--build</code> is required on every machine except the one that
+          compiled the binary. <code>--model</code> is optional: a machine with no
+          GPU weights is a normal machine that does embedding work, and the
+          smallest Macs in a fleet are usually exactly that.
+        </p>
+        <div class="note">
+          <b>Expected, not an error</b>
+          <p>
+            <code>==&gt; the daemon will enrol on first start</code> is the normal
+            outcome over SSH. The installer tries enrolment as a convenience and
+            the Secure Enclave refuses; the daemon does it properly a moment
+            later.
+          </p>
+        </div>
+      </div></div>
+
+      <div class="step"><div class="step-body">
+        <h4>Approve the machine</h4>
+        <p>
+          The machine now appears as pending and does nothing until a human lets
+          it in. Find it and approve it:
+        </p>
+<div class="cmd">docker exec control-plane-postgres-1 psql -U dai -d dai -t -A \
+  -c "select id, hostname from nodes where state='pending'"
+
+curl -sk -X POST https://localhost:8452/admin/v1/nodes/<span class="v">NODE_ID</span>/approve \
+  -H "authorization: Bearer <span class="v">ADMIN_ID</span>" \
+  -H "content-type: application/json" -d '{}'</div>
+        <div class="note gap">
+          <b>No approve button yet</b>
+          <p>
+            The console lists machines but has no control for approving one. The
+            API endpoint is the only way today.
+          </p>
+        </div>
+      </div></div>
+
+      <div class="step"><div class="step-body">
+        <h4>Confirm it joined</h4>
+        <p>
+          Open the console. The machine should appear under Machines with a
+          presence state and a heartbeat. If it enrolled under a name you do not
+          recognise, see the troubleshooting table.
+        </p>
+      </div></div>
+
+    </div>
+  </section>
+
+  <!-- ================================================== operating -------- -->
+  <section id="operate">
+    <div class="sec-head">
+      <h2>Part 3</h2>
+      <h3>Operating and monitoring</h3>
+    </div>
+
+    <p>
+      The console is at <code>https://localhost:8452/ui/</code> and has five
+      views. Overview is the one to leave open.
+    </p>
+
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr><th>View</th><th>What it answers</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="mono">Overview</td>
+            <td>What needs attention right now, and eligible capacity over time. Drag the chart sideways to change the span, from ten minutes to three days.</td>
+          </tr>
+          <tr>
+            <td class="mono">Machines</td>
+            <td>Every machine, its presence, what it will accept, and what it is serving. Groups sit above the table; drag a machine between them.</td>
+          </tr>
+          <tr>
+            <td class="mono">Models</td>
+            <td>What the fleet is supposed to hold against what it does. Add a model, push it to a group, inspect placement per machine.</td>
+          </tr>
+          <tr>
+            <td class="mono">Deployment</td>
+            <td>What agent version each machine runs, and who is allowed to change it.</td>
+          </tr>
+          <tr>
+            <td class="mono">Logs</td>
+            <td>Machine activity and fleet actions as one sequence, searchable, exportable as text or HTML.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h4 style="font-family:var(--font-display);font-size:19px;font-weight:620;margin:6px 0 0">
+      Reading the Overview</h4>
+    <p>
+      The attention list is ordered by what blocks what. A decision waiting on a
+      human comes first, because nothing behind it moves until somebody acts.
+      Problems come next. An owner's pause appears as information rather than a
+      warning: it is a right they were given, and it is not yours to lift.
+    </p>
+
+    <h4 style="font-family:var(--font-display);font-size:19px;font-weight:620;margin:6px 0 0">
+      Putting a model on machines</h4>
+    <p>
+      Models already on the control plane's disk import without downloading
+      anything, which is the cheapest path and the one the Add model list shows
+      first. Import hashes every file, so a truncated copy cannot pass as good.
+    </p>
+<div class="cmd">DAI_SESSION=<span class="v">ADMIN_ID</span> node scripts/import-model.mjs \
+  <span class="v">~/Library/Caches/models/mlx-community/Qwen2.5-7B-Instruct-4bit</span> \
+  --id <span class="v">mlx-community/Qwen2.5-7B-Instruct-4bit</span> \
+  --runtime mlx --kind generate --context 32768 --quant 4bit</div>
+    <p>
+      Then push it to a group from the Models view. Pushing moves no bytes: it
+      records a decision, and each machine fetches when nobody is at it, verifies
+      every file against its hash, and only then makes it loadable. Expect
+      drift to show for a while, and to clear on its own.
+    </p>
+
+    <h4 style="font-family:var(--font-display);font-size:19px;font-weight:620;margin:6px 0 0">
+      Rolling out a new agent build</h4>
+    <p>
+      Register the build on the control plane, then set a group's channel to
+      <b>this control plane</b> and choose the version. Machines fetch it, verify
+      the hash, restart, and roll themselves back if the new binary fails to
+      report in. Groups left on <b>MDM or by hand</b> are never pushed to; the
+      console records what it expects and reports what it sees.
+    </p>
+<div class="cmd">curl -sk -X POST https://localhost:8452/admin/v1/agent/builds \
+  -H "authorization: Bearer <span class="v">ADMIN_ID</span>" -H "content-type: application/json" \
+  -d '{"version":"<span class="v">2026.08.11-1</span>","path":"<span class="v">/path/to/dai-agent</span>","notes":"<span class="v">what changed</span>"}'</div>
+
+    <h4 style="font-family:var(--font-display);font-size:19px;font-weight:620;margin:6px 0 0">
+      What the machine's owner sees</h4>
+    <p>
+      A menu bar icon showing whether the machine is available, working, or
+      waiting, what it has contributed, and a pause button. Pausing writes a file
+      under <code>/Users/Shared</code>, works with the network down, and nothing
+      on the server can clear it. It stops the work and also releases the hold
+      that keeps the machine awake. You will be asked about this; the honest
+      answer is that the button always wins.
+    </p>
+
+    <h4 style="font-family:var(--font-display);font-size:19px;font-weight:620;margin:6px 0 0">
+      Backups</h4>
+    <p>
+      Run <code>./scripts/backup.sh</code> on a schedule. It captures the
+      certificate authority, the database and the configuration, and skips model
+      weights deliberately: those can be fetched again, and the catalogue's
+      hashes make a re-import verifiable. Restoring moves the existing CA aside
+      rather than overwriting it, and checks the result against a manifest.
+    </p>
+  </section>
+
+  <!-- ================================================== troubleshooting -- -->
+  <section id="wrong">
+    <div class="sec-head">
+      <h2>When something goes wrong</h2>
+      <h3>Every failure seen so far, and what it actually was</h3>
+    </div>
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr><th>What you see</th><th>What it is</th><th>What to do</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="mono">the daemon will enrol on first start</td>
+            <td>Normal over SSH. The Enclave will not generate a key in an SSH session.</td>
+            <td>Nothing. Approve the machine when it appears.</td>
+          </tr>
+          <tr>
+            <td class="mono">Bootstrap failed: 5: Input/output error</td>
+            <td>The old daemon had not finished stopping. It holds a long-poll connection and does not exit instantly.</td>
+            <td><code>sudo ~/dai/packaging/reload-daemon.sh system com.dai.agent /Library/LaunchDaemons/com.dai.agent.plist</code></td>
+          </tr>
+          <tr>
+            <td>Installer exits and nothing is installed</td>
+            <td>An early step failed. Older versions exited without saying what state they left behind.</td>
+            <td>Re-run the installer. It is safe to run on a working machine and will not disturb the identity.</td>
+          </tr>
+          <tr>
+            <td>A deploy appears to succeed but the version does not change</td>
+            <td>The copy did not take, or the daemon was not reloaded.</td>
+            <td>Check the size and date of <code>/usr/local/libexec/dai/dai-agent</code> against the build you meant to install.</td>
+          </tr>
+          <tr>
+            <td>A machine enrolled under a name like syn-2600-6c52-…</td>
+            <td>An old agent read its name from reverse DNS during boot and got its own IPv6 address.</td>
+            <td>Fixed in current builds. Rename the row in the database; the identity is unaffected.</td>
+          </tr>
+          <tr>
+            <td>A machine goes unreachable for minutes at a time</td>
+            <td>It is asleep. The agent holds the machine awake only on mains power, unpaused; a laptop on battery or with its lid shut still sleeps.</td>
+            <td>Check <code>pmset -g assertions | grep -i dai</code> on the machine. Plug it in.</td>
+          </tr>
+          <tr>
+            <td>The menu bar icon never appears</td>
+            <td>The agent was installed but the login session did not pick it up, or the screen is locked.</td>
+            <td><code>sudo launchctl kickstart -k gui/501/com.dai.menubar</code>, using the console user's uid.</td>
+          </tr>
+          <tr>
+            <td>A machine is in the fleet but never gets work</td>
+            <td>Usually presence: harvest machines only take GPU work once locked, and promotion waits five minutes.</td>
+            <td><code>dai-agent presence</code> on the machine reports the state and what it currently permits.</td>
+          </tr>
+          <tr>
+            <td>Requests to the serving API return 503</td>
+            <td>No machine is both holding the model and free.</td>
+            <td>Check Models for drift, and Machines for presence. A machine in use is not offered interactive work.</td>
+          </tr>
+          <tr>
+            <td class="mono">com.dai.updater did not unload after 60s</td>
+            <td>An upgrade was in flight. A root process is partway through replacing the binary the uninstaller is trying to delete, so it stops rather than pulling the floor out.</td>
+            <td>Wait for the upgrade to finish, then run the uninstaller again. Nothing was removed.</td>
+          </tr>
+          <tr>
+            <td>An uninstall printed <span class="mono">==&gt; stopping</span> and nothing else</td>
+            <td>An old copy of <code>uninstall.sh</code>. It stopped on a failed menu bar bootout — which fails whenever the menu bar job is not loaded — after removing the agent and before removing the identity, and said nothing.</td>
+            <td>Copy the current scripts to the machine and re-run. A <code>--purge</code> that ended this way did not purge: check whether <code>/var/db/dai</code> is still there.</td>
+          </tr>
+          <tr>
+            <td>A removed machine still has a root job polling the control plane</td>
+            <td>Also an old <code>uninstall.sh</code>, which did not stop the updater.</td>
+            <td><code>sudo launchctl bootout system/com.dai.updater; sudo rm -f /Library/LaunchDaemons/com.dai.updater.plist</code>. Current versions do this for you.</td>
+          </tr>
+          <tr>
+            <td>A reinstalled machine comes back on the version before last</td>
+            <td>A pending-upgrade marker survived the uninstall. The updater reads it before anything else, sees a deadline long past, and restores the rollback binary over the version just installed.</td>
+            <td><code>sudo rm -f /var/db/dai/pending-upgrade.json /var/db/dai/dai-agent.rollback</code>, then reinstall. Current versions clear both.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ================================================== removal ---------- -->
+  <section id="remove">
+    <div class="sec-head">
+      <h2>Removing an agent</h2>
+      <h3>Give a machine back</h3>
+    </div>
+<div class="cmd">ssh -t <span class="v">studio-01.local</span> "sudo ~/dai/packaging/uninstall.sh --purge"</div>
+    <p>
+      Without <code>--purge</code> the agent stops and the binary and menu bar
+      app are removed, but the machine's identity, its logs and the
+      <code>_dai</code> service account stay behind. Use <code>--purge</code>
+      unless you are about to reinstall on the same machine and want to keep its
+      enrolment.
+    </p>
+
+    <p>
+      The updater is stopped first, before the binary is removed, and the script
+      waits for it to actually be gone rather than just asking. That ordering is
+      the point: the updater is a root job whose purpose is to put the agent
+      binary back, so an uninstall that removed the binary while it was still
+      loaded could be undone by the machine itself two minutes later.
+    </p>
+
+    <div class="note gap">
+      <b>If it says the updater did not unload</b>
+      <p>
+        The script stops, leaves the binary alone and exits non-zero. That
+        means an upgrade was in flight and a root process was partway through
+        replacing the binary you are trying to delete. Wait for it to finish and
+        run the uninstaller again; there is nothing to clean up by hand.
+      </p>
+    </div>
+
+    <p>
+      An interrupted upgrade is cleared either way. The pending-upgrade marker
+      and the rollback copy are removed even without <code>--purge</code>,
+      because a marker that outlives its binary is not a record of anything and
+      the next install would act on it — reading it first, finding a deadline
+      long past and no agent reporting in, and restoring the old binary over the
+      version just installed.
+    </p>
+
+    <p>
+      Then revoke the machine's certificate, or it remains a fleet member that
+      simply stopped reporting:
+    </p>
+<div class="cmd">curl -sk -X POST https://localhost:8452/admin/v1/nodes/<span class="v">NODE_ID</span>/revoke \
+  -H "authorization: Bearer <span class="v">ADMIN_ID</span>" \
+  -H "content-type: application/json" -d '{}'</div>
+  </section>
+
+  <footer>
+    <p>
+      Commands are taken from the scripts as they currently stand. Two steps,
+      creating a join token and approving a machine, have no interface yet and
+      are shown as the raw calls they are.
+    </p>
+  </footer>
+
+</div>

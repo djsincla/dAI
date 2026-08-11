@@ -2,6 +2,9 @@ import { Router } from 'express'
 import { randomUUID } from 'node:crypto'
 import type { Db } from '../lib/db.js'
 import { agentAuth } from '../lib/auth.js'
+import { poolsFor } from '../lib/pools.js'
+import { repositoryRoot, safePath } from '../lib/repository.js'
+import { buildPath, desiredBuildFor } from '../lib/agentBuilds.js'
 import { POLICY, type WorkKind } from '../lib/policy.js'
 import { LeaseConflict, leaseWork, reportResult } from '../lib/work.js'
 import { clientIp, nodeNetworkAllowed } from '../lib/netacl.js'
@@ -151,6 +154,9 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
       models?: { name: string; contextLength: number }[]
       capabilitySamples?: { workloadClass: string; itemsPerSecond: number }[]
       residentModels?: Record<string, number>
+      storedModels?: Record<string, number>
+      agentVersion?: string
+      agentFingerprint?: string
     }
     const node = req.node!
 
@@ -187,7 +193,13 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
               -- Replaced rather than merged: a model the node has released is
               -- no longer resident, and routing to it would put a 1-3s load on
               -- the request path it was chosen to avoid.
-              resident_models = $5::jsonb
+              resident_models = $5::jsonb,
+              -- Absent means unchanged, so an agent that predates this field
+              -- keeps whatever it last reported rather than being recorded as
+              -- holding nothing and triggering a fleet-wide redistribution.
+              stored_models = COALESCE($9::jsonb, stored_models),
+              agent_version = COALESCE($10, agent_version),
+              agent_fingerprint = COALESCE($11, agent_fingerprint)
         WHERE id = $6`,
       [b.presenceState, b.onAcPower ?? null, b.thermalOk ?? null,
        JSON.stringify(profiles), JSON.stringify(b.residentModels ?? {}), node.id,
@@ -195,7 +207,9 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
        b.models === undefined
          ? null
          : JSON.stringify(Object.fromEntries(
-             b.models.map((m) => [m.name, m.contextLength]))) ],
+             b.models.map((m) => [m.name, m.contextLength]))),
+       b.storedModels ? JSON.stringify(b.storedModels) : null,
+       b.agentVersion ?? null, b.agentFingerprint ?? null ],
     )
     // Presence history feeds the capacity graph, which cannot be drawn from
     // current state alone.
@@ -203,6 +217,128 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
       `INSERT INTO presence_samples (node_id, presence_state, on_ac_power)
        VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
       [node.id, b.presenceState, b.onAcPower ?? null],
+    )
+    res.status(204).end()
+  })
+
+  /**
+   * What this node should be holding.
+   *
+   * Resolved through pool membership rather than listed per machine, so an
+   * operator assigns a model to a pool and every machine in it works out that
+   * the instruction applies to them. A node never learns which pools it is in,
+   * which keeps the fleet's shape out of a credential that lives on a
+   * workstation.
+   *
+   * File hashes come down with it. They are what the node verifies against, and
+   * verification is the entire reason this is not just an rsync.
+   */
+  r.get('/models/assigned', async (req, res) => {
+    const node = req.node!
+    const { rows: pools } = await db.query(`SELECT id, tier, membership FROM pools`)
+    const mine = poolsFor(node as never, pools as never).map((p) => p.id)
+    if (mine.length === 0) { res.json([]); return }
+
+    const { rows } = await db.query(
+      `SELECT DISTINCT m.id, m.runtime, m.kind
+         FROM models m JOIN pool_models pm ON pm.model_id = m.id
+        WHERE pm.pool_id = ANY($1::uuid[]) ORDER BY m.id`, [mine])
+
+    const out = []
+    for (const m of rows) {
+      const { rows: files } = await db.query(
+        `SELECT path, size_bytes, sha256 FROM model_files WHERE model_id=$1 ORDER BY path`,
+        [m.id])
+      out.push({
+        id: m.id, runtime: m.runtime, kind: m.kind,
+        files: files.map((f) => ({
+          path: f.path, sizeBytes: Number(f.size_bytes), sha256: f.sha256,
+        })),
+      })
+    }
+    res.json(out)
+  })
+
+  /**
+   * One file of one model.
+   *
+   * Both parameters arrive percent-encoded, because a model id contains a
+   * slash and a file path may contain several. Express matches on the raw path
+   * and decodes afterwards, so an encoded slash stays inside one parameter
+   * rather than becoming another path segment - which is also what stops a
+   * caller from walking out of the repository by spelling the traversal in
+   * pieces.
+   *
+   * sendFile handles Range, and Range is why this is a file server rather than
+   * a JSON payload: a shard is gigabytes, and a transfer that cannot resume
+   * starts from zero every time a workstation sleeps.
+   */
+  r.get('/models/:modelId/files/:filePath', async (req, res) => {
+    const { modelId, filePath } = req.params as { modelId: string; filePath: string }
+    const { rows } = await db.query(
+      `SELECT 1 FROM model_files WHERE model_id=$1 AND path=$2`, [modelId, filePath])
+    // Checked against the catalogue first, so the repository can only ever
+    // serve bytes something registered claims to be part of a model.
+    if (rows.length === 0) {
+      res.status(404).json({ error: 'not_found', detail: 'no such model file' })
+      return
+    }
+    const full = safePath(repositoryRoot(), modelId, filePath)
+    if (!full || !existsSync(full)) {
+      res.status(404).json({ error: 'not_found', detail: 'registered but not in the repository' })
+      return
+    }
+    res.sendFile(full)
+  })
+
+  /**
+   * What this node should be running, if anybody is managing it.
+   *
+   * Answers nothing when the node's pools are external: in that mode an MDM or
+   * a person owns the binary and this system only observes. A node that is told
+   * nothing does nothing, which is the correct behaviour for a machine whose
+   * software somebody else is responsible for.
+   */
+  r.get('/agent/desired', async (req, res) => {
+    const { rows: pools } = await db.query(`SELECT id, tier, membership FROM pools`)
+    const mine = poolsFor(req.node! as never, pools as never).map((p) => p.id)
+    const build = await desiredBuildFor(db, mine)
+    res.json(build ?? {})
+  })
+
+  /** The bytes of one build. Verified against the recorded hash by the node. */
+  r.get('/agent/builds/:version/binary', async (req, res) => {
+    const { version } = req.params as { version: string }
+    const { rows } = await db.query(`SELECT 1 FROM agent_builds WHERE version = $1`, [version])
+    if (rows.length === 0) {
+      res.status(404).json({ error: 'not_found', detail: 'no such build' })
+      return
+    }
+    const path = buildPath(version)
+    if (!path || !existsSync(path)) {
+      res.status(404).json({ error: 'not_found', detail: 'registered but not in the repository' })
+      return
+    }
+    res.sendFile(path)
+  })
+
+  /**
+   * What an upgrade did, reported by the machine that attempted it.
+   *
+   * Written by the node because the interesting outcome is the one this server
+   * cannot observe: a binary that starts, fails to reach home, and is rolled
+   * back by the machine itself. Without this the fleet would show a node that
+   * never moved and no trace of it having tried.
+   */
+  r.post('/agent/upgrades', async (req, res) => {
+    const b = req.body as {
+      fromVersion?: string | null; toVersion: string
+      state: 'started' | 'committed' | 'reverted' | 'failed'; detail?: string | null
+    }
+    await db.query(
+      `INSERT INTO agent_upgrades (node_id, from_version, to_version, state, detail)
+       VALUES ($1,$2,$3,$4,$5)`,
+      [req.node!.id, b.fromVersion ?? null, b.toVersion, b.state, b.detail ?? null],
     )
     res.status(204).end()
   })

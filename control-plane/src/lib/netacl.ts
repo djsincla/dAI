@@ -87,6 +87,32 @@ export function clientIp(req: Request): string | undefined {
   return normalizeIp(req.ip) ?? normalizeIp(req.socket.remoteAddress) ?? undefined
 }
 
+/**
+ * An allowlist for a surface that carries no credential.
+ *
+ * `aclMiddleware` treats an unset list as "allow everything", which is the right
+ * default for a surface that authenticates its callers by other means. It is the
+ * wrong default here: an unauthenticated endpoint that is open when nobody
+ * configured it publishes a fleet inventory to anyone who can route to it.
+ *
+ * So an empty list denies. Configuring nothing yields nothing rather than
+ * everything.
+ */
+export function closedAclMiddleware(acl: Acl, surface: string) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    if (acl.open) {
+      res.status(404).type('text/plain')
+        .send(`the ${surface} surface is disabled until an address range is configured\n`)
+      return
+    }
+    if (!acl.allows(clientIp(req))) {
+      res.status(403).type('text/plain').send('address not permitted\n')
+      return
+    }
+    next()
+  }
+}
+
 export function aclMiddleware(acl: Acl, surface: string) {
   return (req: Request, res: Response, next: NextFunction) => {
     if (acl.allows(clientIp(req))) {

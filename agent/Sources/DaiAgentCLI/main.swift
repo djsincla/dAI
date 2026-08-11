@@ -53,16 +53,28 @@ case "presence":
     let signals = MacSignalSource().read()
     let monitor = PresenceMonitor()
     let reading = monitor.update(signals, now: Date().timeIntervalSince1970)
+    // The daemon's state, not this process's. A monitor constructed here begins
+    // at ACTIVE and promotion needs the condition held for five minutes, so a
+    // single sample can only ever print ACTIVE - which it did, on a machine
+    // that had been locked for five minutes, while the daemon three feet away
+    // had it right. A diagnostic that cannot report the truth is worse than no
+    // diagnostic, because it gets believed.
+    let daemon = AgentStatus.read()
+    let live = daemon.flatMap { $0.isFresh ? PresenceState(rawValue: $0.presenceState) : nil }
+    let state = live ?? reading.state
+    let source = live != nil ? "daemon"
+        : (daemon != nil ? "stale daemon status; this sample only" : "no daemon; this sample only")
+    let policy = live.map { effectivePolicy($0, signals) } ?? reading.policy
     print("""
-    presence   \(reading.state.rawValue)  (observed \(reading.observed.rawValue))
+    presence   \(state.rawValue)  (observed \(reading.observed.rawValue), from \(source))
     hid idle   \(fmt(signals.hidIdleSeconds))s
     locked     \(signals.screenLocked.map(String.init(describing:)) ?? "unknown")
     console    \(signals.consoleUser ?? "nobody")
     ac power   \(signals.onACPower)
     thermal    \(signals.thermalOK ? "ok" : "pressure")
-    policy     gpu=\(reading.policy.gpu) ane=\(reading.policy.ane) qos=\(reading.policy.qos.rawValue)
-    limits     duty=\(reading.policy.dutyMax) mem=\(reading.policy.memFrac) maxTokens=\(reading.policy.maxCompletionTokens)
-    permits    \(permittedKinds(reading.state, policy: reading.policy).map(\.rawValue).joined(separator: ", "))
+    policy     gpu=\(policy.gpu) ane=\(policy.ane) qos=\(policy.qos.rawValue)
+    limits     duty=\(policy.dutyMax) mem=\(policy.memFrac) maxTokens=\(policy.maxCompletionTokens)
+    permits    \(permittedKinds(state, policy: policy).map(\.rawValue).joined(separator: ", "))
     """)
 
 case "verify-ane":
@@ -201,6 +213,18 @@ case "work":
     }
     let dir = Enroll.identityDir()
     do {
+        // Enrol here rather than in the installer. The Enclave will not generate
+        // a key in an ssh session even as root, which is where an installer
+        // usually runs, but will in a daemon - so the machine joins the fleet
+        // on first start and nobody has to be sitting at it.
+        let caPath = dir.appendingPathComponent("server-ca.crt").path
+        guard await Enroll.ensureIdentity(controlPlane: URL(string: args[2])!,
+                                          caPath: FileManager.default.fileExists(atPath: caPath)
+                                            ? caPath : nil) else {
+            print("no identity; waiting for approval or a join token")
+            exit(1)
+        }
+
         let identity = try NodeIdentity.load(
             certificate: dir.appendingPathComponent("node.crt"),
             enclaveKey: Enroll.keyPath(dir))
@@ -226,8 +250,14 @@ case "work":
         // C++ abort rather than an error: probing it in-process would take the
         // agent down and stop the ANE work that does not need MLX at all.
         var gpu: MLXRuntime?
-        if MLXProbe.isAvailable() {
-            gpu = MLXRuntime(modelId: args[3])
+        let gpuModel = args[3] == "-" ? "" : args[3]
+        if gpuModel.isEmpty {
+            // A node with no GPU weights is a node, not a broken install: a
+            // 16GB Mac carries an embedding model and nothing larger. It does
+            // ANE work and is not offered generate work.
+            print("no GPU model configured; running ANE work only")
+        } else if MLXProbe.isAvailable() {
+            gpu = MLXRuntime(modelId: gpuModel)
         } else {
             print("no GPU runtime on this machine; running ANE work only "
                 + "(xcodebuild -downloadComponent MetalToolchain enables GPU work)")
@@ -244,8 +274,12 @@ case "work":
         // of the same file, and the batch loop writes far more often, so a
         // machine answering requests reported "waiting for work" throughout.
         let status = StatusPublisher()
+        // Weights arrive here rather than being copied in by hand. The base is
+        // the same directory the runtime reads from, so a fetched model is
+        // loadable without anything moving it afterwards.
+        let modelSync = ModelSync(controlPlane: cp, base: MLXRuntime.hubBase, status: status)
         let worker = Worker(controlPlane: cp, gpu: gpu, ane: ane,
-                            status: status, promoteAfter: promote)
+                            status: status, modelSync: modelSync, promoteAfter: promote)
 
         // Batch and serving run side by side in one process, because a node
         // does both and they cannot share a loop: an interactive request must
@@ -380,6 +414,105 @@ case "serve":
         print("serve command finished after \(seconds)s")
         await cp.shutdown()
     } catch { print("serve failed: \(error)"); exit(1) }
+
+case "split":
+    // usage: dai-agent split <model-dir> <rank> <size> <listen-port|peer-host:port> [prompt]
+    //
+    // Run by hand for now: one process per machine, the higher rank connecting
+    // to the lower. Wiring this into the fleet needs gang admission, which does
+    // not exist yet, and starting a pipeline without it would hand out work that
+    // hangs when one machine is missing.
+    guard args.count > 5 else {
+        print("""
+        usage: dai-agent split <model-dir> <rank> <size> <port-or-peer> [prompt]
+          rank 0 holds the last layers and the output head, and listens.
+          higher ranks hold earlier layers and connect to rank-1.
+        """)
+        exit(2)
+    }
+    do {
+        let directory = URL(fileURLWithPath: args[2])
+        let rank = Int(args[3]) ?? 0
+        let size = Int(args[4]) ?? 2
+        let where_ = args[5]
+        let prompt = args.count > 6 ? args[6] : "Explain what a Merkle tree is, briefly."
+
+        let dir = Enroll.identityDir()
+        let identity = try? NodeIdentity.load(
+            certificate: dir.appendingPathComponent("node.crt"),
+            enclaveKey: Enroll.keyPath(dir))
+        // The *node* CA, not the server CA used everywhere else in this file.
+        // The peer on the other end of a split is a node, and its certificate
+        // is signed by the CA that signs nodes. Pinning the server CA here
+        // fails the handshake with "unknown CA", which reads like a
+        // misconfigured network rather than the wrong trust root.
+        let ca = try? String(contentsOf: dir.appendingPathComponent("node-ca.crt"),
+                             encoding: .utf8)
+
+        let channel = PipelineChannel()
+        // Nothing to connect when the model is not split. Useful as a baseline:
+        // the same code path, the same loop, one machine.
+        if size == 1 {
+            print("running whole on one machine, no peer")
+        } else if rank == 0 {
+            guard let identity, let ca else {
+                print("rank 0 listens over mTLS and needs an enrolled identity"); exit(1)
+            }
+            let port = try await channel.listen(port: Int(where_) ?? 7710,
+                                                identity: identity, peerCAPEM: ca)
+            print("listening on \(port), waiting for rank 1")
+        } else {
+            guard let identity, let ca else {
+                print("this machine needs an enrolled identity to join a split"); exit(1)
+            }
+            let parts = where_.split(separator: ":")
+            try await channel.connect(host: String(parts[0]),
+                                      port: Int(parts.count > 1 ? parts[1] : "7710") ?? 7710,
+                                      identity: identity, peerCAPEM: ca,
+                                      serverName: String(parts[0]))
+            print("connected to \(where_)")
+        }
+
+        let runner = SplitRunner(plan: .init(modelId: directory.lastPathComponent,
+                                             rank: rank, size: size),
+                                 channel: channel)
+        let loaded = try await runner.load(directory: directory)
+        print("rank \(rank)/\(size): layers \(loaded.split.startIndex)"
+            + "..<\(loaded.split.endIndex) loaded")
+
+        let outcome = try await runner.generate(loaded, prompt: prompt, maxTokens: 60)
+        if loaded.split.isLast {
+            print("---")
+            print(outcome.text)
+            print("---")
+            print(String(format: "%d tokens, %.2fs to first, %.1f tok/s, %.2fGB",
+                         outcome.tokens, outcome.promptSeconds,
+                         Double(outcome.tokens - 1) / max(outcome.decodeSeconds, 0.001),
+                         outcome.residentGb))
+        } else {
+            print(String(format: "rank %d finished %d tokens, %.2fGB resident",
+                         rank, outcome.tokens, outcome.residentGb))
+        }
+        await channel.close()
+    } catch {
+        print("split failed: \(error)")
+        exit(1)
+    }
+
+case "update":
+    // usage: dai-agent update <control-plane-url> [binary-path] [wait-seconds]
+    //
+    // Run as root from its own launchd job. The agent cannot do this itself:
+    // it runs as a service account that cannot write to the directory its own
+    // binary lives in, and giving it that ability would let a process that
+    // executes fleet-supplied payloads rewrite itself.
+    guard args.count > 2 else {
+        print("usage: dai-agent update <url> [binary-path] [wait-seconds]"); exit(2)
+    }
+    await Updater.run(
+        controlPlane: URL(string: args[2])!,
+        binaryPath: args.count > 3 ? args[3] : "/usr/local/libexec/dai/dai-agent",
+        waitSeconds: args.count > 4 ? (Double(args[4]) ?? 300) : 300)
 
 case "qos":
     // Demonstrates the control that E1 measured at 2.4x on sustained work and

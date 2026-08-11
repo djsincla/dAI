@@ -17,6 +17,10 @@ STATE_DIR=/var/db/dai
 LOG_DIR=/var/log/dai
 PLIST=/Library/LaunchDaemons/com.dai.agent.plist
 LABEL=com.dai.agent
+UPDATER_PLIST=/Library/LaunchDaemons/com.dai.updater.plist
+UPDATER_LABEL=com.dai.updater
+PENDING=/var/db/dai/pending-upgrade.json
+ROLLBACK=/var/db/dai/dai-agent.rollback
 
 PURGE=0
 SVC_USER="_dai"
@@ -25,6 +29,28 @@ SVC_USER="_dai"
 [[ $EUID -eq 0 ]] || { echo "must run as root: sudo $0" >&2; exit 1; }
 
 echo "==> stopping"
+# The updater goes first, and this script waits for it to be gone rather than
+# just asking. It runs as root every two minutes, and it exists to put the
+# agent binary back: booting it out after deleting the binary leaves a window
+# where it wakes up, finds the machine still enrolled and the binary missing,
+# and reinstalls the thing being uninstalled.
+#
+# `launchctl bootout` returns when the job has been asked to stop, not when it
+# has stopped, and a pass that is mid-download holds the network for as long as
+# the fetch takes. So the wait is the fix; the ordering alone is not enough.
+launchctl bootout "system/$UPDATER_LABEL" 2>/dev/null || true
+waited=0
+while launchctl print "system/$UPDATER_LABEL" >/dev/null 2>&1; do
+  if [ "$waited" -ge 60 ]; then
+    echo "$UPDATER_LABEL did not unload after 60s; not removing the binary" >&2
+    echo "it may be mid-upgrade. Re-run this once it has finished." >&2
+    exit 1
+  fi
+  sleep 1
+  waited=$((waited + 1))
+done
+rm -f "$UPDATER_PLIST"
+
 # ExitTimeOut in the plist gives the worker its grace period to finish the item
 # in flight and report it, so this is not as abrupt as it looks.
 launchctl bootout "system/$LABEL" 2>/dev/null || true
@@ -32,8 +58,24 @@ launchctl bootout "system/$LABEL" 2>/dev/null || true
 rm -f "$PLIST"
 rm -rf "$BINARY_DIR"
 
+# An upgrade that was in flight is now an upgrade of a binary that no longer
+# exists. These are removed even without --purge, which otherwise keeps
+# everything under the state directory: a marker that outlives its binary is
+# not a record of anything, and the next install would act on it. The updater
+# reads it before it considers anything else, sees a deadline long past and no
+# agent reporting in, and restores the rollback copy over the version that was
+# just installed - so a machine reinstalled after an interrupted upgrade
+# silently comes back on the older build.
+rm -f "$PENDING" "$ROLLBACK"
+
 CONSOLE_UID=$(stat -f%u /dev/console)
-[[ "$CONSOLE_UID" != "0" ]] && launchctl bootout "gui/$CONSOLE_UID/com.dai.menubar" 2>/dev/null
+# `|| true` because the menu bar job is often not loaded: the installer only
+# adds it when the app was built, and a headless machine has no console user to
+# load it for. Without this, `set -e` takes a failed bootout as a reason to
+# stop the entire uninstall - after the agent has been removed and before the
+# identity, the logs and the service account are, so --purge would report
+# nothing and leave behind exactly what it promised to delete.
+[[ "$CONSOLE_UID" != "0" ]] && launchctl bootout "gui/$CONSOLE_UID/com.dai.menubar" 2>/dev/null || true
 rm -f /Library/LaunchAgents/com.dai.menubar.plist
 rm -rf /Applications/dAI.app
 pkill -f 'dAI.app/Contents/MacOS/dai-menubar' 2>/dev/null || true

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 @testable import DaiAgent
 
@@ -22,8 +23,14 @@ actor FakeControlPlane: ControlPlaneClient {
     var dispatches: [ControlPlane.Dispatch] = []
     var cancelled: Set<String> = []
     private(set) var lastLeaseReason: String?
+    private(set) var lastStoredModels: [String: Double]?
 
     func setQueued(_ leases: [ControlPlane.Lease]) { queued = leases }
+
+    /// Refuse every lease with a fixed reason, which is how the server reports
+    /// an operator pause. The node learns it is paused only by being told no.
+    var refuseWith: String?
+    func setRefuseWith(_ reason: String?) { refuseWith = reason }
     func setDispatches(_ items: [ControlPlane.Dispatch]) { dispatches = items }
     func cancel(_ id: String) { cancelled.insert(id) }
 
@@ -31,12 +38,18 @@ actor FakeControlPlane: ControlPlaneClient {
 
     func heartbeat(state: PresenceState, onACPower: Bool?, thermalOK: Bool?,
                    userPaused: Bool, capability: [String: Double],
-                   residentModels: [String: Double], modelInfo: [String: Int]) async throws {
+                   residentModels: [String: Double], storedModels: [String: Double]?,
+                   modelInfo: [String: Int]) async throws {
         heartbeats.append((state, userPaused, residentModels, modelInfo))
+        if let storedModels { lastStoredModels = storedModels }
     }
 
     func leaseWork(kinds: [WorkKind]) async throws -> ControlPlane.Lease? {
         leaseRequests.append(kinds)
+        if let refuseWith {
+            lastLeaseReason = refuseWith
+            return nil
+        }
         guard !queued.isEmpty else {
             lastLeaseReason = "empty"
             return nil
@@ -75,6 +88,28 @@ actor FakeControlPlane: ControlPlaneClient {
     }
 
     func isDispatchCancelled(id: String) async -> Bool { cancelled.contains(id) }
+
+    // Model distribution. `contents` is what the repository would serve, so a
+    // test can hand back the wrong bytes and check that the node refuses them.
+    var assigned: [ControlPlane.AssignedModel] = []
+    var contents: [String: Data] = [:]
+    private(set) var downloads: [String] = []
+
+    func setAssigned(_ models: [ControlPlane.AssignedModel]) { assigned = models }
+    func setContents(_ c: [String: Data]) { contents = c }
+
+    func assignedModels() async throws -> [ControlPlane.AssignedModel] { assigned }
+
+    func downloadModelFile(modelId: String, path: String,
+                           to destination: URL) async throws -> String {
+        downloads.append("\(modelId)/\(path)")
+        let data = contents["\(modelId)/\(path)"] ?? Data()
+        let temp = destination.appendingPathExtension("partial")
+        try? FileManager.default.createDirectory(
+            at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: temp)
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
 }
 
 /// Presence the test decides, rather than whatever the machine running it
@@ -92,4 +127,30 @@ struct FixedSignals: SignalSource {
         FixedSignals(signals: Signals(hidIdleSeconds: 9999, screenLocked: true,
                                       consoleUser: "someone"))
     }
+}
+
+/// A control plane that cannot be reached, for the paths where the difference
+/// between "nothing assigned" and "could not ask" is the whole point.
+actor FailingControlPlane: ControlPlaneClient {
+    struct Unreachable: Error {}
+
+    func fetchPolicy() async throws -> [PresenceState: StatePolicy] { throw Unreachable() }
+    func heartbeat(state: PresenceState, onACPower: Bool?, thermalOK: Bool?,
+                   userPaused: Bool, capability: [String: Double],
+                   residentModels: [String: Double], storedModels: [String: Double]?,
+                   modelInfo: [String: Int]) async throws { throw Unreachable() }
+    func leaseWork(kinds: [WorkKind]) async throws -> ControlPlane.Lease? { throw Unreachable() }
+    var lastLeaseReason: String? { nil }
+    func report(unitId: String, completed: [WorkItem], unfinished: [WorkItem],
+                seconds: Double, failed: Bool) async throws -> Int { throw Unreachable() }
+    func awaitDispatch() async throws -> ControlPlane.Dispatch? { throw Unreachable() }
+    func reportDispatch(id: String, text: String?, error: String?,
+                        promptTokens: Int, completionTokens: Int,
+                        cachedTokens: Int, toolCalls: [ToolCall]) async throws {
+        throw Unreachable()
+    }
+    func isDispatchCancelled(id: String) async -> Bool { false }
+    func assignedModels() async throws -> [ControlPlane.AssignedModel] { throw Unreachable() }
+    func downloadModelFile(modelId: String, path: String,
+                           to destination: URL) async throws -> String { throw Unreachable() }
 }

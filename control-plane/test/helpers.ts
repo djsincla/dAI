@@ -58,6 +58,13 @@ export interface Fixtures {
   ownerId: string
   operatorId: string
   strangerId: string
+  /// Real session tokens. The console used to accept a user id as a bearer
+  /// token, and these tests encoded that: they passed an identifier where a
+  /// secret belonged. Issuing proper ones here keeps the tests exercising the
+  /// credential path that actually ships.
+  ownerToken: string
+  operatorToken: string
+  strangerToken: string
   nodeId: string
   fingerprint: string
 }
@@ -96,7 +103,20 @@ export async function seed(db: Db): Promise<Fixtures> {
     [fingerprint, ownerId],
   )
 
-  return { poolId, ownerId, operatorId, strangerId, nodeId: node.rows[0].id, fingerprint }
+  const { issue } = await import('../src/lib/tokens.js')
+  const [ownerToken, operatorToken, strangerToken] = await Promise.all([
+    issue(db, ownerId, 'session'),
+    issue(db, operatorId, 'session'),
+    issue(db, strangerId, 'session'),
+  ])
+
+  return {
+    poolId, ownerId, operatorId, strangerId,
+    ownerToken: ownerToken.token,
+    operatorToken: operatorToken.token,
+    strangerToken: strangerToken.token,
+    nodeId: node.rows[0].id, fingerprint,
+  }
 }
 
 export async function setPresence(db: Db, nodeId: string, state: string): Promise<void> {

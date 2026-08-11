@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The updater.
+
+  Separate from the agent, and root, because the agent runs as a service
+  account that cannot write to the directory its own binary lives in. Giving it
+  that ability would let a process which executes fleet-supplied payloads
+  rewrite itself, which is a much larger hole than the convenience is worth.
+
+  Runs on a timer rather than continuously: it does nothing on most passes, and
+  a resident root process that does nothing is a resident root process.
+
+  It also finishes what it starts. An upgrade leaves a marker on disk, and the
+  next run reads it and decides whether the new binary reported in or has to be
+  rolled back. That is why the interval is shorter than the verification
+  window: the machine has to be able to rescue itself without anybody asking.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.dai.updater</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@BINARY@</string>
+    <string>update</string>
+    <string>@URL@</string>
+    <string>@BINARY@</string>
+    <string>@WAIT@</string>
+  </array>
+
+  <key>StartInterval</key>
+  <integer>120</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- Low priority: replacing a binary is never urgent, and this shares a
+       machine with somebody's work. -->
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>Nice</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>@LOG_DIR@/updater.log</string>
+  <key>StandardErrorPath</key>
+  <string>@LOG_DIR@/updater.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>DAI_IDENTITY_DIR</key>
+    <string>@IDENTITY_DIR@</string>
+  </dict>
+</dict>
+</plist>

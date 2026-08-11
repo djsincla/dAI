@@ -1,5 +1,11 @@
 import { Router } from 'express'
-import type { Db } from '../lib/db.js'
+import { type Db, tx } from '../lib/db.js'
+import { nodeMatchesPool, poolMode, poolsFor } from '../lib/pools.js'
+import { bucketFor, clampWindow } from '../lib/window.js'
+import { asHtml, asText, readLogs } from '../lib/logs.js'
+import { registerAgentBuild } from '../lib/agentBuilds.js'
+import { candidates, localCandidates } from '../lib/candidates.js'
+import { importModel, startImport } from '../lib/import.js'
 import { mayPauseNode, requireRole, userAuth } from '../lib/auth.js'
 import { POLICY, type PresenceState } from '../lib/policy.js'
 import type { Ca } from '../lib/ca.js'
@@ -43,7 +49,7 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
       residentModels: Object.keys(n.resident_models ?? {}),
       serving: broker.isConnected(n.id),
       inFlight: broker.inFlightCounts.get(n.id) ?? 0,
-      lastHeartbeat: n.last_heartbeat,
+      lastHeartbeat: n.last_heartbeat ? new Date(n.last_heartbeat).toISOString() : null,
       capabilityProfiles: n.capability_profiles,
     })))
   })
@@ -188,7 +194,14 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
    * Capacity is memFrac of each node's Metal working set, not of installed RAM:
    * Metal caps itself around 81% of unified memory.
    */
-  r.get('/fleet/summary', async (_req, res) => {
+  r.get('/fleet/summary', async (req, res) => {
+    // The capacity graph is draggable between ten minutes and three days, so
+    // the window and the bucket both come from the caller. Bucket derived from
+    // the window rather than accepted separately: the two have to agree, and a
+    // client that could set them independently could ask for ten second buckets
+    // over three days and get twenty-six thousand rows.
+    const windowS = clampWindow(Number(req.query.window ?? 86400))
+    const bucketS = bucketFor(windowS)
     const { rows: nodes } = await db.query(
       `SELECT id, hostname, state, presence_state, metal_working_set_gb, user_paused,
               on_ac_power, thermal_ok
@@ -218,15 +231,16 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
     // sampled state permitted GPU work then, which is what "can I schedule
     // tonight" actually depends on.
     const { rows: series } = await db.query(
-      `SELECT date_trunc('hour', ps.at) AS hour,
+      `SELECT to_timestamp(floor(extract(epoch FROM ps.at) / $1) * $1) AS hour,
               ps.presence_state,
               count(DISTINCT ps.node_id)::int AS nodes,
               COALESCE(sum(DISTINCT n.metal_working_set_gb), 0) AS gb
          FROM presence_samples ps
          JOIN nodes n ON n.id = ps.node_id
-        WHERE ps.at > now() - interval '24 hours'
+        WHERE ps.at > now() - make_interval(secs => $2)
         GROUP BY 1, 2
         ORDER BY 1`,
+      [bucketS, windowS],
     )
 
     const buckets = new Map<string, { hour: string; gpuGb: number; aneGb: number }>()
@@ -245,8 +259,16 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
     const { rows: queues } = await db.query(
       `SELECT kind, state, count(*)::int AS n FROM work_units GROUP BY 1,2`)
 
+    // Machines waiting to be let in. Carried on the summary because it is the
+    // one thing on the overview that blocks entirely on a human: a node that
+    // enrolled and was never approved does nothing at all, and nothing else on
+    // the page hints that it is there.
+    const { rows: pending } = await db.query(
+      `SELECT count(*)::int AS n FROM nodes WHERE state = 'pending'`)
+
     res.json({
       nodes: nodes.length,
+      pendingNodes: pending[0]?.n ?? 0,
       eligibleForGpu: eligible,
       gpuCapacityGb: Math.round(gpuGb * 10) / 10,
       aneCapacityGb: Math.round(aneGb * 10) / 10,
@@ -256,6 +278,8 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
         aneGb: Math.round(b.aneGb * 10) / 10,
       })),
       queues,
+      windowSeconds: windowS,
+      bucketSeconds: bucketS,
     })
   })
 
@@ -312,7 +336,8 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
       serving: broker.isConnected(n.id),
       inFlight: broker.inFlightCounts.get(n.id) ?? 0,
       onAcPower: n.on_ac_power, thermalOk: n.thermal_ok,
-      lastHeartbeat: n.last_heartbeat, capabilityProfiles: n.capability_profiles,
+      lastHeartbeat: n.last_heartbeat ? new Date(n.last_heartbeat).toISOString() : null,
+      capabilityProfiles: n.capability_profiles,
       allowedCidrs: n.allowed_cidrs,
       // Headroom is what is takeable right now under policy, which is not the
       // same as the machine's total memory.
@@ -357,9 +382,538 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
 
   r.get('/pools', async (_req, res) => {
     const { rows } = await db.query(
-      `SELECT id, name, tier, schedule, preempt, priority FROM pools ORDER BY name`,
+      `SELECT id, name, tier, schedule, preempt, priority,
+              agent_channel, desired_agent_version
+         FROM pools ORDER BY name`,
     )
+    res.json(rows.map((p) => ({
+      id: p.id, name: p.name, tier: p.tier, schedule: p.schedule,
+      preempt: p.preempt, priority: p.priority,
+      agentChannel: p.agent_channel,
+      desiredAgentVersion: p.desired_agent_version ?? null,
+    })))
+  })
+
+  /**
+   * Create a group.
+   *
+   * Groups were invisible everywhere except the models page, which said a model
+   * was pushed to "overnight-harvest" while nothing else on the fleet view
+   * mentioned that such a thing existed.
+   */
+  r.post('/pools', async (req, res) => {
+    const b = req.body as { name: string; tier?: 'harvest' | 'cluster' }
+    try {
+      const { rows } = await db.query(
+        `INSERT INTO pools (name, tier, schedule, preempt)
+         VALUES ($1, $2, $3, $4) RETURNING id, name, tier`,
+        [b.name, b.tier ?? 'harvest',
+         b.tier === 'cluster' ? 'gang' : 'independent-units',
+         b.tier === 'cluster' ? 'never' : 'on-user-activity'],
+      )
+      const pool = rows[0]!
+      // The creator can act on what they made. Without this a new group is one
+      // nobody has standing on, including the person looking at it.
+      const { rows: groups } = await db.query(
+        `SELECT g.id FROM groups g JOIN group_members m ON m.group_id = g.id
+          WHERE m.user_id = $1 LIMIT 1`, [req.user!.id])
+      if (groups[0]) {
+        await db.query(
+          `INSERT INTO role_bindings (group_id, pool_id, role) VALUES ($1,$2,'admin')
+           ON CONFLICT DO NOTHING`, [groups[0].id, pool.id])
+      }
+      await audit(db, req.user!.id, 'pool.create', pool.name, { tier: pool.tier })
+      res.status(201).json({ id: pool.id, name: pool.name, tier: pool.tier })
+    } catch (e) {
+      if ((e as { code?: string }).code === '23505') {
+        res.status(409).json({ error: 'conflict', detail: `a group called ${b.name} exists` })
+        return
+      }
+      throw e
+    }
+  })
+
+  /**
+   * Put a machine in a group, or take it out.
+   *
+   * A group is either a list somebody picked or a rule machines match, never
+   * both: a pool that was both would answer "who is in this group" with
+   * something nobody could predict from looking at it. So adding the first
+   * machine by hand converts a rule into a list, and that changes which
+   * machines belong. It needs saying rather than doing quietly, which is what
+   * `confirm` is for.
+   */
+  r.put('/pools/:poolId/nodes/:nodeId', async (req, res) => {
+    const { poolId, nodeId } = req.params as { poolId: string; nodeId: string }
+    if (!(await requireRole(db, req.user!.id, poolId, 'operator'))) {
+      res.status(403).json({ error: 'forbidden', detail: 'operator role required on this pool' })
+      return
+    }
+    const { rows } = await db.query(
+      `SELECT id, tier, membership FROM pools WHERE id = $1`, [poolId])
+    const pool = rows[0]
+    if (!pool) { res.status(404).json({ error: 'not_found', detail: 'no such group' }); return }
+
+    const { rows: nodeRows } = await db.query(
+      `SELECT id, hostname, tier, chip, memory_gb FROM nodes WHERE id = $1`, [nodeId])
+    const node = nodeRows[0]
+    if (!node) { res.status(404).json({ error: 'not_found', detail: 'no such machine' }); return }
+    if (pool.tier === 'cluster' && node.tier !== 'cluster') {
+      // The one rule a hand-picked list cannot override. Gang work on a
+      // preemptible machine dies the moment somebody touches that keyboard.
+      res.status(409).json({
+        error: 'conflict',
+        detail: `${node.hostname} is a ${node.tier} machine and this is a cluster group`,
+      })
+      return
+    }
+
+    const membership = (pool.membership ?? {}) as Record<string, unknown>
+    const ids = new Set((membership.nodeIds as string[] | undefined) ?? [])
+    if (poolMode(pool as never) === 'rule' && !(req.body as { confirm?: boolean })?.confirm) {
+      // Everything currently matching by rule would stop matching. Whoever is
+      // about to do that should be told how many machines it is.
+      const { rows: all } = await db.query(
+        `SELECT id, hostname, tier, chip, memory_gb FROM nodes WHERE state = 'active'`)
+      const matching = all.filter((n) => nodeMatchesPool(n as never, pool as never))
+      res.status(409).json({
+        error: 'confirm_required',
+        detail: `${pool.id} currently matches ${matching.length} machines by rule. `
+          + 'Adding one by hand turns it into a list containing only what you put in it.',
+        wouldDrop: matching.map((n) => n.hostname),
+      })
+      return
+    }
+
+    ids.add(nodeId)
+    await db.query(
+      `UPDATE pools SET membership = membership || jsonb_build_object('nodeIds', $2::jsonb)
+        WHERE id = $1`, [poolId, JSON.stringify([...ids])])
+    await audit(db, req.user!.id, 'pool.add', node.hostname, { poolId })
+    res.status(204).end()
+  })
+
+  r.delete('/pools/:poolId/nodes/:nodeId', async (req, res) => {
+    const { poolId, nodeId } = req.params as { poolId: string; nodeId: string }
+    if (!(await requireRole(db, req.user!.id, poolId, 'operator'))) {
+      res.status(403).json({ error: 'forbidden', detail: 'operator role required on this pool' })
+      return
+    }
+    const { rows } = await db.query(`SELECT membership FROM pools WHERE id = $1`, [poolId])
+    if (!rows[0]) { res.status(404).json({ error: 'not_found', detail: 'no such group' }); return }
+    const ids = (((rows[0].membership ?? {}) as Record<string, unknown>).nodeIds as string[]
+      | undefined) ?? []
+    await db.query(
+      `UPDATE pools SET membership = membership || jsonb_build_object('nodeIds', $2::jsonb)
+        WHERE id = $1`, [poolId, JSON.stringify(ids.filter((i) => i !== nodeId))])
+    await audit(db, req.user!.id, 'pool.remove', nodeId, { poolId })
+    res.status(204).end()
+  })
+
+  /* --------------------------------------------------------- agent builds */
+
+  /**
+   * Which agent builds exist, and what each machine is actually running.
+   *
+   * Until this existed there was no way to know what a fleet was running. Two
+   * deploys in one day left both machines on a build from hours earlier, and
+   * finding that out meant comparing file sizes over ssh and guessing.
+   */
+  r.get('/agent/builds', async (_req, res) => {
+    const { rows } = await db.query(
+      `SELECT b.version, b.sha256, b.size_bytes, b.notes, b.uploaded_at, u.email
+         FROM agent_builds b LEFT JOIN users u ON u.id = b.uploaded_by
+        ORDER BY b.uploaded_at DESC`)
+    const { rows: running } = await db.query(
+      `SELECT agent_version, agent_fingerprint, count(*)::int AS n
+         FROM nodes WHERE state = 'active' GROUP BY 1, 2`)
+    res.json({
+      builds: rows.map((b) => ({
+        version: b.version, sha256: b.sha256, sizeBytes: Number(b.size_bytes),
+        notes: b.notes, uploadedAt: new Date(b.uploaded_at).toISOString(),
+        uploadedBy: b.email ?? null,
+        // Counted by fingerprint, not by version: a build number is what
+        // somebody typed and the hash is what is running.
+        nodesRunning: running
+          .filter((n) => n.agent_fingerprint === b.sha256)
+          .reduce((t, n) => t + n.n, 0),
+      })),
+      running: running.map((n) => ({
+        version: (n.agent_version as string | null) ?? 'unknown',
+        fingerprint: (n.agent_fingerprint as string | null) ?? null,
+        nodes: n.n,
+      })),
+    })
+  })
+
+  /** Register a build from a file on this machine, hashing it on the way in. */
+  r.post('/agent/builds', async (req, res) => {
+    const b = req.body as { version: string; path: string; notes?: string }
+    try {
+      const built = await registerAgentBuild(db, b.version, b.path, b.notes ?? null,
+        req.user!.id)
+      await audit(db, req.user!.id, 'agent.build.register', b.version,
+        { sha256: built.sha256, sizeBytes: built.sizeBytes })
+      res.status(201).json(built)
+    } catch (e) {
+      const code = (e as { code?: string }).code
+      if (code === '23505') {
+        res.status(409).json({ error: 'conflict', detail: `${b.version} already registered` })
+        return
+      }
+      res.status(400).json({ error: 'bad_request', detail: (e as Error).message })
+    }
+  })
+
+  /**
+   * Who owns the binary on a pool's machines, and which version they should run.
+   *
+   * `external` never pushes. It records what is expected and reports what is
+   * seen, which is what makes this safe to run alongside an MDM: two systems
+   * racing to own the same executable is worse than either owning it alone.
+   */
+  r.put('/pools/:poolId/agent', async (req, res) => {
+    const { poolId } = req.params as { poolId: string }
+    const b = req.body as { channel: 'managed' | 'external'; version?: string | null }
+    if (!(await requireRole(db, req.user!.id, poolId, 'admin'))) {
+      res.status(403).json({ error: 'forbidden', detail: 'admin role required on this pool' })
+      return
+    }
+    if (b.version) {
+      const { rows } = await db.query(`SELECT 1 FROM agent_builds WHERE version = $1`,
+        [b.version])
+      if (rows.length === 0) {
+        res.status(404).json({ error: 'not_found', detail: `no such build: ${b.version}` })
+        return
+      }
+    }
+    await db.query(
+      `UPDATE pools SET agent_channel = $2, desired_agent_version = $3 WHERE id = $1`,
+      [poolId, b.channel, b.version ?? null])
+    await audit(db, req.user!.id, 'agent.release', b.version ?? '(none)',
+      { poolId, channel: b.channel })
+    res.status(204).end()
+  })
+
+  /** Every machine, what it runs, what it should run, and who decides. */
+  r.get('/agent/rollout', async (_req, res) => {
+    const { rows: pools } = await db.query(
+      `SELECT id, name, tier, membership, agent_channel, desired_agent_version FROM pools`)
+    const { rows: nodes } = await db.query(
+      `SELECT id, hostname, tier, chip, memory_gb, state, agent_version, agent_fingerprint
+         FROM nodes WHERE state = 'active' ORDER BY hostname`)
+    const { rows: builds } = await db.query(`SELECT version, sha256 FROM agent_builds`)
+    const shaFor = new Map(builds.map((b) => [b.version as string, b.sha256 as string]))
+
+    res.json(nodes.map((n) => {
+      const mine = poolsFor(n as never, pools as never)
+      // The strictest pool wins when a machine is in more than one: managed
+      // beats external, because a machine somebody chose to manage should not
+      // stop being managed by joining a second pool.
+      const managed = mine.find((p) => (p as never as Record<string, string>).agent_channel === 'managed')
+      const decider = managed ?? mine[0]
+      const desired = decider
+        ? ((decider as never as Record<string, string | null>).desired_agent_version ?? null)
+        : null
+      const expectedSha = desired ? shaFor.get(desired) ?? null : null
+      return {
+        nodeId: n.id, hostname: n.hostname,
+        running: (n.agent_version as string | null) ?? 'unknown',
+        fingerprint: (n.agent_fingerprint as string | null) ?? null,
+        desired,
+        channel: managed ? 'managed' : 'external',
+        // Compared by hash where one is known. A node reporting the right
+        // version number with the wrong bytes is the case worth catching, and
+        // it is invisible to a string comparison.
+        upToDate: desired === null ? null
+          : expectedSha !== null && n.agent_fingerprint !== null
+            ? n.agent_fingerprint === expectedSha
+            : n.agent_version === desired,
+      }
+    }))
+  })
+
+  /** What each machine tried and how it ended, including rollbacks. */
+  r.get('/agent/upgrades', async (_req, res) => {
+    const { rows } = await db.query(
+      `SELECT u.at, u.from_version, u.to_version, u.state, u.detail, n.hostname
+         FROM agent_upgrades u JOIN nodes n ON n.id = u.node_id
+        ORDER BY u.at DESC LIMIT 100`)
+    res.json(rows.map((r2) => ({
+      at: new Date(r2.at).toISOString(), hostname: r2.hostname,
+      fromVersion: r2.from_version, toVersion: r2.to_version,
+      state: r2.state, detail: r2.detail,
+    })))
+  })
+
+  /**
+   * Every log, in one place, in three formats.
+   *
+   * Two tables answering different questions - what a machine has been doing,
+   * and who told the fleet to do something - read together, because nobody
+   * investigating an incident cares which table a line came from. A model push
+   * and the fetches it caused are one story, and reading it used to mean opening
+   * two things and interleaving them by eye.
+   *
+   * The text and HTML forms are exports rather than views: an artefact to grep,
+   * attach to a ticket, or send to somebody who has no login here.
+   */
+  r.get('/logs', async (req, res) => {
+    const query = {
+      q: req.query.q as string | undefined,
+      since: req.query.since as string | undefined,
+      until: req.query.until as string | undefined,
+      source: req.query.source as 'node' | 'fleet' | undefined,
+      limit: req.query.limit ? Number(req.query.limit) : undefined,
+    }
+    const rows = await readLogs(db, query)
+    const format = (req.query.format as string) ?? 'json'
+    const stamp = new Date().toISOString()
+
+    if (format === 'text') {
+      // Attachment rather than inline: this is something to keep, and a browser
+      // rendering it as a wall of text in a tab is not that.
+      res.type('text/plain; charset=utf-8')
+        .set('content-disposition', `attachment; filename="dai-log-${stamp}.txt"`)
+        .send(asText(rows))
+      return
+    }
+    if (format === 'html') {
+      res.type('text/html; charset=utf-8')
+        .set('content-disposition', `attachment; filename="dai-log-${stamp}.html"`)
+        .send(asHtml(rows, { query, generatedAt: stamp }))
+      return
+    }
     res.json(rows)
+  })
+
+  /**
+   * The model catalogue.
+   *
+   * Before this there was no catalogue: `jobs.model_hash` was free text matched
+   * against whatever a node reported holding, so the fleet could say what a
+   * machine had and never what it should have. Weights were staged by hand over
+   * scp, unverified, and drift was invisible by construction.
+   *
+   * `nodesHolding` against `nodesWanting` is the number that matters. One says
+   * what is true, the other what was asked for, and the gap between them is the
+   * only thing an operator needs to look at.
+   */
+  r.get('/models', async (_req, res) => {
+    const { rows } = await db.query(
+      `SELECT m.id, m.runtime, m.kind, m.size_bytes, m.context_length,
+              m.quantization, m.family, m.imported_at,
+              count(DISTINCT f.path)::int AS file_count,
+              coalesce(array_agg(DISTINCT pm.pool_id)
+                       FILTER (WHERE pm.pool_id IS NOT NULL), '{}') AS assigned_pools,
+              (SELECT count(*)::int FROM nodes n
+                WHERE n.state = 'active' AND n.stored_models ? m.id) AS nodes_holding
+         FROM models m
+         LEFT JOIN model_files f ON f.model_id = m.id
+         LEFT JOIN pool_models pm ON pm.model_id = m.id
+        GROUP BY m.id
+        ORDER BY m.id`,
+    )
+    res.json(await Promise.all(rows.map((m) => modelRow(db, m))))
+  })
+
+  r.post('/models', async (req, res) => {
+    const b = req.body as {
+      id: string; runtime: string; kind: string; contextLength?: number | null
+      quantization?: string | null; family?: string | null
+      files: { path: string; sizeBytes: number; sha256: string }[]
+    }
+    // Import is explicit. Nothing reaches the catalogue by being discovered on
+    // a node, because weights nobody chose are exactly what a fleet must not
+    // then distribute to every other machine.
+    const total = b.files.reduce((n, f) => n + Number(f.sizeBytes), 0)
+    try {
+      await tx(db, async (c) => {
+        await c.query(
+          `INSERT INTO models (id, runtime, kind, size_bytes, context_length,
+                               quantization, family, imported_by)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+          [b.id, b.runtime, b.kind, total, b.contextLength ?? null,
+           b.quantization ?? null, b.family ?? null, req.user!.id],
+        )
+        for (const f of b.files) {
+          await c.query(
+            `INSERT INTO model_files (model_id, path, size_bytes, sha256)
+             VALUES ($1,$2,$3,$4)`,
+            [b.id, f.path, f.sizeBytes, f.sha256],
+          )
+        }
+      })
+    } catch (e) {
+      // A second import of the same id is a mistake worth naming rather than an
+      // update: silently replacing hashes would change what every node is
+      // reconciling toward without anyone asking for it.
+      if ((e as { code?: string }).code === '23505') {
+        res.status(409).json({ error: 'conflict', detail: `model ${b.id} is already registered` })
+        return
+      }
+      throw e
+    }
+    const { rows } = await db.query(
+      `SELECT m.id, m.runtime, m.kind, m.size_bytes, m.context_length, m.quantization,
+              m.family, m.imported_at, count(f.path)::int AS file_count,
+              '{}'::uuid[] AS assigned_pools, 0 AS nodes_holding
+         FROM models m LEFT JOIN model_files f ON f.model_id = m.id
+        WHERE m.id = $1 GROUP BY m.id`, [b.id])
+    res.status(201).json(await modelRow(db, rows[0]))
+  })
+
+  /**
+   * What could be added, and what adding it would cost.
+   *
+   * Local first, because a model already on this machine costs a copy and one
+   * from the internet costs the building's uplink. A fleet whose premise is
+   * that data does not leave the building should not have weights arriving from
+   * outside it as a side effect of somebody clicking a name in a list.
+   */
+  r.get('/models/available', async (_req, res) => {
+    const { rows } = await db.query(`SELECT id FROM models`)
+    res.json(await candidates(new Set(rows.map((r2) => r2.id as string))))
+  })
+
+  /**
+   * Import a model that is already on this machine.
+   *
+   * Hashes every file and copies it into the repository. Runs in the
+   * background and reports through the catalogue, because hashing eighteen
+   * gigabytes takes minutes and an HTTP request that waits for it will be cut
+   * by something in between.
+   */
+  r.post('/models/import', async (req, res) => {
+    const { id, path: given } = req.body as { id: string; path?: string }
+    const existing = await db.query(`SELECT 1 FROM models WHERE id = $1`, [id])
+    if (existing.rows.length > 0) {
+      res.status(409).json({ error: 'conflict', detail: `${id} is already registered` })
+      return
+    }
+    const found = (await localCandidates()).find((c) => c.id === id)
+    const source = given ?? found?.path
+    if (!source) {
+      res.status(404).json({ error: 'not_found', detail: `${id} is not on this machine` })
+      return
+    }
+    // Not awaited. The response says the work started; the import row says how
+    // far it got, which is the only account that survives a reload of the page
+    // or a restart of whatever opened it.
+    const importId = await startImport(db, id, source, req.user!.id)
+    await audit(db, req.user!.id, 'model.import', id, { source })
+    void importModel(db, id, source, req.user!.id, importId).catch((e) => {
+      console.error(`import ${id} failed:`, e)
+    })
+    res.status(202).json({ id, state: 'importing' })
+  })
+
+  /**
+   * Imports running now, and the recent ones that failed.
+   *
+   * Successful imports drop off because the model itself is the record of those.
+   * A failure has no other trace, and one that leaves none is indistinguishable
+   * from an import nobody started.
+   */
+  r.get('/models/imports', async (_req, res) => {
+    const { rows } = await db.query(
+      `SELECT id, model_id, state, files_done, files_total, bytes_done, error,
+              started_at, finished_at
+         FROM model_imports
+        WHERE state = 'running'
+           OR (state = 'failed' AND started_at > now() - interval '24 hours')
+        ORDER BY started_at DESC`)
+    res.json(rows.map((r2) => ({
+      id: r2.id,
+      modelId: r2.model_id,
+      state: r2.state,
+      filesDone: r2.files_done,
+      filesTotal: r2.files_total,
+      bytesDone: Number(r2.bytes_done),
+      error: r2.error,
+      startedAt: new Date(r2.started_at).toISOString(),
+      finishedAt: r2.finished_at ? new Date(r2.finished_at).toISOString() : null,
+    })))
+  })
+
+  r.get('/models/:modelId', async (req, res) => {
+    const id = req.params.modelId!
+    const { rows } = await db.query(
+      `SELECT m.id, m.runtime, m.kind, m.size_bytes, m.context_length, m.quantization,
+              m.family, m.imported_at, count(f.path)::int AS file_count,
+              coalesce(array_agg(DISTINCT pm.pool_id)
+                       FILTER (WHERE pm.pool_id IS NOT NULL), '{}') AS assigned_pools,
+              (SELECT count(*)::int FROM nodes n
+                WHERE n.state = 'active' AND n.stored_models ? m.id) AS nodes_holding
+         FROM models m
+         LEFT JOIN model_files f ON f.model_id = m.id
+         LEFT JOIN pool_models pm ON pm.model_id = m.id
+        WHERE m.id = $1 GROUP BY m.id`, [id])
+    if (!rows[0]) { res.status(404).json({ error: 'not_found', detail: 'no such model' }); return }
+
+    const { rows: files } = await db.query(
+      `SELECT path, size_bytes, sha256 FROM model_files WHERE model_id=$1 ORDER BY path`, [id])
+    res.json({
+      ...(await modelRow(db, rows[0])),
+      files: files.map((f) => ({
+        path: f.path, sizeBytes: Number(f.size_bytes), sha256: f.sha256,
+      })),
+      placement: await placementOf(db, id),
+      // Who told the fleet to hold this, and when. The assignment row alone
+      // could not answer that: it is mutable, so unassigning erased the record
+      // of ever having assigned it.
+      history: await historyOf(db, id),
+    })
+  })
+
+  r.delete('/models/:modelId', async (req, res) => {
+    const { rowCount } = await db.query(`DELETE FROM models WHERE id=$1`, [req.params.modelId])
+    if (!rowCount) { res.status(404).json({ error: 'not_found', detail: 'no such model' }); return }
+    await audit(db, req.user!.id, 'model.remove', req.params.modelId!)
+    res.status(204).end()
+  })
+
+  /**
+   * Assignment: the declared half of the picture.
+   *
+   * Deliberately does not move bytes. A machine that is asleep, paused or in
+   * use cannot be pushed to, and a mechanism that only works on a machine
+   * someone is watching is not a fleet mechanism. Nodes reconcile toward this
+   * when they are able, which means the declaration outlives the moment it
+   * was made.
+   */
+  r.put('/pools/:poolId/models/:modelId', async (req, res) => {
+    const { poolId, modelId } = req.params as { poolId: string; modelId: string }
+    if (!(await requireRole(db, req.user!.id, poolId, 'operator'))) {
+      res.status(403).json({ error: 'forbidden', detail: 'operator role required on this pool' })
+      return
+    }
+    try {
+      await db.query(
+        `INSERT INTO pool_models (pool_id, model_id, assigned_by) VALUES ($1,$2,$3)
+         ON CONFLICT (pool_id, model_id) DO NOTHING`,
+        [poolId, modelId, req.user!.id],
+      )
+    } catch (e) {
+      if ((e as { code?: string }).code === '23503') {
+        res.status(404).json({ error: 'not_found', detail: 'no such pool or model' })
+        return
+      }
+      throw e
+    }
+    await audit(db, req.user!.id, 'model.push', modelId, { poolId })
+    res.status(204).end()
+  })
+
+  r.delete('/pools/:poolId/models/:modelId', async (req, res) => {
+    const { poolId, modelId } = req.params as { poolId: string; modelId: string }
+    if (!(await requireRole(db, req.user!.id, poolId, 'operator'))) {
+      res.status(403).json({ error: 'forbidden', detail: 'operator role required on this pool' })
+      return
+    }
+    await db.query(`DELETE FROM pool_models WHERE pool_id=$1 AND model_id=$2`, [poolId, modelId])
+    await audit(db, req.user!.id, 'model.unpush', modelId, { poolId })
+    res.status(204).end()
   })
 
   /**
@@ -508,5 +1062,88 @@ async function jobSummary(db: Db, jobId: string) {
     submittedBy: job.submitted_by_email ?? null,
     createdAt: job.created_at ? new Date(job.created_at).toISOString() : null,
     counts: c,
+  }
+}
+
+/**
+ * Desired against actual, per node.
+ *
+ * `wanted` comes from pool assignment through pool membership, `held` from what
+ * the node last reported resident. Both are needed: a node that holds a model
+ * nobody assigned is as interesting as one missing a model it should have, and
+ * showing only the second makes hand-staged weights invisible.
+ */
+async function placementOf(db: Db, modelId: string) {
+  const { rows: pools } = await db.query(
+    `SELECT p.id, p.tier, p.membership FROM pools p
+       JOIN pool_models pm ON pm.pool_id = p.id WHERE pm.model_id = $1`, [modelId])
+  const { rows: nodes } = await db.query(
+    `SELECT id, hostname, tier, chip, memory_gb, stored_models, resident_models
+       FROM nodes WHERE state = 'active' ORDER BY hostname`)
+  return nodes.map((n) => ({
+    nodeId: n.id as string,
+    hostname: n.hostname as string,
+    wanted: poolsFor(n as never, pools as never).length > 0,
+    // On disk, not in memory. `resident_models` empties whenever a model is
+    // released, so using it here reported a machine holding 18GB of weights as
+    // holding nothing and would have had an operator redistribute them.
+    held: Object.prototype.hasOwnProperty.call(n.stored_models ?? {}, modelId),
+    loaded: Object.prototype.hasOwnProperty.call(n.resident_models ?? {}, modelId),
+  }))
+}
+
+/** One catalogue row, with the two counts that matter computed the same way. */
+async function modelRow(db: Db, m: Record<string, unknown>) {
+  const pools = (m.assigned_pools as string[]) ?? []
+  const placement = pools.length > 0 ? await placementOf(db, m.id as string) : []
+  return {
+    id: m.id as string,
+    runtime: m.runtime as string,
+    kind: m.kind as string,
+    sizeBytes: Number(m.size_bytes),
+    contextLength: m.context_length === null ? null : Number(m.context_length),
+    quantization: (m.quantization as string | null) ?? null,
+    family: (m.family as string | null) ?? null,
+    fileCount: Number(m.file_count),
+    importedAt: m.imported_at ? new Date(m.imported_at as string).toISOString() : undefined,
+    assignedPools: pools,
+    nodesHolding: Number(m.nodes_holding ?? 0),
+    nodesWanting: placement.filter((p) => p.wanted && !p.held).length,
+  }
+}
+
+/**
+ * Record a fleet-level action.
+ *
+ * Best effort on purpose: an audit write that fails must not fail the action it
+ * describes, or a full disk turns "push a model" into an outage. It is logged
+ * loudly instead, because an audit trail with silent holes is worse than one
+ * that is known to be incomplete.
+ */
+/** What has been done to one model, most recent first. */
+async function historyOf(db: Db, subject: string) {
+  const { rows } = await db.query(
+    `SELECT a.at, a.action, a.detail, u.email
+       FROM audit_log a LEFT JOIN users u ON u.id = a.user_id
+      WHERE a.subject = $1 ORDER BY a.at DESC LIMIT 20`, [subject])
+  return rows.map((r) => ({
+    at: new Date(r.at).toISOString(),
+    action: r.action as string,
+    by: (r.email as string | null) ?? null,
+    detail: r.detail,
+  }))
+}
+
+async function audit(
+  db: Db, userId: string | null, action: string, subject: string,
+  detail: Record<string, unknown> = {},
+) {
+  try {
+    await db.query(
+      `INSERT INTO audit_log (user_id, action, subject, detail) VALUES ($1,$2,$3,$4)`,
+      [userId, action, subject, JSON.stringify(detail)],
+    )
+  } catch (e) {
+    console.error(`audit write failed for ${action} ${subject}:`, e)
   }
 }

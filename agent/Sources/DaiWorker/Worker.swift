@@ -21,8 +21,15 @@ import Foundation
 public actor Worker {
     enum Failure: Error, CustomStringConvertible {
         case noGPURuntime
+        case renderNotImplemented
         public var description: String {
-            "this node has no GPU runtime; generate work should not have been leased to it"
+            switch self {
+            case .noGPURuntime:
+                return "this node has no GPU runtime; generate work should not have been leased to it"
+            case .renderNotImplemented:
+                return "render work is not implemented; this node never offers it and should "
+                    + "not have been leased any"
+            }
         }
     }
 
@@ -53,6 +60,18 @@ public actor Worker {
     private var pausedByFleet = false
     /// A cluster node is never preempted, so presence does not gate it.
     private var isCluster = false
+    /// Fetches weights this node has been assigned. Optional because a machine
+    /// with no model directory configured has nowhere to put them.
+    private var modelSync: ModelSync?
+
+    /// One transfer at a time. Without this the loop would launch another every
+    /// pass while the first was still running, and a slow link would end up
+    /// fetching the same model a dozen times over.
+    private var modelSyncRunning = false
+
+    /// Holds the machine awake while it is on AC and nobody has paused it.
+    /// Released when either stops being true, and when the process dies.
+    private let sleepAssertion: SleepAssertion
     private let status: StatusPublisher
 
     public struct Stats: Sendable {
@@ -67,7 +86,11 @@ public actor Worker {
                 gpu: MLXRuntime? = nil, ane: ANERuntime? = nil,
                 pauseSwitch: PauseSwitch = PauseSwitch(),
                 status: StatusPublisher = StatusPublisher(),
+                modelSync: ModelSync? = nil,
+                sleepAssertion: SleepAssertion = SleepAssertion(),
                 promoteAfter: TimeInterval = idlePromoteSeconds) {
+        self.sleepAssertion = sleepAssertion
+        self.modelSync = modelSync
         self.status = status
         self.controlPlane = controlPlane
         self.source = source
@@ -127,6 +150,34 @@ public actor Worker {
         return out
     }
 
+    /// Fetch assigned weights when the machine is free, using the presence
+    /// judgement this loop has already made rather than reading the machine a
+    /// second time. Two answers to "is somebody there" is how a machine ends up
+    /// polite in one place and rude in another.
+    private func syncModelsIfDue(_ reading: PresenceMonitor.Reading) async {
+        guard let modelSync, !modelSyncRunning else { return }
+        let paused = pauseSwitch.read().paused
+        let free = !paused && (isCluster || reading.policy.gpu)
+
+        // Detached, because a transfer is measured in gigabytes and awaiting it
+        // here stops the loop: no heartbeat for the length of the download, so
+        // the scheduler drops the node for being silent and routes around the
+        // machine that is busy doing what it was told. That is the same failure
+        // this codebase already fixed once for serving, arriving by a new road.
+        modelSyncRunning = true
+        Task.detached { [weak self] in
+            let outcome = await modelSync.syncIfDue(mayTransfer: free)
+            await self?.finishModelSync(outcome)
+        }
+    }
+
+    private func finishModelSync(_ outcome: ModelSync.Outcome?) {
+        modelSyncRunning = false
+        guard let outcome else { return }
+        for id in outcome.fetched { log("fetched model \(id)") }
+        for (id, why) in outcome.failed { log("model \(id) failed: \(why)") }
+    }
+
     private func syncIfDue(_ reading: PresenceMonitor.Reading) async {
         let now = Date().timeIntervalSince1970
         guard now - lastHeartbeat >= 30 else { return }
@@ -140,7 +191,8 @@ public actor Worker {
                 thermalOK: reading.signals.thermalOK,
                 userPaused: paused,
                 capability: capability,
-                residentModels: await residentModels())
+                residentModels: await residentModels(),
+                storedModels: StoredModels.scan(base: MLXRuntime.hubBase))
         } catch {
             // Best effort. An unreachable control plane must never widen what
             // the agent will do, so a failed heartbeat is simply dropped.
@@ -174,6 +226,10 @@ public actor Worker {
 
     public func run(maxSeconds: TimeInterval = .infinity) async {
         log("worker starting against control plane")
+        // Released when the loop ends for any reason, including a test that
+        // runs for half a second. An assertion outliving the thing that wanted
+        // it is a machine pinned awake by nobody.
+        defer { sleepAssertion.set(false) }
         do {
             let served = try await controlPlane.fetchPolicy()
             policy = mergePolicy(local: defaultPolicy, served: served)
@@ -190,12 +246,28 @@ public actor Worker {
             let reading = presence()
             let statePolicy = policy[reading.state] ?? reading.policy
             await syncIfDue(reading)
+            await syncModelsIfDue(reading)
 
             // Checked here, before anything else, and locally: the machine
             // owner's pause has to work with the control plane unreachable.
             // Waiting for the server to agree would make the button fail in
             // exactly the situation where someone is reaching for it.
             let pause = pauseSwitch.read()
+
+            // Keep the machine reachable while it is lending capacity, and stop
+            // the moment it is unplugged or paused by anyone. A workstation that
+            // sleeps when locked contributes nothing during exactly the hours
+            // this product is made of: orca went dark for four to seven minutes
+            // at a time overnight while still answering pings, because a sleep
+            // proxy replies on a sleeping Mac's behalf.
+            //
+            // Reading the switch once and using that value for both decisions,
+            // so the assertion and the work can never disagree about whether
+            // somebody has pressed pause.
+            sleepAssertion.set(SleepPolicy.shouldStayAwake(
+                onACPower: reading.signals.onACPower,
+                userPaused: pause.paused,
+                pausedByFleet: pausedByFleet))
             await publish(reading, permitted: pause.paused ? [] : availableKinds(statePolicy),
                           activity: pause.paused ? "paused by you"
                                     : pausedByFleet ? "paused by the fleet" : "waiting",
@@ -358,7 +430,12 @@ public actor Worker {
                     _ = try await gpu.generate(prompt: prompt,
                                                maxTokens: statePolicy.maxCompletionTokens)
                 case .render:
-                    break  // not yet implemented
+                    // Fails rather than falling through to the line below that
+                    // marks an item completed. A work kind that silently
+                    // succeeds without doing anything is worse than one that
+                    // errors: the job reports 100% done, the output is missing,
+                    // and nothing anywhere says why.
+                    throw Failure.renderNotImplemented
                 }
                 completed.append(.object(["id": item["id"] ?? .null]))
             } catch {

@@ -4,6 +4,8 @@ import YAML from 'yaml'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { agentRoutes } from '../src/routes/agent.js'
 import { adminRoutes } from '../src/routes/admin.js'
+import { authRoutes } from '../src/routes/auth.js'
+import { monitorRoutes } from '../src/routes/monitor.js'
 import { compatRoutes, servingRoutes } from '../src/routes/serving.js'
 import { Broker } from '../src/lib/broker.js'
 import { Ca, loadOrCreateCa } from '../src/lib/ca.js'
@@ -54,6 +56,8 @@ describe('routes and specification agree', () => {
     caDir = mkdtempSync(join(tmpdir(), 'dai-conformance-'))
     const ca = new Ca(await loadOrCreateCa(join(caDir, 'ca.crt'), join(caDir, 'ca.key')))
     mounts = [
+      ['/admin/v1/auth', authRoutes(fakeDb())],
+      ['/monitor/v1', monitorRoutes(fakeDb())],
       ['/agent/v1', agentRoutes(fakeDb(), new Broker(), ca)],
       ['/admin/v1', adminRoutes(fakeDb(), ca, new Broker())],
       ['/v1', servingRoutes(fakeDb(), new Broker())],

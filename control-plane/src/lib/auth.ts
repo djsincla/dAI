@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from 'express'
 import type { TLSSocket } from 'node:tls'
 import type { Db } from './db.js'
+import { lookup } from './tokens.js'
 
 /**
  * Two identity systems that must not be merged. An enrolled Mac is not a user
@@ -18,6 +19,12 @@ export interface NodeIdentity {
   // that authenticates it, not on a later lookup somebody can forget to make.
   user_paused: boolean
   owner_user_id: string | null
+  // Pool membership is decided from these on every lease, for the same reason:
+  // a node must be matched to pools by what it is, on the request that proves
+  // who it is, rather than by a lookup somewhere else that can go stale.
+  tier: string
+  chip: string | null
+  memory_gb: string | number | null
 }
 
 export interface UserIdentity {
@@ -31,6 +38,13 @@ declare global {
     interface Request {
       node?: NodeIdentity
       user?: UserIdentity
+      /// Whether this request arrived on a browser session or a program's API
+      /// key. Sign-in routes refuse an API key: rotating a password from a
+      /// long-lived key held by a service is not a thing a person is doing.
+      authKind?: 'session' | 'api_key'
+      /// The credential as presented, so a password change can spare the
+      /// session doing the changing while revoking the rest.
+      presentedToken?: string
     }
   }
 }
@@ -71,7 +85,8 @@ export function agentAuth(db: Db) {
     }
     const { rows } = await db.query(
       `SELECT id, hostname, state, presence_state, paused_until, user_paused,
-              owner_user_id, revoked_at, cert_not_after
+              owner_user_id, revoked_at, cert_not_after,
+              tier, chip, memory_gb
          FROM nodes WHERE cert_fingerprint = $1`,
       [fingerprint],
     )
@@ -112,36 +127,68 @@ export function agentAuth(db: Db) {
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 /** Session auth. A real deployment swaps this for OIDC against the IdP. */
+/**
+ * Who is calling, from a credential that is actually a secret.
+ *
+ * This used to accept a user id as a bearer token. A user id is an identifier:
+ * it comes back from the jobs API, sits in the audit log, and appears in any
+ * screenshot of the console, so anyone who read one anywhere held administrative
+ * access that could not expire and could not be revoked without deleting the
+ * person.
+ *
+ * Now it accepts a session token from signing in, or a named API key. Both are
+ * random, stored only as hashes, and individually revocable.
+ */
 export function userAuth(db: Db) {
   return async (req: Request, res: Response, next: NextFunction) => {
     // x-api-key as well as Bearer, because that is the header every Anthropic
     // client sends and the serving surface exists to be pointed at by tools
-    // people already use. Same credential either way.
+    // people already use.
     const header = req.header('authorization')
     const token = header?.startsWith('Bearer ') ? header.slice(7)
       : req.header('x-api-key') ?? null
     if (!token) {
-      res.status(401).json({ error: 'unauthorized', detail: 'no session' })
+      res.status(401).json({ error: 'unauthorized', detail: 'no credential' })
       return
     }
-    // Checked before it reaches the database, because the column is a uuid and
-    // Postgres raises on a malformed one. That surfaced as a 500, which tells a
-    // client the server is broken and to try again: an invalid credential sent
-    // Claude Code into its retry loop instead of failing fast. A bad token is
-    // the caller's fault and has to say so.
-    if (!UUID.test(token)) {
-      res.status(401).json({ error: 'unauthorized', detail: 'malformed session token' })
+
+    const owner = await lookup(db, token)
+    if (!owner) {
+      // One message for absent, expired and wrong. Distinguishing them tells
+      // somebody probing which of their guesses was closest.
+      res.status(401).json({ error: 'unauthorized', detail: 'invalid or expired credential' })
       return
     }
-    const { rows } = await db.query(`SELECT id, email FROM users WHERE id = $1`, [token])
-    const user = rows[0] as UserIdentity | undefined
-    if (!user) {
-      res.status(401).json({ error: 'unauthorized', detail: 'unknown session' })
+
+    // A deployment still on the shipped default can do exactly one thing. This
+    // is the whole point of seeding admin/admin: the first person in has to
+    // replace it before the fleet is reachable, rather than being reminded and
+    // carrying on.
+    if (owner.mustChangePassword && !isPasswordChange(req)) {
+      res.status(403).json({
+        error: 'password_change_required',
+        detail: 'the default password must be changed before anything else',
+      })
       return
     }
-    req.user = user
+
+    req.user = { id: owner.userId, email: owner.email }
+    req.authKind = owner.kind
+    req.presentedToken = token
     next()
   }
+}
+
+/**
+ * The one route a must-change-password credential may still reach.
+ *
+ * Matched on the full URL rather than `req.path`, which inside a mounted router
+ * is only the part after the mount point: the check silently never matched and
+ * locked the default account out of the very form it has to use.
+ */
+function isPasswordChange(req: Request): boolean {
+  return req.method === 'POST'
+    && req.originalUrl.split('?')[0]!.endsWith('/admin/v1/auth/password')
 }
 
 export type Role = 'viewer' | 'operator' | 'admin'

@@ -47,3 +47,11 @@ agent/packaging/dist/
 agent/.xcbuild/
 # profiling output, from before coverage was disabled in the build
 *.profraw
+
+# Database dumps. These carry fleet data and are regenerable by scripts/backup.sh
+control-plane/backups/
+
+# The vendored fork keeps its own history in .git-fork so it can still be
+# diffed against and rebased onto upstream. The parent repo tracks the source
+# files themselves, so a fresh clone builds without a second checkout step.
+agent/vendor/mlx-swift-examples/.git-fork/

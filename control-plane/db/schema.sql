@@ -222,3 +222,215 @@ CREATE TABLE presence_samples (
 );
 
 CREATE INDEX presence_samples_at_idx ON presence_samples(at DESC);
+
+-- The model catalogue: what weights exist, and what they are.
+--
+-- Until this table there was no such thing. `jobs.model_hash` was free text
+-- matched against whatever a node happened to report holding, so "which
+-- machines have the 32B" could only be answered by asking the machines, and
+-- "should they have it" could not be asked at all. Models were staged by hand
+-- with scp, unverified, and the record of what was where lived in somebody's
+-- memory.
+--
+-- IF NOT EXISTS on the tables below, unlike the rest of this file, because
+-- these were added to a schema that was already deployed and the DDL had to be
+-- safe to apply to a live database.
+CREATE TABLE IF NOT EXISTS models (
+    id             text PRIMARY KEY,
+    runtime        text NOT NULL,
+    kind           text NOT NULL,
+    size_bytes     bigint NOT NULL,
+    -- Advertised context, which testing showed is often fiction: a 3B claiming
+    -- 32k fell apart between 8k and 10k. Recorded as what the weights claim,
+    -- separately from what the fleet is willing to promise.
+    context_length integer,
+    quantization   text,
+    -- Chat template family, which is what the tool dialect is matched on. Model
+    -- names lie about this and templates do not.
+    family         text,
+    imported_at    timestamptz NOT NULL DEFAULT now(),
+    imported_by    uuid REFERENCES users(id),
+    CONSTRAINT models_runtime_check CHECK (runtime IN ('mlx', 'coreml')),
+    CONSTRAINT models_kind_check CHECK (kind IN ('generate', 'embed'))
+);
+
+-- One row per file, hashed individually.
+--
+-- Per file rather than per model because a 17GB model is four shards, and the
+-- failure this exists to catch is one truncated shard out of four. A single
+-- whole-model hash would detect it and be unable to say which part to fetch
+-- again; per file makes verification precise and transfer resumable.
+CREATE TABLE IF NOT EXISTS model_files (
+    model_id   text NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+    path       text NOT NULL,
+    size_bytes bigint NOT NULL,
+    sha256     text NOT NULL,
+    PRIMARY KEY (model_id, path)
+);
+
+-- Desired state: which pools are supposed to hold which models.
+--
+-- The fleet view could show what a machine had and never what it should have,
+-- so drift was invisible by construction. This is the declared half; the
+-- observed half is nodes.resident_models, and the difference between them is
+-- the only thing worth looking at.
+CREATE TABLE IF NOT EXISTS pool_models (
+    pool_id     uuid NOT NULL REFERENCES pools(id) ON DELETE CASCADE,
+    model_id    text NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+    assigned_at timestamptz NOT NULL DEFAULT now(),
+    assigned_by uuid REFERENCES users(id),
+    PRIMARY KEY (pool_id, model_id)
+);
+
+CREATE INDEX IF NOT EXISTS pool_models_model_idx ON pool_models(model_id);
+
+-- What a node has on disk, as opposed to what it has loaded.
+--
+-- `resident_models` answers "is this in memory right now", which flaps every
+-- time a model is released and is the wrong question for a catalogue: orca held
+-- 18GB of weights on disk and reported holding nothing, because nothing had
+-- asked it to load them yet. An operator reading that would redistribute
+-- weights that were already there.
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS stored_models jsonb NOT NULL DEFAULT '{}'::jsonb;
+
+-- Imports in flight, and the ones that failed.
+--
+-- Separate from `models` on purpose. A model is registered only once every one
+-- of its files has landed and hashed, because a half-registered model would be
+-- assignable to pools and fetched by nodes that could never complete it. That
+-- invariant is worth keeping, and it leaves nowhere to record an import that is
+-- still running: hashing eighteen gigabytes takes minutes, during which the
+-- catalogue showed nothing at all and the only honest reading of the page was
+-- that the import had failed.
+CREATE TABLE IF NOT EXISTS model_imports (
+    id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    model_id    text NOT NULL,
+    source      text NOT NULL,
+    state       text NOT NULL DEFAULT 'running',
+    files_done  integer NOT NULL DEFAULT 0,
+    files_total integer NOT NULL DEFAULT 0,
+    bytes_done  bigint  NOT NULL DEFAULT 0,
+    error       text,
+    started_at  timestamptz NOT NULL DEFAULT now(),
+    finished_at timestamptz,
+    started_by  uuid REFERENCES users(id),
+    CONSTRAINT model_imports_state_check CHECK (state IN ('running', 'done', 'failed'))
+);
+
+CREATE INDEX IF NOT EXISTS model_imports_recent_idx ON model_imports(started_at DESC);
+
+-- Fleet-level actions, and who took them.
+--
+-- Separate from activity_log, which is per node and answers "what has this
+-- machine been doing" for the person who owns it. This answers "who told the
+-- fleet to do that", which is a different question with a different reader.
+--
+-- It exists because pushing a model to a pool commits every machine in it to
+-- fetching up to eighteen gigabytes, and the only record of it was a single
+-- mutable row in pool_models: unassign and reassign, and the history was gone.
+-- An action with fleet-wide consequences and no trace is one nobody can be
+-- asked about.
+CREATE TABLE IF NOT EXISTS audit_log (
+    id      bigserial PRIMARY KEY,
+    at      timestamptz NOT NULL DEFAULT now(),
+    user_id uuid REFERENCES users(id),
+    action  text NOT NULL,
+    subject text NOT NULL,
+    detail  jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS audit_log_subject_idx ON audit_log(subject, at DESC);
+CREATE INDEX IF NOT EXISTS audit_log_at_idx ON audit_log(at DESC);
+
+-- What each machine is running.
+--
+-- A version string is a claim and the fingerprint is evidence: the hash of the
+-- executable actually running. Both are needed because a binary can be replaced
+-- by this control plane, by an MDM, or by somebody at a keyboard, and only the
+-- node knows which one won. Two deploys in one day once left both machines on a
+-- build from hours earlier, discoverable only by comparing file sizes over ssh.
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS agent_version text;
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS agent_fingerprint text;
+
+-- Agent builds the fleet may be asked to run.
+--
+-- The hash is the point. A version string is what somebody typed; this is what
+-- the bytes are, and it is what a node checks before it will replace the binary
+-- it is currently running with one it just downloaded.
+CREATE TABLE IF NOT EXISTS agent_builds (
+    version     text PRIMARY KEY,
+    sha256      text NOT NULL,
+    size_bytes  bigint NOT NULL,
+    notes       text,
+    uploaded_at timestamptz NOT NULL DEFAULT now(),
+    uploaded_by uuid REFERENCES users(id)
+);
+
+-- Who is allowed to replace the binary on these machines.
+--
+-- `external` by default, and the default matters: a system that arrives able to
+-- push executables to other people's Macs without anyone opting in is the wrong
+-- system. External covers both MDM and somebody installing by hand, and in that
+-- mode the control plane records what it expects and reports what it sees,
+-- while never acting. Two things racing to own the same binary is worse than
+-- either owning it alone.
+ALTER TABLE pools ADD COLUMN IF NOT EXISTS agent_channel text NOT NULL DEFAULT 'external';
+ALTER TABLE pools ADD COLUMN IF NOT EXISTS desired_agent_version text;
+ALTER TABLE pools ADD CONSTRAINT pools_agent_channel_check
+    CHECK (agent_channel IN ('managed', 'external'));
+
+-- Upgrades attempted, and how they ended.
+--
+-- Written by the node rather than the control plane, because the interesting
+-- outcome is the one the control plane cannot observe: a binary that starts,
+-- fails to reach home, and is rolled back by the machine itself. Without this
+-- the fleet would show a node that never moved and no trace of it having tried.
+CREATE TABLE IF NOT EXISTS agent_upgrades (
+    id           bigserial PRIMARY KEY,
+    node_id      uuid NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    from_version text,
+    to_version   text NOT NULL,
+    state        text NOT NULL,
+    detail       text,
+    at           timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT agent_upgrades_state_check
+        CHECK (state IN ('started', 'committed', 'reverted', 'failed'))
+);
+
+CREATE INDEX IF NOT EXISTS agent_upgrades_node_idx ON agent_upgrades(node_id, at DESC);
+
+-- Sign-in, replacing a scheme where the user id was the credential.
+--
+-- The console used to authenticate with a bare user id. That value is an
+-- identifier rather than a secret: it is returned by the jobs API, written to
+-- the audit log, stamped on every imported model, and visible in any screenshot
+-- of the fleet view. Anyone who read it anywhere had full administrative access,
+-- with no expiry and no way to revoke it short of deleting the user.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS username text;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash text;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password boolean NOT NULL DEFAULT false;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_changed_at timestamptz;
+
+CREATE UNIQUE INDEX IF NOT EXISTS users_username_key ON users(lower(username));
+
+-- Credentials that are secrets, of two kinds with one lookup.
+--
+-- A session is what a browser gets and expires by itself. An api_key is what a
+-- program gets and does not, because a tool pointed at the serving API cannot be
+-- asked to sign in, but it is named and individually revocable.
+--
+-- Only the hash is stored, for the same reason the password column is a hash: a
+-- copy of this database should be a list of hashes, not a set of working
+-- credentials.
+CREATE TABLE IF NOT EXISTS auth_tokens (
+    token_hash   text PRIMARY KEY,
+    user_id      uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind         text NOT NULL,
+    label        text,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    last_seen_at timestamptz,
+    expires_at   timestamptz,
+    CONSTRAINT auth_tokens_kind_check CHECK (kind IN ('session', 'api_key'))
+);
+
+CREATE INDEX IF NOT EXISTS auth_tokens_user_idx ON auth_tokens(user_id, kind);

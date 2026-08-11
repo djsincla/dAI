@@ -43,6 +43,7 @@ while [[ $# -gt 0 ]]; do
     # happen makes the behaviour impossible to check by hand.
     --promote) PROMOTE="$2"; shift 2 ;;
     --gpu-model-cache) GPU_MODEL_CACHE="$2"; shift 2 ;;
+    --build) BUILD_OVERRIDE="$2"; shift 2 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -53,15 +54,17 @@ done
 [[ -n "$URL" ]]   || { echo "missing --url" >&2; exit 2; }
 [[ -n "$TOKEN" ]] || { echo "missing --token" >&2; exit 2; }
 [[ -n "$CA" ]]    || { echo "missing --ca" >&2; exit 2; }
-[[ -n "$MODEL" ]] || { echo "missing --model" >&2; exit 2; }
 [[ -f "$CA" ]] || { echo "server CA not found: $CA" >&2; exit 1; }
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# --build points at binaries built elsewhere, which is the normal case for
+# every machine except the one that compiled them. Without it this script only
+# worked on the build host, which is not what installing means.
 # The xcodebuild product, not the SwiftPM one. SwiftPM's command line cannot
 # compile MLX's Metal shaders, which is documented upstream, so a binary built
 # with `swift build` aborts from C++ the first time it touches the GPU. It looks
 # exactly like a missing Metal toolchain and is not.
-BUILD="$HERE/../.xcbuild/Build/Products/Release"
+BUILD="${BUILD_OVERRIDE:-$HERE/../.xcbuild/Build/Products/Release}"
 [[ -x "$BUILD/dai-agent" ]] || {
   echo "no build found at $BUILD" >&2
   echo "run: xcodebuild build -scheme dai-agent -destination 'platform=OS X' \\" >&2
@@ -150,6 +153,16 @@ if [[ "$SVC_USER" != "root" ]]; then
   chown -R "$SVC_USER" "$STATE_DIR" "$LOG_DIR"
 fi
 
+# The join token is left for the daemon, which enrols itself on first start.
+#
+# It used to enrol here, and could not: generating a key in the Secure Enclave
+# needs a session whose keybag is unlocked, which an ssh session does not have
+# even as root. It works in a launchd daemon, so that is where it happens now -
+# and a machine no longer needs somebody sitting at it to join the fleet.
+echo "$TOKEN" > "$IDENTITY_DIR/join-token"
+chmod 600 "$IDENTITY_DIR/join-token"
+[[ "$SVC_USER" != "root" ]] && chown "$SVC_USER" "$IDENTITY_DIR/join-token"
+
 echo "==> enrolling"
 # Enrollment is resumable: re-running picks up the pending node rather than
 # creating a second one and stranding the first in the approval queue.
@@ -157,23 +170,20 @@ echo "==> enrolling"
 # will sign with it rather than handed over afterwards.
 RUN_AS=(env "DAI_IDENTITY_DIR=$IDENTITY_DIR")
 [[ "$SVC_USER" != "root" ]] && RUN_AS=(sudo -u "$SVC_USER" "${RUN_AS[@]}")
-if ! "${RUN_AS[@]}" "$BINARY_DIR/dai-agent" \
-      enroll "$URL" "$TOKEN" "$IDENTITY_DIR/server-ca.crt" "$WAIT"; then
-  echo "enrollment did not complete. Approve the node, then re-run this script." >&2
-  exit 1
-fi
-
-if [[ ! -f "$IDENTITY_DIR/node.crt" ]]; then
-  echo
-  echo "Node is enrolled but not yet approved."
-  echo "Approve it in the fleet UI, then re-run this script to finish."
-  exit 1
+# Attempted here as a convenience when the installer happens to run somewhere
+# the Enclave will work - at the machine itself, or through a GUI authorisation
+# prompt. Failure is expected over ssh and is not fatal: the daemon will do it.
+if "${RUN_AS[@]}" "$BINARY_DIR/dai-agent" \
+      enroll "$URL" "$TOKEN" "$IDENTITY_DIR/server-ca.crt" "$WAIT" 2>/dev/null; then
+  :
+else
+  echo "==> the daemon will enrol on first start"
 fi
 
 echo "==> installing daemon"
 sed -e "s|@BINARY@|$BINARY_DIR/dai-agent|g" \
     -e "s|@URL@|$URL|g" \
-    -e "s|@MODEL@|$MODEL|g" \
+    -e "s|@MODEL@|${MODEL:--}|g" \
     -e "s|@ANE@|$ANE|g" \
     -e "s|@IDENTITY_DIR@|$IDENTITY_DIR|g" \
     -e "s|@STATE_DIR@|$STATE_DIR|g" \
@@ -187,8 +197,22 @@ chmod 644 "$PLIST"
 
 # bootout first so re-running upgrades in place rather than failing on an
 # already-loaded label.
-launchctl bootout "system/$LABEL" 2>/dev/null || true
-launchctl bootstrap system "$PLIST"
+"$HERE/reload-daemon.sh" system "$LABEL" "$PLIST"
+
+# The updater, which is how a managed machine gets a new binary and how it
+# rolls one back. Installed unconditionally but harmless when nobody is
+# managing this pool: it asks, is told nothing, and exits.
+if [[ -f "$HERE/com.dai.updater.plist.in" ]]; then
+  UPDATER_PLIST=/Library/LaunchDaemons/com.dai.updater.plist
+  sed -e "s|@BINARY@|$BINARY_DIR/dai-agent|g" \
+      -e "s|@URL@|$URL|g" \
+      -e "s|@WAIT@|${UPGRADE_WAIT:-300}|g" \
+      -e "s|@LOG_DIR@|$LOG_DIR|g" \
+      -e "s|@IDENTITY_DIR@|$IDENTITY_DIR|g" \
+      "$HERE/com.dai.updater.plist.in" > "$UPDATER_PLIST"
+  chmod 644 "$UPDATER_PLIST"
+  "$HERE/reload-daemon.sh" system com.dai.updater "$UPDATER_PLIST"
+fi
 
 # The menu bar app, if it was built. Not fatal if absent: the daemon works
 # without it. But a machine running this with no way for its owner to see or
@@ -204,8 +228,9 @@ if [[ -d "$BUILD/dAI.app" ]]; then
   # LaunchAgent belongs to a login session and there may not be one yet.
   CONSOLE_UID=$(stat -f%u /dev/console)
   if [[ "$CONSOLE_UID" != "0" ]]; then
-    launchctl bootout "gui/$CONSOLE_UID/com.dai.menubar" 2>/dev/null || true
-    launchctl bootstrap "gui/$CONSOLE_UID" "$MENUBAR_PLIST" 2>/dev/null || true
+    if ! "$HERE/reload-daemon.sh" "gui/$CONSOLE_UID" com.dai.menubar "$MENUBAR_PLIST"; then
+      echo "   the menu bar app did not load; the daemon is unaffected" >&2
+    fi
   fi
 else
   echo "WARNING: no menu bar app was built, so this machine's owner has no" >&2

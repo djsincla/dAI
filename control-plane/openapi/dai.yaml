@@ -132,6 +132,7 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+        '401': { $ref: '#/components/responses/Unauthorized' }
   /agent/v1/me:
     get:
       tags: [agent]
@@ -610,6 +611,7 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+        '401': { $ref: '#/components/responses/Unauthorized' }
   /admin/v1/nodes/{nodeId}/pause:
     post:
       tags: [admin]
@@ -639,6 +641,7 @@ paths:
               schema: { $ref: '#/components/schemas/Node' }
         '403': { $ref: '#/components/responses/Forbidden' }
 
+        '401': { $ref: '#/components/responses/Unauthorized' }
   /admin/v1/nodes/{nodeId}/resume:
     post:
       tags: [admin]
@@ -657,8 +660,18 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+        '401': { $ref: '#/components/responses/Unauthorized' }
   /admin/v1/fleet/summary:
     get:
+      parameters:
+        - name: window
+          in: query
+          required: false
+          description: >
+            Seconds of history for the capacity series, between 600 and 259200.
+            The bucket size is derived from it rather than given separately, so
+            the two cannot disagree.
+          schema: { type: integer, minimum: 600, maximum: 259200 }
       tags: [admin]
       summary: Fleet capacity now and over the last 24 hours
       description: |
@@ -694,6 +707,255 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /admin/v1/auth/login:
+    post:
+      tags: [admin]
+      summary: Exchange a username and password for a session token
+      description: >
+        The token is returned once and stored only as a hash, so it cannot be
+        recovered from the database afterwards. A fresh deployment starts with
+        admin and admin, and that account can do nothing until the password is
+        changed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string }
+      responses:
+        '200':
+          description: Signed in
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token]
+                properties:
+                  token: { type: string }
+                  expiresAt: { type: string, format: date-time, nullable: true }
+                  email: { type: string }
+                  username: { type: string, nullable: true }
+                  mustChangePassword: { type: boolean }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /admin/v1/auth/logout:
+    post:
+      tags: [admin]
+      summary: End this session
+      responses:
+        '204': { description: Signed out }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /admin/v1/auth/me:
+    get:
+      tags: [admin]
+      summary: Who this credential belongs to
+      responses:
+        '200':
+          description: The signed-in account
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  email: { type: string }
+                  username: { type: string, nullable: true }
+                  kind: { type: string, enum: [session, api_key] }
+                  mustChangePassword: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /admin/v1/auth/password:
+    post:
+      tags: [admin]
+      summary: Change a password
+      description: >
+        The one route reachable while a password change is outstanding. Ends
+        every other session, because a change that left them working would not
+        lock anybody out.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, newPassword]
+              properties:
+                currentPassword: { type: string }
+                newPassword: { type: string }
+      responses:
+        '200':
+          description: Changed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  otherSessionsEnded: { type: integer }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/v1/auth/keys:
+    get:
+      tags: [admin]
+      summary: API keys this account holds
+      responses:
+        '200':
+          description: Keys, never including the secret
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    label: { type: string, nullable: true }
+                    createdAt: { type: string, format: date-time }
+                    lastSeenAt: { type: string, format: date-time, nullable: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [admin]
+      summary: Mint an API key for a program
+      description: >
+        Long lived on purpose, because a tool pointed at the serving API cannot
+        be asked to sign in. Returned once and never recoverable.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                label: { type: string }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+                  label: { type: string, nullable: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/v1/auth/keys/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    delete:
+      tags: [admin]
+      summary: Revoke one API key
+      responses:
+        '204': { description: Revoked }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /monitor/v1/health:
+    get:
+      tags: [monitor]
+      summary: Whether the control plane can reach its database
+      description: >
+        No credential, restricted by address range, and disabled entirely when
+        no range is configured. Distinct from /healthz, which only answers
+        whether the process is running.
+      responses:
+        '200':
+          description: Healthy
+          content:
+            text/plain:
+              schema: { type: string }
+        '503':
+          description: Database unreachable
+          content:
+            text/plain:
+              schema: { type: string }
+        '403':
+          description: Address not permitted
+          content:
+            text/plain:
+              schema: { type: string }
+        '404':
+          description: Monitoring is disabled because no address range is configured
+          content:
+            text/plain:
+              schema: { type: string }
+
+  /monitor/v1/metrics:
+    get:
+      tags: [monitor]
+      summary: Fleet metrics in Prometheus exposition format
+      responses:
+        '200':
+          description: Metrics
+          content:
+            text/plain:
+              schema: { type: string }
+        '403':
+          description: Address not permitted
+          content:
+            text/plain:
+              schema: { type: string }
+        '404':
+          description: Monitoring is disabled because no address range is configured
+          content:
+            text/plain:
+              schema: { type: string }
+
+  /admin/v1/pools/{poolId}/nodes/{nodeId}:
+    parameters:
+      - name: poolId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - name: nodeId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      tags: [admin]
+      summary: Put a machine in a group by hand
+      description: >
+        A group is either a list somebody picked or a rule machines match, never
+        both. Adding the first machine by hand converts a rule into a list,
+        which changes who belongs, so it answers 409 until confirmed.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                confirm: { type: boolean }
+      responses:
+        '204': { description: Added }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Would convert a rule into a list, or the tier forbids it
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    delete:
+      tags: [admin]
+      summary: Take a machine out of a group
+      responses:
+        '204': { description: Removed }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+        '401': { $ref: '#/components/responses/Unauthorized' }
   /admin/v1/pools:
     get:
       tags: [admin]
@@ -707,7 +969,557 @@ paths:
                 type: array
                 items: { $ref: '#/components/schemas/Pool' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [admin]
+      summary: Create a group
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1 }
+                tier: { type: string, enum: [harvest, cluster] }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, format: uuid }
+                  name: { type: string }
+                  tier: { type: string }
+        '409':
+          description: A group with that name exists
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /agent/v1/agent/desired:
+    get:
+      tags: [agent]
+      summary: The agent build this node should be running
+      description: >
+        Empty when the node's pools are external, meaning an MDM or a person
+        owns the binary and this system only observes. A node told nothing does
+        nothing.
+      responses:
+        '200':
+          description: The desired build, or an empty object
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: { type: string }
+                  sha256: { type: string }
+                  sizeBytes: { type: integer, format: int64 }
+                  notes: { type: string, nullable: true }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /agent/v1/agent/builds/{version}/binary:
+    parameters:
+      - name: version
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [agent]
+      summary: Fetch an agent binary
+      responses:
+        '200':
+          description: The binary
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /agent/v1/agent/upgrades:
+    post:
+      tags: [agent]
+      summary: Report what an upgrade did, including a self-rollback
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [toVersion, state]
+              properties:
+                fromVersion: { type: string, nullable: true }
+                toVersion: { type: string }
+                state: { type: string, enum: [started, committed, reverted, failed] }
+                detail: { type: string, nullable: true }
+      responses:
+        '204': { description: Recorded }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /agent/v1/models/assigned:
+    get:
+      tags: [agent]
+      summary: What this node is supposed to be holding
+      description: >
+        Resolved through pool membership, so a node learns what to fetch without
+        being told which pools it is in. Returns file hashes, which is what the
+        node verifies against before it will load anything.
+      responses:
+        '200':
+          description: Assigned models with their files
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [id, runtime, kind, files]
+                  properties:
+                    id: { type: string }
+                    runtime: { type: string, enum: [mlx, coreml] }
+                    kind: { $ref: '#/components/schemas/WorkKind' }
+                    files:
+                      type: array
+                      items: { $ref: '#/components/schemas/ModelFile' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /agent/v1/models/{modelId}/files/{filePath}:
+    parameters:
+      - name: modelId
+        in: path
+        required: true
+        schema: { type: string }
+      - name: filePath
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [agent]
+      summary: Fetch one file of a model
+      description: >
+        Range requests are supported because a shard is gigabytes and a transfer
+        that cannot resume starts again from zero every time a machine sleeps.
+      responses:
+        '200':
+          description: File contents
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '206': { description: Partial content }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /admin/v1/models/available:
+    get:
+      tags: [admin]
+      summary: Models that could be added, and what adding them would cost
+      description: >
+        Deliberately a shortlist rather than a mirror of a public hub. Models
+        already on this machine's disk are offered first, because importing one
+        costs nothing and downloading one costs the building's uplink.
+      responses:
+        '200':
+          description: Candidates
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [id, source, registered]
+                  properties:
+                    id: { type: string }
+                    source:
+                      type: string
+                      enum: [local, remote]
+                      description: >
+                        local means the files are already on this machine and
+                        importing is a copy. remote means it has to be fetched.
+                    path: { type: string, nullable: true }
+                    sizeBytes: { type: integer, format: int64, nullable: true }
+                    kind: { $ref: '#/components/schemas/WorkKind' }
+                    contextLength: { type: integer, nullable: true }
+                    family: { type: string, nullable: true }
+                    note: { type: string, nullable: true }
+                    registered: { type: boolean }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /admin/v1/models/imports:
+    get:
+      tags: [admin]
+      summary: Imports running now, and recent failures
+      description: >
+        Successful imports drop off this list because the model itself is the
+        record of those. A failure has no other trace, and one that leaves none
+        is indistinguishable from an import nobody started.
+      responses:
+        '200':
+          description: Imports
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [id, modelId, state]
+                  properties:
+                    id: { type: string, format: uuid }
+                    modelId: { type: string }
+                    state: { type: string, enum: [running, done, failed] }
+                    filesDone: { type: integer }
+                    filesTotal: { type: integer }
+                    bytesDone: { type: integer, format: int64 }
+                    error: { type: string, nullable: true }
+                    startedAt: { type: string, format: date-time }
+                    finishedAt: { type: string, format: date-time, nullable: true }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /admin/v1/models/import:
+    post:
+      tags: [admin]
+      summary: Import a model that is already on this machine
+      description: >
+        Hashes every file, copies it into the repository, and registers it. The
+        hashing is the point: it is what lets a node tell a complete copy from
+        one that stopped on a block boundary.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id: { type: string }
+                path: { type: string, nullable: true }
+      responses:
+        '202':
+          description: Import started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  state: { type: string }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Already registered
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /admin/v1/agent/builds:
+    get:
+      tags: [admin]
+      summary: Agent builds, and how many machines run each
+      responses:
+        '200':
+          description: Builds and what is running
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [builds, running]
+                properties:
+                  builds:
+                    type: array
+                    items:
+                      type: object
+                      required: [version, sha256, sizeBytes]
+                      properties:
+                        version: { type: string }
+                        sha256: { type: string }
+                        sizeBytes: { type: integer, format: int64 }
+                        notes: { type: string, nullable: true }
+                        uploadedAt: { type: string, format: date-time }
+                        uploadedBy: { type: string, nullable: true }
+                        nodesRunning: { type: integer }
+                  running:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        version: { type: string }
+                        fingerprint: { type: string, nullable: true }
+                        nodes: { type: integer }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [admin]
+      summary: Register an agent build from a file on the control plane
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version, path]
+              properties:
+                version: { type: string, minLength: 1 }
+                path: { type: string }
+                notes: { type: string, nullable: true }
+      responses:
+        '201':
+          description: Registered
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: { type: string }
+                  sha256: { type: string }
+                  sizeBytes: { type: integer, format: int64 }
+                  notes: { type: string, nullable: true }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409':
+          description: Already registered
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /admin/v1/agent/rollout:
+    get:
+      tags: [admin]
+      summary: What every machine runs, what it should run, and who decides
+      responses:
+        '200':
+          description: Per machine
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [nodeId, hostname, running, channel]
+                  properties:
+                    nodeId: { type: string, format: uuid }
+                    hostname: { type: string }
+                    running: { type: string }
+                    fingerprint: { type: string, nullable: true }
+                    desired: { type: string, nullable: true }
+                    channel: { type: string, enum: [managed, external] }
+                    upToDate: { type: boolean, nullable: true }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /admin/v1/agent/upgrades:
+    get:
+      tags: [admin]
+      summary: Upgrades attempted, and how they ended
+      responses:
+        '200':
+          description: Recent attempts, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    at: { type: string, format: date-time }
+                    hostname: { type: string }
+                    fromVersion: { type: string, nullable: true }
+                    toVersion: { type: string }
+                    state: { type: string, enum: [started, committed, reverted, failed] }
+                    detail: { type: string, nullable: true }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /admin/v1/pools/{poolId}/agent:
+    parameters:
+      - name: poolId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      tags: [admin]
+      summary: Who owns the binary on this pool, and which version it should run
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [channel]
+              properties:
+                channel:
+                  type: string
+                  enum: [managed, external]
+                  description: >
+                    external never pushes. It records what is expected and
+                    reports what is seen, which is what makes this safe beside
+                    an MDM or somebody installing by hand.
+                version: { type: string, nullable: true }
+      responses:
+        '204': { description: Set }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /admin/v1/logs:
+    get:
+      tags: [admin]
+      summary: Machine activity and fleet actions, together
+      description: >
+        Two logs answering different questions, read as one: what a machine has
+        been doing, and who told the fleet to do something. The text and html
+        formats are exports - something to grep, attach to a ticket, or send to
+        somebody with no login here - and are returned as attachments.
+      parameters:
+        - name: q
+          in: query
+          schema: { type: string }
+          description: Matches the machine, the actor, the event and the detail payload.
+        - name: since
+          in: query
+          schema: { type: string, format: date-time }
+        - name: until
+          in: query
+          schema: { type: string, format: date-time }
+        - name: source
+          in: query
+          schema: { type: string, enum: [node, fleet] }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 5000 }
+        - name: format
+          in: query
+          schema: { type: string, enum: [json, text, html] }
+      responses:
+        '200':
+          description: Log entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [at, source, event]
+                  properties:
+                    at: { type: string, format: date-time }
+                    source: { type: string, enum: [node, fleet] }
+                    node: { type: string, nullable: true }
+                    actor: { type: string, nullable: true }
+                    event: { type: string }
+                    detail: { type: object, additionalProperties: true }
+            text/plain:
+              schema: { type: string }
+            text/html:
+              schema: { type: string }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /admin/v1/models:
+    get:
+      tags: [admin]
+      summary: The model catalogue
+      responses:
+        '200':
+          description: Models, with how many nodes hold each
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Model' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [admin]
+      summary: Register a model and the hashes of its files
+      description: >
+        Registers what the weights are and what they should hash to. Import is
+        deliberately explicit: nothing reaches the catalogue by being discovered
+        on a node, because a model nobody chose is exactly what a fleet must not
+        distribute.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ModelRequest' }
+      responses:
+        '201':
+          description: Registered
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Model' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: A model with this id is already registered
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /admin/v1/models/{modelId}:
+    parameters:
+      - name: modelId
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [admin]
+      summary: One model, its files, and where it actually is
+      responses:
+        '200':
+          description: Model with placement
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ModelDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    delete:
+      tags: [admin]
+      summary: Remove a model from the catalogue
+      responses:
+        '204': { description: Removed }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /admin/v1/pools/{poolId}/models/{modelId}:
+    parameters:
+      - name: poolId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - name: modelId
+        in: path
+        required: true
+        schema: { type: string }
+    put:
+      tags: [admin]
+      summary: Assign a model to a pool
+      description: >
+        Declares that every node in this pool should hold these weights. It does
+        not move bytes; nodes reconcile toward it on their own schedule, which
+        is what makes the declaration survive a machine being asleep.
+      responses:
+        '204': { description: Assigned }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    delete:
+      tags: [admin]
+      summary: Unassign a model from a pool
+      responses:
+        '204': { description: Unassigned }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+        '401': { $ref: '#/components/responses/Unauthorized' }
   /admin/v1/jobs:
     get:
       tags: [admin]
@@ -721,6 +1533,7 @@ paths:
                 type: array
                 items: { $ref: '#/components/schemas/Job' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
     post:
       tags: [admin]
       summary: Submit a job
@@ -737,6 +1550,7 @@ paths:
               schema: { $ref: '#/components/schemas/Job' }
         '403': { $ref: '#/components/responses/Forbidden' }
 
+        '401': { $ref: '#/components/responses/Unauthorized' }
   /admin/v1/jobs/{jobId}/results:
     get:
       tags: [admin]
@@ -774,6 +1588,7 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+        '401': { $ref: '#/components/responses/Unauthorized' }
   /admin/v1/jobs/{jobId}:
     get:
       tags: [admin]
@@ -792,6 +1607,7 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+        '401': { $ref: '#/components/responses/Unauthorized' }
 components:
   securitySchemes:
     mtls:
@@ -887,6 +1703,24 @@ components:
       type: object
       required: [presenceState]
       properties:
+        agentVersion:
+          type: string
+          description: What this binary calls itself, set at build time.
+        agentFingerprint:
+          type: string
+          description: >
+            sha256 of the running executable. A version string is a claim; this
+            is evidence, and it is what proves the binary on disk is the one the
+            control plane believes it deployed.
+        storedModels:
+          type: object
+          additionalProperties: { type: number }
+          description: |
+            Model ids this node has on disk, mapped to gigabytes. Distinct from
+            residentModels, which is what is loaded into memory this second and
+            is empty on a healthy machine that nobody has asked anything of yet.
+            Possession is what the catalogue reconciles against; residency is
+            what the router uses to avoid a cold load.
         models:
           type: array
           description: |
@@ -957,7 +1791,7 @@ components:
       properties:
         reason:
           type: string
-          enum: [empty, none-of-these-kinds, node-paused, user-paused]
+          enum: [empty, none-of-these-kinds, node-paused, user-paused, no-pool]
           description: |
             `node-paused` is administrative and an operator can lift it.
             `user-paused` is the machine owner's own pause and nobody else can.
@@ -1040,6 +1874,99 @@ components:
         schedule: { type: string, enum: [independent-units, gang] }
         preempt: { type: string, enum: [on-user-activity, never] }
         priority: { type: integer }
+        agentChannel: { type: string, enum: [managed, external] }
+        desiredAgentVersion: { type: string, nullable: true }
+
+    Model:
+      type: object
+      required: [id, runtime, kind, sizeBytes, fileCount, assignedPools, nodesHolding]
+      properties:
+        id: { type: string }
+        runtime: { type: string, enum: [mlx, coreml] }
+        kind: { $ref: '#/components/schemas/WorkKind' }
+        sizeBytes: { type: integer, format: int64 }
+        contextLength: { type: integer, nullable: true }
+        quantization: { type: string, nullable: true }
+        family: { type: string, nullable: true }
+        fileCount: { type: integer }
+        importedAt: { type: string, format: date-time }
+        assignedPools:
+          type: array
+          items: { type: string, format: uuid }
+        nodesHolding:
+          type: integer
+          description: Nodes reporting these weights resident right now.
+        nodesWanting:
+          type: integer
+          description: >
+            Nodes in an assigned pool that do not hold it yet. The gap between
+            this and nodesHolding is the only number worth watching.
+
+    ModelFile:
+      type: object
+      required: [path, sizeBytes, sha256]
+      properties:
+        path: { type: string }
+        sizeBytes: { type: integer, format: int64 }
+        sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+
+    ModelRequest:
+      type: object
+      required: [id, runtime, kind, files]
+      properties:
+        id: { type: string, minLength: 1 }
+        runtime: { type: string, enum: [mlx, coreml] }
+        kind: { $ref: '#/components/schemas/WorkKind' }
+        contextLength: { type: integer, nullable: true }
+        quantization: { type: string, nullable: true }
+        family: { type: string, nullable: true }
+        files:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/ModelFile' }
+
+    ModelDetail:
+      allOf:
+        - $ref: '#/components/schemas/Model'
+        - type: object
+          required: [files, placement]
+          properties:
+            files:
+              type: array
+              items: { $ref: '#/components/schemas/ModelFile' }
+            history:
+              type: array
+              description: >
+                What has been done to this model and by whom. The assignment row
+                alone cannot answer that: it is mutable, so unassigning erased
+                any record of having assigned it.
+              items:
+                type: object
+                required: [at, action]
+                properties:
+                  at: { type: string, format: date-time }
+                  action: { type: string }
+                  by: { type: string, nullable: true }
+                  detail: { type: object, additionalProperties: true }
+            placement:
+              type: array
+              description: Desired against actual, per node.
+              items:
+                type: object
+                required: [nodeId, hostname, wanted, held]
+                properties:
+                  nodeId: { type: string, format: uuid }
+                  hostname: { type: string }
+                  wanted: { type: boolean }
+                  held:
+                    type: boolean
+                    description: The weights are on this node's disk.
+                  loaded:
+                    type: boolean
+                    description: >
+                      Loaded into memory right now. Distinct from held, and much
+                      more volatile: a healthy machine nobody has asked anything
+                      of holds every model it was given and has none loaded.
 
     JobRequest:
       type: object
@@ -1096,6 +2023,14 @@ components:
       required: [nodes, eligibleForGpu, gpuCapacityGb, aneCapacityGb, series, queues]
       properties:
         nodes: { type: integer }
+        windowSeconds: { type: integer }
+        bucketSeconds: { type: integer }
+        pendingNodes:
+          type: integer
+          description: >
+            Machines that enrolled and have not been approved. They do nothing
+            at all until somebody acts, and nothing else on the fleet view hints
+            that they exist.
         eligibleForGpu: { type: integer }
         gpuCapacityGb: { type: number }
         aneCapacityGb: { type: number }

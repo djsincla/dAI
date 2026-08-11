@@ -65,6 +65,48 @@ enum Enroll {
         return csr
     }
 
+    /// Where the installer leaves a join token for the daemon to use.
+    static func joinTokenPath(_ dir: URL) -> URL {
+        dir.appendingPathComponent("join-token")
+    }
+
+    /// Make sure this node has an identity, enrolling if it does not.
+    ///
+    /// Enrolment moved here from the installer because of where it can happen.
+    /// Generating a key in the Secure Enclave needs a session whose keybag is
+    /// unlocked: it works in a login session and in a launchd daemon, and fails
+    /// in an ssh session even as root, which is where an installer usually
+    /// runs. Doing it from the installer meant somebody had to be sitting at
+    /// each machine, which is workable for two and not for fifty.
+    ///
+    /// The daemon runs in session 0, where it works. So the installer leaves a
+    /// join token and the node enrols itself on first start.
+    static func ensureIdentity(controlPlane: URL, caPath: String?) async -> Bool {
+        let dir = identityDir()
+        if FileManager.default.fileExists(
+            atPath: dir.appendingPathComponent("node.crt").path) { return true }
+
+        guard let token = try? String(contentsOf: joinTokenPath(dir), encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty else {
+            FileHandle.standardError.write(Data(
+                "no identity and no join token; nothing to enrol with\n".utf8))
+            return false
+        }
+
+        do {
+            // Waits, because approval is a human decision and a daemon that
+            // gave up after one attempt would need somebody to restart it at
+            // exactly the right moment.
+            try await run(controlPlane: controlPlane, joinToken: token,
+                          caPath: caPath, waitSeconds: 900)
+        } catch {
+            FileHandle.standardError.write(Data("enrolment failed: \(error)\n".utf8))
+            return false
+        }
+        return FileManager.default.fileExists(
+            atPath: dir.appendingPathComponent("node.crt").path)
+    }
+
     static func run(controlPlane: URL, joinToken: String, caPath: String?,
                     waitSeconds: Double) async throws {
         let dir = identityDir()
@@ -73,7 +115,7 @@ enum Enroll {
             print("Already enrolled. Identity in \(dir.path)"); return
         }
 
-        let host = ProcessInfo.processInfo.hostName.components(separatedBy: ".").first ?? "node"
+        let host = MachineName.current()
         let hw = hardware()
         let csr = try generateCSR(dir: dir, commonName: host)
 
@@ -131,7 +173,20 @@ enum Enroll {
                     try FileManager.default.copyItem(atPath: caPath,
                         toPath: dir.appendingPathComponent("ca.crt").path)
                 }
+                // The *node* CA, kept in a second file. Nodes now verify each
+                // other directly - one machine holds half a model and has to
+                // trust the machine holding the rest - and the server CA cannot
+                // vouch for a node. Two files rather than one bundle so that
+                // trusting a peer never quietly widens what may pose as a
+                // control plane.
+                if let nodeCA = issued.nodeCAPEM {
+                    try nodeCA.write(to: dir.appendingPathComponent("node-ca.crt"),
+                                     atomically: true, encoding: .utf8)
+                }
                 try? FileManager.default.removeItem(at: tokenFile)
+                // The join token has done its work. Leaving it on disk is a
+                // credential that can be replayed to enrol another machine.
+                try? FileManager.default.removeItem(at: joinTokenPath(dir))
                 try? FileManager.default.removeItem(at: dir.appendingPathComponent("node.csr"))
                 FileHandle.standardError.write(
                     "Approved. Identity written to \(dir.path)\n".data(using: .utf8)!)

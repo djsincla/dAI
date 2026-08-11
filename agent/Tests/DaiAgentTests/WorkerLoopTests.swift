@@ -101,6 +101,84 @@ struct WorkerLoopTests {
         #expect(await cp.heartbeats.contains { $0.paused } == true)
     }
 
+    @Test("keeps the machine awake while it is lending capacity")
+    func holdsSleepAssertionWhileWorking() async {
+        // orca slept through the night behind a locked screen, going dark for
+        // four to seven minutes at a time while still answering pings. A
+        // harvest node that sleeps contributes nothing during exactly the hours
+        // this product is made of.
+        let cp = FakeControlPlane()
+        let path = statusPath()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let awake = SleepAssertion(name: "dAI test: worker holds")
+
+        let worker = Worker(controlPlane: cp, source: FixedSignals.away(),
+                            gpu: nil, ane: nil,
+                            status: StatusPublisher(path: path),
+                            sleepAssertion: awake, promoteAfter: 0)
+        await worker.run(maxSeconds: 0.6)
+
+        // Held while the loop ran, and released when it ended. Both halves
+        // matter: checking only the second would pass a loop that never held it
+        // at all, which is the bug this exists to prevent.
+        #expect(awake.acquisitions >= 1)
+        #expect(!awake.isHeld)
+        // Taken once, not once per poll. A fresh assertion each pass would leak
+        // one every few seconds and pin the machine awake indefinitely.
+        #expect(awake.acquisitions == 1, "took \(awake.acquisitions) assertions")
+    }
+
+    @Test("lets the machine sleep again the moment its owner pauses")
+    func releasesSleepAssertionWhenPaused() async throws {
+        // The off switch has to stop everything this software does to a
+        // machine, not merely the work it runs. An agent that kept preventing
+        // sleep while paused is the overreach the pause exists to rule out.
+        let switchFile = "/Users/Shared/.dai-paused-test-\(UUID().uuidString)"
+        let pause = PauseSwitch(path: switchFile)
+        try pause.pause(reason: "under test")
+        defer { try? pause.resume() }
+
+        let cp = FakeControlPlane()
+        let path = statusPath()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let awake = SleepAssertion(name: "dAI test: worker releases")
+
+        let worker = Worker(controlPlane: cp, source: FixedSignals.away(),
+                            gpu: nil, ane: nil, pauseSwitch: pause,
+                            status: StatusPublisher(path: path),
+                            sleepAssertion: awake, promoteAfter: 0)
+        await worker.run(maxSeconds: 0.6)
+
+        #expect(!awake.isHeld)
+        // Never taken at all, rather than taken and dropped.
+        #expect(awake.acquisitions == 0)
+        #expect(await cp.leaseRequests.isEmpty)
+    }
+
+    @Test("lets the machine sleep when an operator pauses it from the fleet view")
+    func releasesSleepAssertionWhenFleetPaused() async {
+        // The other half of the same promise. A pause from the control plane
+        // has to stop the agent holding the machine awake just as an owner's
+        // pause does: from the machine's point of view the two are the same
+        // instruction, and only one of them is visible to the person sitting
+        // at it.
+        let cp = FakeControlPlane()
+        await cp.setRefuseWith("node-paused")
+        let path = statusPath()
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let awake = SleepAssertion(name: "dAI test: fleet pause")
+
+        let worker = Worker(controlPlane: cp, source: FixedSignals.away(),
+                            gpu: nil, ane: ANERuntime(modelURL: URL(fileURLWithPath: "/dev/null")),
+                            status: StatusPublisher(path: path),
+                            sleepAssertion: awake, promoteAfter: 0)
+        await worker.run(maxSeconds: 1.2)
+
+        #expect(!awake.isHeld)
+        let status = AgentStatus.read(path: path)
+        #expect(status?.pausedByFleet == true)
+    }
+
     @Test("hands back what it did not finish")
     func reportsUnfinished() async {
         // Returning the remainder is what makes preemption cheap. Discarding it

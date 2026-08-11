@@ -60,6 +60,22 @@ enum Preflight {
             ? "no work permitted right now (\(policy.blockedBy.joined(separator: ", ")))"
             : "permits \(kinds.map(\.rawValue).joined(separator: ", "))")
 
+        // What the machine would actually take, which is the number that
+        // decides whether it is a useful fleet member. Reported separately
+        // because a preflight that says "permits generate, render" on a machine
+        // with no Metal toolchain and no renderer has told the reader nothing
+        // they can act on.
+        let runnable = runnableKinds(policy, hasGPU: MLXProbe.isAvailable(), hasANE: true)
+        let unavailable = kinds.filter { !runnable.contains($0) }
+        if runnable.isEmpty, !kinds.isEmpty {
+            warn("runtimes", "nothing this state permits can run here: "
+                + unavailable.map(\.rawValue).joined(separator: ", "))
+        } else {
+            ok("runtimes", "runs \(runnable.map(\.rawValue).joined(separator: ", "))"
+                + (unavailable.isEmpty ? ""
+                   : "; will not be offered " + unavailable.map(\.rawValue).joined(separator: ", ")))
+        }
+
         // 3. Power and thermal, which gate work regardless of presence.
         if !signals.onACPower {
             warn("power", "on battery; all work is blocked until it is plugged in")

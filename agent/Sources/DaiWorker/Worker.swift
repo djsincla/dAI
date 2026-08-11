@@ -21,11 +21,14 @@ import Foundation
 public actor Worker {
     enum Failure: Error, CustomStringConvertible {
         case noGPURuntime
+        case noANERuntime
         case renderNotImplemented
         public var description: String {
             switch self {
             case .noGPURuntime:
                 return "this node has no GPU runtime; generate work should not have been leased to it"
+            case .noANERuntime:
+                return "this node has no ANE runtime; embed work should not have been leased to it"
             case .renderNotImplemented:
                 return "render work is not implemented; this node never offers it and should "
                     + "not have been leased any"
@@ -127,16 +130,14 @@ public actor Worker {
         return reading
     }
 
-    /// Work kinds permitted *right now*, which is not the same as what this node
-    /// is capable of. Advertised to the control plane so it hands out only
-    /// servable work rather than work the agent must immediately hand back.
+    /// Work kinds permitted *right now*, narrowed to what this node can run.
+    ///
+    /// Advertised to the control plane so it hands out only servable work rather
+    /// than work the agent must immediately hand back. Delegated rather than
+    /// spelled out again, so there is one definition of what this machine will
+    /// attempt and the diagnostic commands cannot disagree with the loop.
     private func availableKinds(_ p: StatePolicy) -> [WorkKind] {
-        var kinds: [WorkKind] = []
-        if p.ane, ane != nil { kinds.append(.embed) }
-        // Advertising generate without a runtime to serve it would have the
-        // control plane hand out work this node must immediately give back.
-        if p.gpu, p.dutyMax > 0, gpu != nil { kinds.append(.generate) }
-        return kinds
+        runnableKinds(p, hasGPU: gpu != nil, hasANE: ane != nil)
     }
 
     private func applyQoS(_ p: StatePolicy, kind: WorkKind) {
@@ -451,7 +452,15 @@ public actor Worker {
             do {
                 switch lease.kind {
                 case .embed:
-                    if let ane { _ = try await ane.run(item: item) }
+                    // Guarded like generate below, rather than quietly doing
+                    // nothing. `if let ane { ... }` fell through to the line
+                    // that marks an item completed, so a node with no ANE
+                    // runtime would have reported every embed item done without
+                    // running one. Unreachable today because this kind is only
+                    // offered when the runtime exists - which is exactly the
+                    // invariant worth asserting rather than relying on.
+                    guard let ane else { throw Failure.noANERuntime }
+                    _ = try await ane.run(item: item)
                 case .generate:
                     guard let gpu else { throw Failure.noGPURuntime }
                     let prompt = item["prompt"]?.stringValue ?? ""

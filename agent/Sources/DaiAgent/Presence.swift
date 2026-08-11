@@ -32,6 +32,20 @@ public enum WorkKind: String, Sendable, CaseIterable {
     /// `embed` runs on the ANE. The other two are GPU work and are confined to
     /// states where nobody is at the machine.
     public var isGPU: Bool { self != .embed }
+
+    /// Whether anything in this build can actually run the kind.
+    ///
+    /// `render` is declared throughout - the schema accepts it, the scheduler
+    /// treats it as GPU work, the policy tables permit it in LOCKED and ABSENT
+    /// - and implemented nowhere. That is a deliberate position rather than an
+    /// oversight: the design is that adding a kind needs a runtime, a policy row
+    /// and a unit-sizing rule, and only the last two exist.
+    ///
+    /// Stated here so the difference between "the policy would allow this" and
+    /// "this machine would attempt it" is a value that can be read and tested,
+    /// rather than something a reader has to infer from a `throw` buried in the
+    /// batch loop.
+    public var isImplemented: Bool { self != .render }
 }
 
 public enum QoS: String, Sendable { case background, standard }
@@ -163,12 +177,39 @@ public func effectivePolicy(_ state: PresenceState, _ s: Signals) -> StatePolicy
 
 /// Work kinds this state permits. The control plane applies the same rule, and
 /// the stricter of the two wins.
+///
+/// A statement about policy, not about this machine. It answers "would a node in
+/// this state be allowed to do it", which is why `render` appears: rendering is
+/// GPU work and LOCKED and ABSENT permit GPU work. Whether any node could
+/// actually run it is a different question, answered by ``runnableKinds(_:hasGPU:hasANE:)``.
 public func permittedKinds(_ state: PresenceState, policy: StatePolicy? = nil) -> [WorkKind] {
-    let p = policy ?? defaultPolicy[state]!
+    permittedKinds(policy: policy ?? defaultPolicy[state]!)
+}
+
+public func permittedKinds(policy p: StatePolicy) -> [WorkKind] {
     var kinds: [WorkKind] = []
     if p.ane { kinds.append(.embed) }
     if p.gpu && p.dutyMax > 0 { kinds.append(contentsOf: [.generate, .render]) }
     return kinds
+}
+
+/// What this machine will actually attempt: what policy permits, narrowed to
+/// kinds that exist and have a runtime here.
+///
+/// The distinction is not pedantry. Both numbers get reported to a person
+/// diagnosing a machine that is doing nothing, and they have entirely different
+/// causes: "policy forbids it" is answered by waiting or by unplugging a
+/// monitor, "there is no runtime for it" is answered by installing one. A single
+/// line conflating the two sent a reader looking at presence when the machine
+/// had no Metal toolchain.
+///
+/// This is also what the node offers the scheduler, so it is never handed work
+/// it must immediately give back.
+public func runnableKinds(_ p: StatePolicy, hasGPU: Bool, hasANE: Bool) -> [WorkKind] {
+    permittedKinds(policy: p).filter { kind in
+        guard kind.isImplemented else { return false }
+        return kind.isGPU ? hasGPU : hasANE
+    }
 }
 
 /// Applies hysteresis so the agent does not flap between states.

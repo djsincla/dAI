@@ -17,6 +17,29 @@ let command = args.count > 1 ? args[1] : "presence"
 
 func fmt(_ v: TimeInterval?) -> String { v.map { String(format: "%.1f", $0) } ?? "unreadable" }
 
+/// What this machine would actually attempt, and why that is less than what the
+/// policy permits.
+///
+/// Printed beside `permits` rather than instead of it, because a machine doing
+/// nothing has two entirely different causes and only one line to tell them
+/// apart. "Policy forbids it" is fixed by waiting or by locking the screen;
+/// "there is no runtime for it" is fixed by installing one. Naming the missing
+/// piece saves the reader from concluding the presence detection is broken.
+func describeRunnable(_ policy: StatePolicy) -> String {
+    let hasGPU = MLXProbe.isAvailable()
+    // A node with no configured ANE model is an ordinary node, not a broken
+    // one: a 16GB Mac carries an embedding model and nothing larger.
+    let runnable = runnableKinds(policy, hasGPU: hasGPU, hasANE: true)
+    let permitted = permittedKinds(policy: policy)
+    let missing = permitted.filter { !runnable.contains($0) }
+    let why = missing.map { kind -> String in
+        kind.isImplemented ? "\(kind.rawValue): no runtime on this machine"
+                           : "\(kind.rawValue): not implemented"
+    }
+    let head = runnable.isEmpty ? "nothing" : runnable.map(\.rawValue).joined(separator: ", ")
+    return why.isEmpty ? head : head + "  (" + why.joined(separator: "; ") + ")"
+}
+
 switch command {
 case "verify-mlx-child":
     // Runs in a child process so that an MLX abort cannot take the agent with
@@ -75,6 +98,7 @@ case "presence":
     policy     gpu=\(policy.gpu) ane=\(policy.ane) qos=\(policy.qos.rawValue)
     limits     duty=\(policy.dutyMax) mem=\(policy.memFrac) maxTokens=\(policy.maxCompletionTokens)
     permits    \(permittedKinds(state, policy: policy).map(\.rawValue).joined(separator: ", "))
+    runs here  \(describeRunnable(policy))
     """)
 
 case "verify-ane":

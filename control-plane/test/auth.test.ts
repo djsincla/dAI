@@ -121,6 +121,36 @@ describe('a fresh deployment', () => {
     expect(r.status).toBe(400)
   })
 
+  it('seeds a deployment whose accounts have no password', async () => {
+    // The situation a real deployment is in on day one, and the one that was
+    // never reached: seeding lived only inside migrate(), which nothing on the
+    // running path calls. The schema gets applied by hand, the seeding step
+    // does not, and the console has no credential that will sign in. Only the
+    // test databases ever had a bootstrap account, which is the worst possible
+    // place for this to work and nowhere else.
+    const { ensureBootstrapAdmin } = await import('../src/lib/db.js')
+    await db.query(`UPDATE users SET password_hash = NULL, must_change_password = false`)
+    expect((await post('/login', { username: 'admin', password: 'admin' })).status).toBe(401)
+
+    await ensureBootstrapAdmin(db)
+
+    const r = await post('/login', { username: 'admin', password: 'admin' })
+    expect(r.status).toBe(200)
+    // Seeded into the forced-change state, not into a usable console.
+    expect((await r.json()).mustChangePassword).toBe(true)
+  })
+
+  it('seeds on every server start, not only when somebody runs a migration', async () => {
+    // Asserted against the startup block itself, because that block only runs
+    // when the module is the process entry point and cannot be exercised from
+    // here. A weak test for a wiring mistake that cost a locked-out console.
+    const { readFileSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const server = readFileSync(join(import.meta.dirname, '../src/server.ts'), 'utf8')
+    const startup = server.slice(server.indexOf('import.meta.url === `file://'))
+    expect(startup).toContain('ensureBootstrapAdmin(db)')
+  })
+
   it('will not seed a second time on an established fleet', async () => {
     // Otherwise every migration re-opens a known-password account.
     const { ensureBootstrapAdmin } = await import('../src/lib/db.js')

@@ -172,16 +172,57 @@ export async function manifestFor(db: Db, jobId: string): Promise<AttachmentEntr
  * them, which is what makes sharing a texture library safe.
  */
 export async function releaseInputs(db: Db, jobId: string): Promise<{ blobsDeleted: number }> {
+  // The hashes this job held, taken before the rows go, so they can be
+  // considered for deletion immediately rather than waiting out the grace
+  // period the periodic sweep needs. These were referenced by a finished job,
+  // so they are certainly not a submission in progress.
+  const { rows: held } = await db.query(
+    `SELECT sha256 FROM job_attachments WHERE job_id=$1`, [jobId])
   await db.query(`DELETE FROM job_attachments WHERE job_id=$1`, [jobId])
-  return collectGarbage(db)
+  return deleteUnreferenced(db, (held as { sha256: string }[]).map((r) => r.sha256))
 }
 
-/** Blobs no live job references. */
-export async function collectGarbage(db: Db): Promise<{ blobsDeleted: number }> {
+/**
+ * How long an uploaded blob is safe before anything references it.
+ *
+ * A submitter uploads its content and *then* submits the job, so between the
+ * two there is a window in which a blob is referenced by nothing at all.
+ * Collecting on that basis alone deleted a forty gigabyte scene fifteen seconds
+ * into a submission that took minutes, and the submission then failed saying
+ * nothing had been uploaded.
+ */
+export function uploadGrace(): number {
+  return Number(process.env.DAI_BLOB_GRACE_S ?? 3600)
+}
+
+/**
+ * Blobs no live job references and no submission is likely to.
+ *
+ * The age check is what makes this safe to run on a timer. Without it the sweep
+ * races every upload it does not yet have a job for.
+ */
+export async function collectGarbage(
+  db: Db, now = new Date(),
+): Promise<{ blobsDeleted: number }> {
+  const { rows } = await db.query(
+    `SELECT sha256 FROM attachment_blobs b
+      WHERE NOT EXISTS (SELECT 1 FROM job_attachments a WHERE a.sha256 = b.sha256)
+        AND b.last_used_at < $1`,
+    [new Date(now.getTime() - uploadGrace() * 1000)],
+  )
+  return deleteUnreferenced(db, (rows as { sha256: string }[]).map((r) => r.sha256))
+}
+
+/** Delete these, if nothing references them any more. */
+async function deleteUnreferenced(
+  db: Db, candidates: string[],
+): Promise<{ blobsDeleted: number }> {
+  if (candidates.length === 0) return { blobsDeleted: 0 }
   const { rows } = await db.query(
     `DELETE FROM attachment_blobs b
-      WHERE NOT EXISTS (SELECT 1 FROM job_attachments a WHERE a.sha256 = b.sha256)
-      RETURNING sha256`)
+      WHERE b.sha256 = ANY($1::text[])
+        AND NOT EXISTS (SELECT 1 FROM job_attachments a WHERE a.sha256 = b.sha256)
+      RETURNING sha256`, [candidates])
   let deleted = 0
   for (const row of rows as { sha256: string }[]) {
     const path = blobPath(row.sha256)

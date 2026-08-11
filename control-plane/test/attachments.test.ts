@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Db } from '../src/lib/db.js'
 import {
   blobPath, collectGarbage, expireOutputs, hashOf, isSafeRelativePath, outputPath,
+  uploadGrace,
 } from '../src/lib/attachments.js'
 import { SPECIFICATION_VERSION, type JobTemplate } from '../src/lib/openjd.js'
 import { type Fixtures, appFor, freshDb, seed } from './helpers.js'
@@ -300,9 +301,105 @@ describe('a job holding content only while it needs it', () => {
     expect(r.status).toBe(404)
   })
 
+  it('does not delete an upload that has not been submitted yet', async () => {
+    // The bug this exists for. A submitter uploads its content and then submits
+    // the job, so between the two the blob is referenced by nothing. The sweep
+    // runs every fifteen seconds; an upload of any size takes longer than that.
+    // Collecting on "unreferenced" alone deleted the scene mid-submission, and
+    // the submission then failed saying nothing had been uploaded.
+    const bytes = Buffer.from('a scene still being uploaded')
+    await upload(bytes)
+
+    expect((await collectGarbage(db)).blobsDeleted).toBe(0)
+    expect(existsSync(blobPath(hashOf(bytes))!)).toBe(true)
+
+    // And it still works once submitted, which is the case that must not have
+    // been broken by fixing the other one.
+    const r = await fetch(`${base}/admin/v1/jobs/openjd`, {
+      method: 'POST', headers: asUser(),
+      body: JSON.stringify({
+        poolId: fx.poolId, template,
+        attachments: [{ path: 'shot.blend', sha256: hashOf(bytes) }],
+      }),
+    })
+    expect(r.status).toBe(201)
+  })
+
+  it('does delete an upload nobody ever submitted', async () => {
+    // The other half: an abandoned submission must not be kept either. Only
+    // the window is protected, not the content.
+    const bytes = Buffer.from('an upload nobody used')
+    await upload(bytes)
+    await db.query(
+      `UPDATE attachment_blobs SET last_used_at = now() - ($1 || ' seconds')::interval
+        WHERE sha256 = $2`, [uploadGrace() + 60, hashOf(bytes)])
+
+    expect((await collectGarbage(db)).blobsDeleted).toBe(1)
+    expect(existsSync(blobPath(hashOf(bytes))!)).toBe(false)
+  })
+
+  it('deletes a finished job\'s content without waiting out the grace period', async () => {
+    // A job that finishes inside the upload window still releases immediately:
+    // its content was referenced by a job that is over, so it is certainly not
+    // a submission in progress.
+    const { job, sha } = await submit()
+    await db.query(`DELETE FROM work_units WHERE job_id=$1`, [job.id])
+    const { finishIfDone } = await import('../src/lib/attachments.js')
+    expect((await finishIfDone(db, job.id)).blobsDeleted).toBe(1)
+    expect(existsSync(blobPath(sha)!)).toBe(false)
+  })
+
+  it('refuses to guess which scene to open when several are attached', async () => {
+    // Picking the first silently means rendering a different scene from the one
+    // the submitter meant, and nothing downstream says so: the frames simply
+    // come out wrong.
+    const a = Buffer.from('scene one')
+    const b2 = Buffer.from('scene two')
+    await upload(a)
+    await upload(b2)
+    const r = await fetch(`${base}/admin/v1/jobs/openjd`, {
+      method: 'POST', headers: asUser(),
+      body: JSON.stringify({
+        poolId: fx.poolId, template,
+        attachments: [{ path: 'shot.blend', sha256: hashOf(a) },
+                      { path: 'shot_old.blend', sha256: hashOf(b2) }],
+      }),
+    })
+    expect(r.status).toBe(400)
+    const detail = (await r.json()).detail
+    expect(detail).toContain('more than one scene')
+    expect(detail).toContain('shot_old.blend')
+  })
+
+  it('takes the one named explicitly when there are several', async () => {
+    const a = Buffer.from('scene one')
+    const b2 = Buffer.from('scene two')
+    await upload(a)
+    await upload(b2)
+    const r = await fetch(`${base}/admin/v1/jobs/openjd`, {
+      method: 'POST', headers: asUser(),
+      body: JSON.stringify({
+        poolId: fx.poolId, template, entryPath: 'shot_old.blend',
+        attachments: [{ path: 'shot.blend', sha256: hashOf(a) },
+                      { path: 'shot_old.blend', sha256: hashOf(b2) }],
+      }),
+    })
+    expect(r.status).toBe(201)
+    const { rows } = await db.query(`SELECT entry_path FROM jobs WHERE id=$1`,
+      [(await r.json()).id])
+    expect(rows[0].entry_path).toBe('shot_old.blend')
+  })
+
   it('sweeps content left behind by a job that was deleted', async () => {
+    // Past the grace period, because this test previously asserted that a
+    // fresh upload is collected at once - which is the behaviour that deleted
+    // scenes out from under submissions in progress.
     const bytes = Buffer.from('left behind')
     await upload(bytes)
+    await db.query(
+      `UPDATE attachment_blobs SET last_used_at = now() - ($1 || ' seconds')::interval
+        WHERE sha256 = $2`, [uploadGrace() + 60, hashOf(bytes)])
+
     expect(existsSync(blobPath(hashOf(bytes))!)).toBe(true)
     expect((await collectGarbage(db)).blobsDeleted).toBe(1)
     expect(existsSync(blobPath(hashOf(bytes))!)).toBe(false)

@@ -1,4 +1,8 @@
 import { framesFor, outputsRoot, registerScene, sceneById } from '../lib/scenes.js'
+import {
+  attach, blobPath, expireOutputs, hashOf, outputPath, putBlob, retentionAfterCollection,
+} from '../lib/attachments.js'
+import { resolve as resolveOpenJD, frameOf, type JobTemplate } from '../lib/openjd.js'
 import { safePath } from '../lib/repository.js'
 import { existsSync } from 'node:fs'
 import { Router } from 'express'
@@ -1033,6 +1037,124 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
     res.status(201).json(result.scene)
   })
 
+  /**
+   * Upload one piece of a job's content, named by its own hash.
+   *
+   * Content-addressed so a resubmission after a lighting tweak uploads the file
+   * that changed rather than the bundle, and so two jobs sharing a texture
+   * library store it once. A submitter asks what is already here, sends the
+   * rest, and then submits the job.
+   */
+  r.put('/blobs/:sha256', async (req, res) => {
+    const body = req.body as Buffer
+    if (!Buffer.isBuffer(body) || body.length === 0) {
+      res.status(400).json({ error: 'bad_request', detail: 'no bytes' })
+      return
+    }
+    const stored = await putBlob(db, req.params.sha256!.toLowerCase(), body)
+    if ('error' in stored) {
+      res.status(400).json({ error: 'bad_request', detail: stored.error })
+      return
+    }
+    res.json(stored)
+  })
+
+  /** Which of these the fleet already holds, so a submitter sends only the rest. */
+  r.post('/blobs/missing', async (req, res) => {
+    const wanted = ((req.body as { sha256s?: string[] })?.sha256s ?? [])
+      .map((s) => String(s).toLowerCase())
+    const { rows } = await db.query(
+      `SELECT sha256 FROM attachment_blobs WHERE sha256 = ANY($1::text[])`, [wanted])
+    const have = new Set((rows as { sha256: string }[]).map((r) => r.sha256))
+    res.json({ missing: wanted.filter((s) => !have.has(s)) })
+  })
+
+  /**
+   * Submit an Open Job Description job template.
+   *
+   * The point of speaking the standard is that a studio's existing submitter
+   * works against this fleet without knowing what this fleet is.
+   *
+   * The one departure is documented in the library and enforced here: the
+   * template's `onRun.command` is resolved to an adapter this fleet has, never
+   * executed. These machines belong to the people sitting at them.
+   */
+  r.post('/jobs/openjd', async (req, res) => {
+    const b = req.body as {
+      poolId: string
+      template: JobTemplate
+      parameterValues?: Record<string, string | number>
+      attachments?: { path: string; sha256: string; dataFlow?: 'IN' | 'OUT' | 'INOUT' }[]
+      entryPath?: string
+      source?: string
+    }
+    if (!(await requireRole(db, req.user!.id, b.poolId, 'operator'))) {
+      res.status(403).json({ error: 'forbidden', detail: 'operator role required on this pool' })
+      return
+    }
+
+    const resolved = resolveOpenJD(b.template, b.parameterValues ?? {})
+    if ('error' in resolved) {
+      res.status(400).json({ error: 'bad_request', detail: resolved.error })
+      return
+    }
+    const attachments = b.attachments ?? []
+    // The file the adapter opens, chosen once here rather than worked out on
+    // each node: two machines guessing differently would render two different
+    // scenes under one job and nothing downstream would say so.
+    const entry = b.entryPath
+      ?? attachments.filter((a) => a.path.toLowerCase().endsWith('.blend')).map((a) => a.path)[0]
+    if (!entry) {
+      res.status(400).json({ error: 'bad_request',
+                             detail: 'no scene among the attachments; name one with entryPath' })
+      return
+    }
+    if (!attachments.some((a) => a.path === entry)) {
+      res.status(400).json({ error: 'bad_request', detail: `${entry} is not attached` })
+      return
+    }
+
+    const { rows } = await db.query(
+      `INSERT INTO jobs (pool_id, kind, submitted_by, label, source, openjd_template, entry_path)
+       VALUES ($1,'render',$2,$3,$4,$5,$6) RETURNING id`,
+      [b.poolId, req.user!.id, resolved.job.name, b.source ?? 'openjd',
+       JSON.stringify(b.template), entry],
+    )
+    const jobId = rows[0]!.id as string
+
+    const attached = await attach(db, jobId, attachments)
+    if ('error' in attached) {
+      // Removed rather than left as a job that can never run. A submission that
+      // named content nobody uploaded would lease a machine, fetch, fail, and
+      // repeat on the next machine.
+      await db.query(`DELETE FROM jobs WHERE id=$1`, [jobId])
+      res.status(400).json({ error: 'bad_request', detail: attached.error })
+      return
+    }
+
+    // One frame per unit: a unit is the granularity at which work is thrown
+    // away when somebody sits down at the machine, and one frame is minutes.
+    let position = 0
+    for (const step of resolved.job.steps) {
+      for (const task of step.tasks) {
+        const frame = frameOf(task)
+        if (frame === null) {
+          await db.query(`DELETE FROM jobs WHERE id=$1`, [jobId])
+          res.status(400).json({ error: 'bad_request',
+                                 detail: `step ${step.name} has no frame parameter` })
+          return
+        }
+        await db.query(
+          `INSERT INTO work_units (job_id, kind, payload, position) VALUES ($1,'render',$2,$3)`,
+          [jobId, JSON.stringify([{ id: `${step.name}-${frame}`, frame,
+                                    parameters: task.parameters }]), position],
+        )
+        position += 1000
+      }
+    }
+    res.status(201).json(await jobSummary(db, jobId))
+  })
+
   r.get('/jobs/:jobId/outputs', async (req, res) => {
     const { rows: job } = await db.query(`SELECT 1 FROM jobs WHERE id=$1`, [req.params.jobId])
     if (job.length === 0) {
@@ -1062,11 +1184,18 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
       res.status(404).json({ error: 'not_found' })
       return
     }
-    const full = safePath(outputsRoot(), jobId, name)
+    const full = outputPath(jobId, name)
     if (!full || !existsSync(full)) {
       res.status(404).json({ error: 'not_found', detail: 'recorded but not on disk' })
       return
     }
+    // Collection starts the clock. The frames are the only thing anybody
+    // wanted, and once they have been taken there is no reason for this fleet
+    // to keep a copy of somebody else's work.
+    await db.query(
+      `UPDATE work_outputs SET collected_at = COALESCE(collected_at, now())
+        WHERE job_id=$1 AND name=$2`, [jobId, name])
+    res.setHeader('x-dai-retention-seconds', String(retentionAfterCollection()))
     res.sendFile(full)
   })
 

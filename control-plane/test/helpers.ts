@@ -43,10 +43,43 @@ export async function freshDb(): Promise<Db> {
       await admin.end()
     }
   }
+  await claimDatabase()
   const db = createPool(DATABASE_URL)
   await reset(db)
   return db
 }
+
+/**
+ * One test run at a time against this database.
+ *
+ * `reset` drops the whole schema, so a second suite starting while a first is
+ * running destroys it mid-flight. The victim sees tables it created seconds ago
+ * reported as nonexistent, which looks like a dozen unrelated bugs and is none
+ * of them. That is not hypothetical: two sessions working on this repository at
+ * once produced exactly that, and so would two CI jobs.
+ *
+ * A Postgres advisory lock, held on its own connection for the life of the
+ * process and released when it exits. Concurrent runs queue instead of
+ * corrupting each other, so the failure mode is "slower" rather than "wrong".
+ *
+ * TEST_DATABASE_URL still gives a run its own database, which is faster than
+ * waiting. This is the safety net for when nobody remembered to set it.
+ */
+let lockHeld: Promise<void> | undefined
+
+function claimDatabase(): Promise<void> {
+  lockHeld ??= (async () => {
+    const pool = createPool(DATABASE_URL)
+    const client = await pool.connect()
+    // Deliberately never released. The connection is held until the process
+    // ends, which is exactly the scope the lock needs to cover.
+    await client.query('SELECT pg_advisory_lock($1)', [LOCK_KEY])
+  })()
+  return lockHeld
+}
+
+/** Arbitrary, and only has to be the same number in every copy of this file. */
+const LOCK_KEY = 7_314_159
 
 export function appFor(db: Db): Express {
   process.env.DAI_TRUST_FINGERPRINT_HEADER = '1'

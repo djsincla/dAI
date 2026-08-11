@@ -63,6 +63,7 @@ public actor Worker {
     private var qosBackground: Bool?
     private var capability: [String: Double] = [:]
     private var lastHeartbeat: TimeInterval = 0
+    private var lastCacheSweep: TimeInterval = 0
     /// Last reported set of permitted kinds, so a change can be logged once
     /// rather than every poll.
     private var lastKinds: [WorkKind]?
@@ -85,6 +86,8 @@ public actor Worker {
     private let renderer: RenderRuntime?
     /// Fetches the scene a render unit needs, on the critical path.
     private let scenes: SceneSync?
+    /// Fetches a job's content, and deletes it again when the job is over.
+    private let attachments: AttachmentSync?
 
     /// One transfer at a time. Without this the loop would launch another every
     /// pass while the first was still running, and a slow link would end up
@@ -111,12 +114,14 @@ public actor Worker {
                 modelSync: ModelSync? = nil,
                 renderer: RenderRuntime? = nil,
                 scenes: SceneSync? = nil,
+                attachments: AttachmentSync? = nil,
                 renewer: (any CertificateRenewing)? = nil,
                 sleepAssertion: SleepAssertion = SleepAssertion(),
                 promoteAfter: TimeInterval = idlePromoteSeconds) {
         self.renewer = renewer
         self.renderer = renderer
         self.scenes = scenes
+        self.attachments = attachments
         self.sleepAssertion = sleepAssertion
         self.modelSync = modelSync
         self.status = status
@@ -154,7 +159,7 @@ public actor Worker {
     /// attempt and the diagnostic commands cannot disagree with the loop.
     private func availableKinds(_ p: StatePolicy) -> [WorkKind] {
         runnableKinds(p, hasGPU: gpu != nil, hasANE: ane != nil,
-                      hasRenderer: renderer != nil && scenes != nil)
+                      hasRenderer: renderer != nil && (attachments != nil || scenes != nil))
     }
 
     private func applyQoS(_ p: StatePolicy, kind: WorkKind) {
@@ -212,8 +217,7 @@ public actor Worker {
     /// reporting the item complete before the bytes are safe would lose it
     /// quietly - the job would read 100% and the sequence would have a hole.
     private func renderOne(_ item: WorkItem, lease: ControlPlane.Lease) async throws {
-        guard let renderer, let scenes else { throw Failure.noRenderer }
-        guard let sceneId = lease.sceneId else { throw Failure.noScene }
+        guard let renderer else { throw Failure.noRenderer }
         // The one value a submission contributes to a command line, and it is a
         // number before it gets anywhere near one.
         guard let frame = item["frame"]?.intValue else { throw Failure.notAFrame }
@@ -235,7 +239,19 @@ public actor Worker {
         }
         defer { watchdog.cancel() }
 
-        let ready = try await scenes.ensure(sceneId: sceneId)
+        // Content comes with the job and leaves with it. The scene catalogue is
+        // still read when a job was submitted the old way, so a queue that
+        // spans the change drains rather than failing half of itself.
+        let ready: (entry: URL, root: URL)
+        if let attachments, let jobId = lease.jobId {
+            let got = try await attachments.ensure(jobId: jobId)
+            ready = (got.entry, got.root)
+        } else if let scenes, let sceneId = lease.sceneId {
+            let got = try await scenes.ensure(sceneId: sceneId)
+            ready = (got.entry, got.root)
+        } else {
+            throw Failure.noScene
+        }
         // Written beside the scene rather than into it, so a re-registered
         // scene never picks up somebody's output as one of its own files.
         let out = ready.root.deletingLastPathComponent()
@@ -248,6 +264,24 @@ public actor Worker {
             unitId: lease.unitId, name: outcome.file.lastPathComponent, file: outcome.file)
         log(String(format: "frame %d in %.1fs, %.1fMB returned",
                    frame, outcome.seconds, Double(bytes) / 1_048_576))
+    }
+
+    /// Delete job content nothing is coming back for.
+    ///
+    /// `release` covers every job this machine sees the end of. This covers the
+    /// ones it does not: a job finished by another node, one cancelled, or an
+    /// agent restarted mid-render. Without it, "the fleet does not keep your
+    /// assets" would be true only of the tidy cases, which is the half that
+    /// does not need a promise.
+    ///
+    /// Hourly, because it walks a directory and the thing it is looking for is
+    /// a day old.
+    private func sweepJobCachesIfDue() async {
+        guard let attachments else { return }
+        let now = Date().timeIntervalSince1970
+        guard now - lastCacheSweep >= 3600 else { return }
+        lastCacheSweep = now
+        await attachments.sweep()
     }
 
     /// Whether this kind is still allowed, right now.
@@ -346,6 +380,7 @@ public actor Worker {
             let reading = presence()
             let statePolicy = policy[reading.state] ?? reading.policy
             await renewIfDue()
+            await sweepJobCachesIfDue()
             await syncIfDue(reading)
             await syncModelsIfDue(reading)
 
@@ -579,8 +614,14 @@ public actor Worker {
             let key = lease.kind == .generate ? (await gpu?.name ?? "generate") : "ane:embed"
             capability[key] = Double(completed.count) / seconds
         }
-        try? await controlPlane.report(unitId: lease.unitId, completed: completed,
-                                       unfinished: failed, seconds: seconds)
+        let outcome = try? await controlPlane.report(unitId: lease.unitId, completed: completed,
+                                                     unfinished: failed, seconds: seconds)
+        // Deleted the moment the job is over rather than left for the sweep.
+        // The difference is a day of somebody else's disk, on a machine the
+        // agent is a guest on.
+        if outcome?.jobFinished == true, let jobId = lease.jobId, let attachments {
+            await attachments.release(jobId: jobId)
+        }
         status.markReachable()
         log("\(lease.kind.rawValue)"
             + (lease.jobLabel.map { " [\($0)]" } ?? "")

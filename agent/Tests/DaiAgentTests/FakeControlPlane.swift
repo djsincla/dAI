@@ -66,9 +66,10 @@ actor FakeControlPlane: ControlPlaneClient {
 
     @discardableResult
     func report(unitId: String, completed: [WorkItem], unfinished: [WorkItem],
-                seconds: Double, failed: Bool) async throws -> Int {
+                seconds: Double, failed: Bool) async throws -> ControlPlane.ReportOutcome {
         results.append((unitId, completed.count, unfinished.count))
-        return unfinished.count
+        return ControlPlane.ReportOutcome(requeued: unfinished.count,
+                                          jobFinished: reportOutcome.jobFinished)
     }
 
     func awaitDispatch() async throws -> ControlPlane.Dispatch? {
@@ -129,6 +130,37 @@ actor FakeControlPlane: ControlPlaneClient {
         guard let data = sceneBytes[path] else { throw NoScene() }
         // Written to `<destination>.partial`, matching the real client: the
         // caller renames only once the hash checks out.
+        let temp = destination.appendingPathExtension("partial")
+        try? FileManager.default.createDirectory(
+            at: temp.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: temp)
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// A job's content, keyed by hash rather than by path, which is what the
+    /// real one serves.
+    var attachments: ControlPlane.SceneManifest?
+    var blobs: [String: Data] = [:]
+    private(set) var blobRequests: [String] = []
+    /// Set so a test can watch a node delete a finished job's content.
+    var reportOutcome = ControlPlane.ReportOutcome(requeued: 0, jobFinished: false)
+
+    func serveAttachments(_ manifest: ControlPlane.SceneManifest, blobs: [String: Data]) {
+        attachments = manifest
+        self.blobs = blobs
+    }
+
+    func finishJobOnReport() { reportOutcome = ControlPlane.ReportOutcome(requeued: 0,
+                                                                          jobFinished: true) }
+
+    func jobAttachments(jobId: String) async throws -> ControlPlane.SceneManifest {
+        guard let attachments else { throw NoScene() }
+        return attachments
+    }
+
+    func downloadBlob(sha256: String, to destination: URL) async throws -> String {
+        blobRequests.append(sha256)
+        guard let data = blobs[sha256] else { throw NoScene() }
         let temp = destination.appendingPathExtension("partial")
         try? FileManager.default.createDirectory(
             at: temp.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -198,7 +230,8 @@ actor FailingControlPlane: ControlPlaneClient {
     func leaseWork(kinds: [WorkKind]) async throws -> ControlPlane.Lease? { throw Unreachable() }
     var lastLeaseReason: String? { nil }
     func report(unitId: String, completed: [WorkItem], unfinished: [WorkItem],
-                seconds: Double, failed: Bool) async throws -> Int { throw Unreachable() }
+                seconds: Double, failed: Bool) async throws
+        -> ControlPlane.ReportOutcome { throw Unreachable() }
     func awaitDispatch() async throws -> ControlPlane.Dispatch? { throw Unreachable() }
     func reportDispatch(id: String, text: String?, error: String?,
                         promptTokens: Int, completionTokens: Int,
@@ -215,6 +248,12 @@ actor FailingControlPlane: ControlPlaneClient {
     }
     func downloadSceneFile(sceneId: String, path: String,
                            to destination: URL) async throws -> String { throw Unreachable() }
+    func jobAttachments(jobId: String) async throws -> ControlPlane.SceneManifest {
+        throw Unreachable()
+    }
+    func downloadBlob(sha256: String, to destination: URL) async throws -> String {
+        throw Unreachable()
+    }
     @discardableResult
     func uploadOutput(unitId: String, name: String, file: URL) async throws -> Int {
         throw Unreachable()

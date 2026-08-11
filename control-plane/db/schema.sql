@@ -55,8 +55,24 @@ CREATE TABLE nodes (
     -- fractions of this, never of installed RAM.
     metal_working_set_gb  numeric,
     os_version            text,
-    tier                  text NOT NULL DEFAULT 'harvest'
-                          CHECK (tier IN ('harvest', 'cluster')),
+    -- Which kinds of work this machine is offered for, and it may be offered
+    -- for both.
+    --
+    -- A dedicated box is cluster-only. A workstation is normally harvest-only.
+    -- Putting a workstation in both is a deliberate choice with a consequence
+    -- worth stating: cluster membership means presence does not gate serving,
+    -- so an interactive request can land on that machine while its owner is
+    -- using it. That is the trade the operator is making, not an accident.
+    -- Batch work stays presence-gated either way.
+    tiers                 text[] NOT NULL DEFAULT ARRAY['harvest']::text[]
+                          CHECK (tiers <@ ARRAY['harvest','cluster']::text[]
+                                 AND array_length(tiers, 1) >= 1),
+    -- Derived, so the many places that ask "is this a cluster node" keep asking
+    -- one question and getting today's answer. `tiers` is the truth; this is the
+    -- reading of it that the scheduler, the router and the agent already use.
+    tier                  text GENERATED ALWAYS AS
+                          (CASE WHEN 'cluster' = ANY(tiers) THEN 'cluster'
+                                ELSE 'harvest' END) STORED,
     state                 text NOT NULL DEFAULT 'pending'
                           CHECK (state IN ('pending','active','cordoned','paused',
                                            'offline','superseded')),
@@ -562,3 +578,29 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS completed_at timestamptz;
 
 -- When the frames were handed back, which starts the clock on deleting them.
 ALTER TABLE work_outputs ADD COLUMN IF NOT EXISTS collected_at timestamptz;
+
+
+-- ---------------------------------------------------------------------------
+-- Plural tiers, for databases created before they were
+--
+-- A machine used to be in exactly one tier. It may now be in both, so `tiers`
+-- becomes the truth and `tier` becomes a reading of it. Guarded so it runs once:
+-- the column is only migrated while the old scalar is still a real column.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+              WHERE table_name = 'nodes' AND column_name = 'tier'
+                AND is_generated = 'NEVER')
+  THEN
+    ALTER TABLE nodes ADD COLUMN IF NOT EXISTS tiers text[];
+    UPDATE nodes SET tiers = ARRAY[tier]::text[] WHERE tiers IS NULL;
+    ALTER TABLE nodes DROP COLUMN tier;
+    ALTER TABLE nodes ALTER COLUMN tiers SET NOT NULL;
+    ALTER TABLE nodes ALTER COLUMN tiers SET DEFAULT ARRAY['harvest']::text[];
+    ALTER TABLE nodes ADD CONSTRAINT nodes_tiers_check
+      CHECK (tiers <@ ARRAY['harvest','cluster']::text[]
+             AND array_length(tiers, 1) >= 1);
+    ALTER TABLE nodes ADD COLUMN tier text GENERATED ALWAYS AS
+      (CASE WHEN 'cluster' = ANY(tiers) THEN 'cluster' ELSE 'harvest' END) STORED;
+  END IF;
+END $$;

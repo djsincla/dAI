@@ -245,3 +245,30 @@ func neverPermitsGPUWhileInputIsRecent(sequence: [Double]) {
     #expect(m.state == .locked)
     #expect(m.pollInterval == pollIntervalIdle)
 }
+
+/// What a machine is offered for, as the agent reads it.
+///
+/// Tiers became plural so a workstation can also be offered for cluster work.
+/// The agent asks one question of that - does presence gate me - and the answer
+/// has to survive the change, in both directions.
+struct NodeTierTests {
+    @Test func aMachineOfferedForClusterAtAllIsNeverPreempted() {
+        // Being in both is a real choice with a real consequence: an
+        // interactive request can arrive while somebody is using the machine.
+        // The agent honours the operator's decision rather than softening it,
+        // because a node that quietly declined would look like a broken node.
+        #expect(ControlPlane.NodeSelf(hostname: "orca", tiers: ["cluster"]).isCluster)
+        #expect(ControlPlane.NodeSelf(hostname: "rotorua",
+                                      tiers: ["harvest", "cluster"]).isCluster)
+        #expect(!ControlPlane.NodeSelf(hostname: "kim", tiers: ["harvest"]).isCluster)
+    }
+
+    @Test func aMachineOfferedForNothingIsTreatedAsHarvest() {
+        // The safe reading. A machine that somehow reports nothing must not be
+        // treated as never-preempted, because that is the answer that runs work
+        // on somebody who is sitting at their desk.
+        let none = ControlPlane.NodeSelf(hostname: "kim", tiers: [])
+        #expect(none.tiers == ["harvest"])
+        #expect(!none.isCluster)
+    }
+}

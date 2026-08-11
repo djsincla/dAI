@@ -643,6 +643,84 @@ export function groupMachines(nodes, pools, matcher) {
   }
 }
 
+/* -------------------------------------------------------------------- tiers */
+
+/**
+ * Which kinds of work a machine is offered for.
+ *
+ * Plural, and reads the old scalar too: a fleet part-way through an upgrade has
+ * agents and records of both shapes, and a view that showed nothing for the old
+ * ones would look like machines had lost their tier.
+ */
+export function tiersOf(node) {
+  if (Array.isArray(node?.tiers) && node.tiers.length > 0) return node.tiers
+  return [node?.tier ?? 'harvest']
+}
+
+export const TIERS = ['harvest', 'cluster']
+
+/** A machine offered for both is worth pointing at, because of what it costs. */
+export function inBothTiers(node) {
+  const tiers = tiersOf(node)
+  return tiers.includes('harvest') && tiers.includes('cluster')
+}
+
+/**
+ * Machines arranged by tier.
+ *
+ * A machine appears under every tier it is in, for the same reason it appears
+ * under every group: a view that hid the second one would disagree with the
+ * scheduler. Unlike groups there is no "in no tier" heading, because a machine
+ * must be in at least one - being offered for nothing is not a state the fleet
+ * can hold.
+ */
+export function tierMachines(nodes) {
+  return TIERS.map((tier) => ({
+    tier,
+    nodes: nodes.filter((n) => tiersOf(n).includes(tier)),
+  }))
+}
+
+/**
+ * What a tier means, in the terms the person changing it needs.
+ *
+ * The cluster line states a consequence rather than a definition. Putting a
+ * workstation in the cluster tier means an interactive request can land on it
+ * while its owner is using it, and somebody dragging a machine there is
+ * entitled to know that before they let go.
+ */
+export function describeTier(tier) {
+  return tier === 'cluster'
+    ? 'never preempted; presence does not gate serving, so a request can land '
+      + 'here while somebody is using the machine'
+    : 'borrowed while nobody is using it, and given back the moment they return'
+}
+
+/**
+ * The tiers a machine would have after a change, or null if the change is
+ * refused.
+ *
+ * Adding is what a drag means here: a machine dropped on the cluster tier is
+ * offered for cluster work *as well*, not moved. That is the difference from
+ * groups, where a drag moves a machine between them.
+ *
+ * Removing the last tier is refused rather than applied. A machine offered for
+ * nothing still runs, still heartbeats and never receives work, which looks
+ * exactly like a broken agent.
+ */
+export function tiersAfter(node, tier, action) {
+  const current = new Set(tiersOf(node))
+  if (action === 'add') {
+    if (current.has(tier)) return null
+    current.add(tier)
+  } else {
+    if (!current.has(tier)) return null
+    current.delete(tier)
+    if (current.size === 0) return null
+  }
+  return TIERS.filter((t) => current.has(t))
+}
+
 /* ------------------------------------------------------------- api explorer */
 
 /**

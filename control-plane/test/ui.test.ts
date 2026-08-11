@@ -7,6 +7,7 @@ import {
   surfaceOf,
 } from '../ui/view.js'
 import {
+  TIERS, describeTier, inBothTiers, tierMachines, tiersAfter, tiersOf,
   attentionItems, capacityOf, copyState, distributionOf, humanBytes, importCost,
   bucketFor, clampWindow, describeWindow, groupMachines, groupMismatches,
   groupMode, groupWarning, importProgress, isStale, isSynthetic, kindsFor,
@@ -849,5 +850,71 @@ describe('showing what came back', () => {
     expect(statusTone(200)).toBe('good')
     expect(statusTone(403)).toBe('warn')
     expect(statusTone(500)).toBe('bad')
+  })
+})
+
+
+/**
+ * Tiers, which are what a machine is offered for rather than what it is.
+ *
+ * A machine may be in both, and that is a choice with a consequence: cluster
+ * membership means presence does not gate serving, so an interactive request
+ * can land on a machine while its owner is using it. The view exists to make
+ * that visible before somebody makes it by accident.
+ */
+describe('what a machine is offered for', () => {
+  it('reads the plural field, and the old scalar too', () => {
+    // A fleet part-way through an upgrade has records of both shapes, and a
+    // view that showed nothing for the old ones would look like machines had
+    // lost their tier.
+    expect(tiersOf({ tiers: ['harvest', 'cluster'] })).toEqual(['harvest', 'cluster'])
+    expect(tiersOf({ tier: 'cluster' })).toEqual(['cluster'])
+    expect(tiersOf({})).toEqual(['harvest'])
+    expect(tiersOf({ tiers: [] })).toEqual(['harvest'])
+  })
+
+  it('shows a machine under every tier it is in', () => {
+    // The same rule groups follow: hiding the second one would make a view
+    // that disagrees with the scheduler.
+    const both = { id: 'a', tiers: ['harvest', 'cluster'] }
+    const harvest = { id: 'b', tiers: ['harvest'] }
+    const byTier = tierMachines([both, harvest])
+    expect(byTier.map((t) => t.tier)).toEqual(TIERS)
+    expect(byTier[0]!.nodes.map((n: any) => n.id)).toEqual(['a', 'b'])
+    expect(byTier[1]!.nodes.map((n: any) => n.id)).toEqual(['a'])
+  })
+
+  it('points out the machines that are in both', () => {
+    expect(inBothTiers({ tiers: ['harvest', 'cluster'] })).toBe(true)
+    expect(inBothTiers({ tiers: ['cluster'] })).toBe(false)
+    expect(inBothTiers({ tier: 'harvest' })).toBe(false)
+  })
+
+  it('says what the cluster tier costs, not what it is', () => {
+    // Somebody dragging a machine there is entitled to know before they let go.
+    expect(describeTier('cluster')).toContain('while somebody is using the machine')
+    expect(describeTier('harvest')).toContain('given back')
+  })
+
+  it('adds rather than moves, which is the difference from groups', () => {
+    expect(tiersAfter({ tiers: ['harvest'] }, 'cluster', 'add')).toEqual(['harvest', 'cluster'])
+    expect(tiersAfter({ tier: 'cluster' }, 'harvest', 'add')).toEqual(['harvest', 'cluster'])
+  })
+
+  it('keeps the order stable so the same machine reads the same way twice', () => {
+    expect(tiersAfter({ tiers: ['cluster'] }, 'harvest', 'add')).toEqual(['harvest', 'cluster'])
+  })
+
+  it('refuses to take away the last one', () => {
+    // A machine offered for nothing still runs, still heartbeats and never
+    // receives work, which looks exactly like a broken agent.
+    expect(tiersAfter({ tiers: ['harvest'] }, 'harvest', 'remove')).toBeNull()
+    expect(tiersAfter({ tiers: ['harvest', 'cluster'] }, 'cluster', 'remove'))
+      .toEqual(['harvest'])
+  })
+
+  it('refuses a change that would do nothing', () => {
+    expect(tiersAfter({ tiers: ['harvest'] }, 'harvest', 'add')).toBeNull()
+    expect(tiersAfter({ tiers: ['harvest'] }, 'cluster', 'remove')).toBeNull()
   })
 })

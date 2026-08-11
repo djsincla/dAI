@@ -539,7 +539,7 @@ case "serve":
         }
         if let me = try? await cp.whoami() {
             await channel.setCluster(me.isCluster)
-            print("serving as \(me.hostname) (\(me.tier) tier)"
+            print("serving as \(me.hostname) (\(me.tiers.joined(separator: " and ")))"
                 + (me.isCluster
                    ? ": never preempted, so presence does not gate this node"
                    : ": harvested, so this node only serves when nobody is using it"))

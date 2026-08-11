@@ -542,3 +542,101 @@ describe('authorization', () => {
     expect(r.status).toBe(403)
   })
 })
+
+/**
+ * Tiers, which say what a machine is offered for rather than what it is.
+ *
+ * A machine may be offered for both, and that is the decision this endpoint
+ * exists to record: cluster membership means presence does not gate serving,
+ * so an interactive request can land on the machine while its owner is using
+ * it. Batch work stays presence-gated, and the owner's pause still wins.
+ */
+describe('what a machine is offered for', () => {
+  let db: Db
+  let fx: Fixtures
+  let server: Server
+  let base: string
+
+  beforeEach(async () => {
+    db = await freshDb()
+    fx = await seed(db)
+    const g = await db.query(`INSERT INTO groups (name) VALUES ('ops') RETURNING id`)
+    await db.query(`INSERT INTO group_members VALUES ($1,$2)`, [g.rows[0].id, fx.operatorId])
+    await db.query(`INSERT INTO role_bindings VALUES ($1,$2,'operator')`,
+      [g.rows[0].id, fx.poolId])
+    const app = appFor(db)
+    server = await new Promise<Server>((r) => { const s = app.listen(0, () => r(s)) })
+    base = `http://127.0.0.1:${(server.address() as any).port}`
+  })
+  afterEach(async () => { await new Promise<void>((r) => server.close(() => r())) })
+  afterAll(async () => { await db?.end() })
+
+  const setTiers = (tiers: string[]) =>
+    fetch(`${base}/admin/v1/nodes/${fx.nodeId}/tiers`, {
+      method: 'PUT',
+      headers: { authorization: `Bearer ${fx.operatorToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ tiers }),
+    })
+
+  it('puts a machine in both, and the derived tier follows', async () => {
+    const r = await setTiers(['harvest', 'cluster'])
+    expect(r.status).toBe(200)
+    const node = await r.json()
+    expect(node.tiers).toEqual(['harvest', 'cluster'])
+    // The scheduler, the router and the agent all ask one question of `tier`,
+    // and a machine offered for cluster work must answer it the same way a
+    // dedicated box does. That is the whole meaning of being in both.
+    expect(node.tier).toBe('cluster')
+  })
+
+  it('a harvest-only machine reads as harvest', async () => {
+    expect((await (await setTiers(['harvest'])).json()).tier).toBe('harvest')
+  })
+
+  it('refuses to leave a machine offered for nothing', async () => {
+    // It would still run, still heartbeat and never receive work, which is
+    // indistinguishable from a broken agent.
+    //
+    // The refusal comes from the spec's own minItems rather than the handler,
+    // which is the better of the two: the contract says a machine is offered
+    // for at least one thing, so a client is told by the contract. The handler
+    // keeps its own check for callers that reach it another way.
+    const r = await setTiers([])
+    expect(r.status).toBe(400)
+    expect((await r.json()).detail).toContain('tiers')
+  })
+
+  it('refuses a tier it does not have', async () => {
+    expect((await setTiers(['harvest', 'gpu-farm'])).status).toBe(400)
+  })
+
+  it('does not count a tier twice', async () => {
+    const node = await (await setTiers(['cluster', 'cluster'])).json()
+    expect(node.tiers).toEqual(['cluster'])
+  })
+
+  it('records the change, because it is one somebody should be able to find', async () => {
+    await setTiers(['harvest', 'cluster'])
+    const { rows } = await db.query(
+      `SELECT detail FROM activity_log WHERE node_id=$1 AND event='node.tiers'`, [fx.nodeId])
+    expect(rows[0].detail.tiers).toEqual(['harvest', 'cluster'])
+  })
+
+  it('is refused to somebody with no role anywhere', async () => {
+    const { rows } = await db.query(
+      `INSERT INTO users (email, username) VALUES ('nobody@example.com','nobody')
+       RETURNING id`)
+    const { rows: tok } = await db.query(
+      `INSERT INTO auth_tokens (user_id, token_hash, kind, expires_at)
+       VALUES ($1, encode(sha256('rolelesstoken'::bytea),'hex'), 'session', now() + interval '1 hour')
+       RETURNING user_id`, [rows[0].id])
+    expect(tok).toHaveLength(1)
+
+    const r = await fetch(`${base}/admin/v1/nodes/${fx.nodeId}/tiers`, {
+      method: 'PUT',
+      headers: { authorization: 'Bearer rolelesstoken', 'content-type': 'application/json' },
+      body: JSON.stringify({ tiers: ['cluster'] }),
+    })
+    expect(r.status).toBe(403)
+  })
+})

@@ -766,13 +766,18 @@ async function signIn(event) {
       return
     }
     session.set(body.token)
+    // Read before the field is cleared. Clearing first filled the change form's
+    // "current password" with an empty string, so the only route out of a
+    // forced password change was blocked by a required field the person had no
+    // reason to think was empty.
+    const used = $('#login-pass').value
     $('#login-pass').value = ''
     signedInAs(body.username ?? body.email)
 
     if (body.mustChangePassword) {
       // Straight to the form rather than to a console that will refuse every
       // request. The current password is known here, so it is filled in.
-      $('#change-current').value = $('#login-pass').value
+      $('#change-current').value = used
       showGate('change')
       return
     }

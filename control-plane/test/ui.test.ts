@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   attentionItems, capacityOf, copyState, distributionOf, humanBytes, importCost,
@@ -573,5 +575,91 @@ describe('groups of machines', () => {
     expect(groupMode(pool())).toBe('rule')
     expect(groupMode(pool({ membership: { minMemoryGb: 32 } }))).toBe('rule')
     expect(groupMode(pool({ membership: { nodeIds: ['n-1'] } }))).toBe('list')
+  })
+})
+
+
+/**
+ * The page's own markup and stylesheet, checked against each other.
+ *
+ * `hidden` is how every overlay in this console is put away, and it is an
+ * attribute selector: the browser's `[hidden] { display: none }` loses to any
+ * class rule that sets `display`. That is not a hypothetical. `.gate` and
+ * `.gate-card` both set `display: grid`, so the sign-in overlay covered the
+ * console permanently and rendered the sign-in form and the change-password
+ * form stacked on top of each other, with no way past either.
+ *
+ * Nothing in a unit test of view.js could have caught that, because the bug was
+ * entirely in the cascade.
+ */
+describe('hidden actually hides', () => {
+  const css = readFileSync(join(import.meta.dirname, '../ui/app.css'), 'utf8')
+  const html = readFileSync(join(import.meta.dirname, '../ui/index.html'), 'utf8')
+
+  it('declares an override that outranks any layout rule', () => {
+    // `!important` rather than a more specific selector, because the next
+    // component to set `display` would otherwise bring the bug straight back.
+    expect(css).toMatch(/\[hidden\]\s*\{[^}]*display:\s*none\s*!important/)
+  })
+
+  it('puts the override before the rules it has to beat', () => {
+    // Equal weight is resolved by order, so an override declared at the bottom
+    // of the file would still work - but one declared before everything it
+    // governs cannot be undone by a later `!important` added in passing.
+    const override = css.search(/\[hidden\]\s*\{[^}]*display:\s*none\s*!important/)
+    const firstDisplay = css.search(/^\.[\w-]+[^{]*\{[^}]*display:/m)
+    expect(override).toBeGreaterThanOrEqual(0)
+    expect(override).toBeLessThan(firstDisplay)
+  })
+
+  it('covers every element the page hides', () => {
+    // The elements that carry `hidden` in the markup are the ones this has to
+    // hold for. Listed from the file rather than by hand so a new overlay is
+    // covered the day it is added.
+    const hiddenClasses = new Set<string>()
+    for (const tag of html.match(/<[^>]*\bhidden\b[^>]*>/g) ?? []) {
+      for (const cls of (tag.match(/class="([^"]*)"/)?.[1] ?? '').split(/\s+/)) {
+        if (cls) hiddenClasses.add(cls)
+      }
+    }
+    // The gate is the one that broke, so it must be in the set this covers.
+    expect(hiddenClasses.has('gate')).toBe(true)
+    expect(hiddenClasses.has('gate-card')).toBe(true)
+
+    // Every one of them is governed by the override, whether or not its own
+    // rule sets display.
+    for (const cls of hiddenClasses) {
+      const rule = css.match(new RegExp(`^\\.${cls}\\s*\\{[^}]*}`, 'm'))?.[0] ?? ''
+      const setsDisplay = /display:/.test(rule)
+      // Not an assertion that it must not set display - several legitimately
+      // do - but that the override exists to beat it when it does.
+      if (setsDisplay) {
+        expect(css).toMatch(/\[hidden\]\s*\{[^}]*display:\s*none\s*!important/)
+      }
+    }
+  })
+
+  it('never asks for a colour that was never defined', () => {
+    // `background: var(--ground)` where --ground does not exist is not an
+    // error: the declaration is simply dropped, and the element renders
+    // transparent. That is how the sign-in gate ended up as a card floating
+    // over a console the reader could see and could not use, alongside a
+    // `border: 1px solid var(--rule)` that drew no border either.
+    //
+    // A fallback is a deliberate choice and is allowed. A bare reference to
+    // something undefined is a typo that renders.
+    const defined = new Set([...css.matchAll(/(--[\w-]+)\s*:/g)].map(m => m[1]!))
+    const dangling: string[] = []
+    for (const m of css.matchAll(/var\(\s*(--[\w-]+)\s*(,)?/g)) {
+      if (!defined.has(m[1]!) && !m[2]) dangling.push(m[1]!)
+    }
+    expect(dangling).toEqual([])
+  })
+
+  it('never leaves two gate forms visible at once', () => {
+    // Both live inside #gate and only one is meant to show. The markup marks
+    // the change form hidden; the stylesheet has to honour it.
+    expect(html).toMatch(/id="change-form"[^>]*\bhidden\b/)
+    expect(html).toMatch(/id="gate"[^>]*\bhidden\b/)
   })
 })

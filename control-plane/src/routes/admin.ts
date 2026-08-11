@@ -24,7 +24,7 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
 
   r.get('/nodes', async (_req, res) => {
     const { rows } = await db.query(
-      `SELECT id, hostname, chip, memory_gb, metal_working_set_gb, tier, state,
+      `SELECT id, hostname, chip, memory_gb, metal_working_set_gb, tier, tiers, state,
               owner_user_id, presence_state, last_heartbeat, capability_profiles,
               user_paused, user_paused_at, resident_models, model_context
          -- Superseded records are history, not fleet. They are the previous
@@ -39,7 +39,7 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
       chip: n.chip,
       memoryGb: n.memory_gb === null ? null : Number(n.memory_gb),
       metalWorkingSetGb: n.metal_working_set_gb === null ? null : Number(n.metal_working_set_gb),
-      tier: n.tier,
+      tier: n.tier, tiers: n.tiers,
       state: n.state,
       ownerUserId: n.owner_user_id,
       presenceState: n.presence_state,
@@ -298,7 +298,7 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
   r.get('/nodes/:nodeId/detail', async (req, res) => {
     const nodeId = req.params.nodeId!
     const { rows } = await db.query(
-      `SELECT id, hostname, chip, memory_gb, metal_working_set_gb, tier, state,
+      `SELECT id, hostname, chip, memory_gb, metal_working_set_gb, tier, tiers, state,
               owner_user_id, presence_state, on_ac_power, thermal_ok,
               last_heartbeat, capability_profiles, allowed_cidrs,
               user_paused, user_paused_at
@@ -327,7 +327,7 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
       id: n.id, hostname: n.hostname, chip: n.chip,
       memoryGb: n.memory_gb === null ? null : Number(n.memory_gb),
       metalWorkingSetGb: n.metal_working_set_gb === null ? null : Number(n.metal_working_set_gb),
-      tier: n.tier, state: n.state, ownerUserId: n.owner_user_id,
+      tier: n.tier, tiers: n.tiers, state: n.state, ownerUserId: n.owner_user_id,
       presenceState: n.presence_state,
       userPaused: n.user_paused ?? false,
       userPausedAt: n.user_paused_at ? new Date(n.user_paused_at).toISOString() : null,
@@ -369,6 +369,54 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
    * Checked on every request rather than cached, so a stolen laptop stops being
    * a fleet member immediately rather than at the next renewal.
    */
+  /**
+   * Which kinds of work this machine is offered for.
+   *
+   * Plural, and a machine may be in both. That is a real choice rather than a
+   * label: cluster membership means presence does not gate serving, so an
+   * interactive request can land on the machine while somebody is using it.
+   * Batch work stays presence-gated either way, and the owner's pause still
+   * overrides everything.
+   *
+   * Guarded the way pausing is - operator or admin somewhere in the fleet -
+   * because a node is not in a pool until somebody puts it in one, so there is
+   * no pool to check a role against. That is the same gap the review found on
+   * approve and revoke, and it wants a fleet-level role rather than another
+   * one-off.
+   */
+  r.put('/nodes/:nodeId/tiers', async (req, res) => {
+    if (!(await mayPauseNode(db, req.user!.id, req.params.nodeId!))) {
+      res.status(403).json({ error: 'forbidden', detail: 'not yours to change' })
+      return
+    }
+    const wanted = (req.body as { tiers?: string[] })?.tiers ?? []
+    const unique = [...new Set(wanted)]
+    if (unique.length === 0) {
+      res.status(400).json({ error: 'bad_request',
+                             detail: 'a machine must be offered for at least one kind of work' })
+      return
+    }
+    if (unique.some((t) => t !== 'harvest' && t !== 'cluster')) {
+      res.status(400).json({ error: 'bad_request', detail: 'tiers are harvest and cluster' })
+      return
+    }
+
+    const { rows } = await db.query(
+      `UPDATE nodes SET tiers = $2::text[] WHERE id = $1
+       RETURNING id, hostname, tier, tiers, state`,
+      [req.params.nodeId, unique],
+    )
+    if (rows.length === 0) {
+      res.status(404).json({ error: 'not_found' })
+      return
+    }
+    await db.query(
+      `INSERT INTO activity_log (node_id, event, detail) VALUES ($1,'node.tiers',$2)`,
+      [req.params.nodeId, JSON.stringify({ tiers: unique, by: req.user!.id })],
+    )
+    res.json(rows[0])
+  })
+
   r.post('/nodes/:nodeId/revoke', async (req, res) => {
     const { rows: admin } = await db.query(
       `SELECT 1 FROM role_bindings rb

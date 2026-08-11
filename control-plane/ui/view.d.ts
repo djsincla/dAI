@@ -100,3 +100,25 @@ export function groupMachines(nodes: any[], pools: any[], matcher: (n: any, p: a
 }
 
 export function matchesGroup(node: any, pool: any): boolean
+
+export const TIERS: string[]
+export function tiersOf(node: any): string[]
+export function inBothTiers(node: any): boolean
+export function tierMachines(nodes: any[]): { tier: string; nodes: any[] }[]
+export function describeTier(tier: string): string
+export function tiersAfter(node: any, tier: string, action: 'add' | 'remove'): string[] | null
+
+// The API explorer's helpers, which landed in view.js without reaching this
+// file - so the tests importing them typechecked as errors while passing.
+export function operationsFrom(spec: any): any[]
+export function groupOperations(ops: any[]): { tag: string; operations: any[] }[]
+export function matchesOperation(op: any, query: string): boolean
+export function callableHere(op: any): boolean
+export function isReadOnly(op: any): boolean
+export function buildUrl(op: any, values?: Record<string, string>): { url: string; missing: string[] }
+export function bodySkeleton(spec: any, schema: any, depth?: number): any
+export function formatResponse(text: string, contentType?: string): string
+export function surfaceOf(path: string): string
+export function resolveRef(spec: any, schema: any, seen?: Set<any>): any
+export function responseSize(bytes: number): string
+export function statusTone(status: number): string

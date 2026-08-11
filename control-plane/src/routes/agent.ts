@@ -357,7 +357,7 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
    */
   r.get('/me', async (req, res) => {
     const { rows } = await db.query(
-      `SELECT id, hostname, tier, state FROM nodes WHERE id = $1`, [req.node!.id])
+      `SELECT id, hostname, tier, tiers, state FROM nodes WHERE id = $1`, [req.node!.id])
     res.json(rows[0])
   })
 

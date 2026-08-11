@@ -404,6 +404,18 @@ table.mini tbody tr:hover { background: transparent; cursor: default; }
   background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent);
 }
 
+/* Which way the machines page arranges the fleet: by group, or by what each
+   machine is offered for. Two views of one fleet rather than two halves, so it
+   reads as a lens on the same page instead of navigation to another. */
+.axis { display: flex; gap: 4px; margin-left: auto; }
+.axis button {
+  padding: 5px 12px; font-size: 12px; border-radius: 6px;
+  background: transparent; border: 1px solid var(--line); color: var(--muted);
+}
+.axis button.on {
+  background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent);
+}
+
 /* Imports in flight. Above the catalogue because a model only joins the
    catalogue once every file has landed, so this is the only place an import in
    progress can be seen at all. */

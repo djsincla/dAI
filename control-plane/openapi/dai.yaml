@@ -115,6 +115,51 @@ paths:
                 properties: { state: { type: string, enum: [pending] } }
         '401': { $ref: '#/components/responses/Unauthorized' }
 
+  /admin/v1/nodes/{nodeId}/tiers:
+    put:
+      tags: [admin]
+      summary: Which kinds of work this machine is offered for
+      description: |
+        Plural, and a machine may be offered for both.
+
+        This is a choice with a consequence rather than a label. Cluster
+        membership means presence does not gate serving, so an interactive
+        request can land on the machine while its owner is using it - that is
+        what "never preempted" buys and what it costs. Batch work stays
+        presence-gated either way, and the owner's own pause still overrides
+        everything.
+
+        A machine must be offered for at least one kind of work. One offered for
+        nothing still runs, still heartbeats and never receives anything, which
+        is indistinguishable from a broken agent.
+      parameters:
+        - name: nodeId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tiers]
+              properties:
+                tiers:
+                  type: array
+                  minItems: 1
+                  items: { type: string, enum: [harvest, cluster] }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Node' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /admin/v1/nodes/{nodeId}/revoke:
     post:
       tags: [admin]
@@ -395,7 +440,15 @@ paths:
                 properties:
                   id: { type: string, format: uuid }
                   hostname: { type: string }
-                  tier: { type: string, enum: [harvest, cluster] }
+                  tier:
+                    type: string
+                    enum: [harvest, cluster]
+                    description: |
+                      Derived from `tiers`. An agent asks one question of it -
+                      does presence gate me - and that answer is unchanged.
+                  tiers:
+                    type: array
+                    items: { type: string, enum: [harvest, cluster] }
                   state: { type: string }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
@@ -2372,7 +2425,20 @@ components:
         chip: { type: string }
         memoryGb: { type: number }
         metalWorkingSetGb: { type: number }
-        tier: { type: string, enum: [harvest, cluster] }
+        tier:
+          type: string
+          enum: [harvest, cluster]
+          description: |
+            Derived from `tiers`: cluster when the machine is offered for
+            cluster work at all. Kept because the scheduler, the router and the
+            agent all ask the same single question of it.
+        tiers:
+          type: array
+          items: { type: string, enum: [harvest, cluster] }
+          description: |
+            What the machine is offered for. A machine may be in both, which
+            means an interactive request can land on it while its owner is
+            using it.
         state:
           type: string
           enum: [pending, active, cordoned, paused, offline, superseded]

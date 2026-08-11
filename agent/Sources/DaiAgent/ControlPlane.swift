@@ -146,18 +146,42 @@ public actor ControlPlane {
         }
     }
 
-    /// This node's own record, which is how it learns its tier.
+    /// This node's own record, which is how it learns what it is offered for.
     public struct NodeSelf: Sendable {
         public let hostname: String
-        public let tier: String
-        public var isCluster: Bool { tier == "cluster" }
+        /// Every kind of work this machine is offered for. A machine may be
+        /// offered for both, which is why this is a list and not a value.
+        public let tiers: [String]
+
+        /// Whether presence gates this machine.
+        ///
+        /// One question with one answer, unchanged by tiers becoming plural: a
+        /// machine offered for cluster work at all is never preempted, because
+        /// a conversation needs a model that is still resident a minute from
+        /// now and the harvest tier cannot promise that.
+        ///
+        /// For a machine that is *also* harvest that is a real consequence, not
+        /// a technicality - an interactive request can arrive while somebody is
+        /// using it. That is the trade the operator made when they put it in
+        /// both, and the agent's job is to honour it rather than second-guess
+        /// it.
+        public var isCluster: Bool { tiers.contains("cluster") }
+
+        public init(hostname: String, tiers: [String]) {
+            self.hostname = hostname
+            self.tiers = tiers.isEmpty ? ["harvest"] : tiers
+        }
     }
 
     public func whoami() async throws -> NodeSelf {
         let (_, data) = try await request("GET", "agent/v1/me")
         let d = json(data)
-        return NodeSelf(hostname: d["hostname"]?.stringValue ?? "",
-                        tier: d["tier"]?.stringValue ?? "harvest")
+        // The list if the control plane sends one, the old scalar otherwise. An
+        // agent may be talking to a control plane either side of the change,
+        // and reading neither would silently make every machine harvest.
+        let tiers = d["tiers"]?.arrayValue?.compactMap(\.stringValue)
+            ?? [d["tier"]?.stringValue ?? "harvest"]
+        return NodeSelf(hostname: d["hostname"]?.stringValue ?? "", tiers: tiers)
     }
 
     public struct Dispatch: Sendable {

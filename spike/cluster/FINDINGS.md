@@ -30,7 +30,18 @@ Solving for the largest model depth that clears an 8 tok/s floor:
 |---|---|---|
 | WiFi | 16.687 ms | ~1 |
 | Gigabit Ethernet | 0.61 ms | **~38** |
-| Thunderbolt 4 (est. 0.1 ms) | ~0.1 ms | ~230 |
+| ~~Thunderbolt 4 (est. 0.1 ms)~~ | ~~0.1 ms~~ | ~~230~~ |
+
+> **That row was an estimate and measurement does not support it.** Thunderbolt
+> was later measured at **0.85 ms RTT** (`spike/e7_thunderbolt`), roughly 8.5x
+> the figure assumed here and *slower* than the gigabit link above. On latency
+> it belongs below the gigabit row, not above it. The max-layers column should
+> be re-derived rather than patched, since it was computed from the estimate.
+>
+> This does not rescue tensor parallelism at depth: a slower link makes the
+> conclusion below stronger, not weaker. What does change the picture is
+> pipeline parallelism, which pays one crossing per token rather than two
+> all-reduces per layer, and splits an 80-layer 72B at a 13.2% cost. See E7.
 
 **A 70B has 80 layers; a 110B has ~88.** At gigabit only 7B-13B class models
 clear the floor - and those fit on a single node, so they should never be

@@ -1,92 +1,66 @@
-<!doctype html>
-<html lang="en">
-<head>
+<!--
+  Fleet view.
+
+  Four views behind a sidebar rather than five panels on one scroll. The old
+  page showed everything at equal weight and left the reader to work out whether
+  anything was wrong, which is tolerable at four machines and useless at forty.
+  Overview answers that question directly; the rest are there when somebody
+  wants the detail behind it.
+
+  No build step and no framework, so this runs anywhere the control plane runs
+  and can be read without tooling. The API is the contract; this is one client
+  of it and deliberately not the only possible one.
+-->
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>dAI fleet</title>
-<link rel="stylesheet" href="./app.css">
-</head>
-<body>
-<header>
-  <h1>dAI <span class="sub">fleet</span></h1>
-  <nav>
-    <a href="/docs" target="_blank" rel="noreferrer">API</a>
-    <a href="/openapi.yaml" target="_blank" rel="noreferrer">spec</a>
-  </nav>
-  <label class="session">
-    session
-    <input id="session" type="text" placeholder="user id" autocomplete="off" size="36">
-  </label>
-</header>
+<script>
+  // Inline and first, so a page opened at night has its colours before it
+  // paints rather than after. Everything else about the theme lives in app.js.
+  try {
+    const t = localStorage.getItem('dai.theme')
+    if (t && t !== 'auto') document.documentElement.setAttribute('data-theme', t)
+  } catch (e) { /* private mode */ }
+</script>
+<link rel="stylesheet" href="app.css">
 
-<main>
-  <section id="capacity" class="panel">
-    <div class="panel-head">
-      <h2>Eligible capacity</h2>
-      <p class="note">
-        GPU work runs only when a machine is locked or logged out. ANE work runs
-        whatever its owner is doing, so the band beneath the curve is the
-        capacity that exists during the working day.
-      </p>
-    </div>
-    <div class="stats" id="stats"></div>
-    <div class="chart-wrap"><svg id="chart" viewBox="0 0 900 220" preserveAspectRatio="none"></svg></div>
-    <div class="legend">
-      <span><i class="swatch gpu"></i>GPU (locked or absent)</span>
-      <span><i class="swatch ane"></i>ANE (any state)</span>
-      <span class="axis-note">last 24 hours</span>
-    </div>
-  </section>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">dAI <span class="sub">fleet</span></div>
 
-  <section class="panel">
-    <div class="panel-head"><h2>Nodes</h2></div>
-    <div class="table-wrap">
-      <table id="nodes">
-        <thead>
-          <tr>
-            <th>Machine</th>
-            <th>Chip</th>
-            <th class="num" title="Metal caps itself near 81% of unified memory">Working set</th>
-            <th class="num" title="What is takeable right now under policy, not total memory">Headroom</th>
-            <th>Presence</th>
-            <th>Permits</th>
-            <th title="What this machine can answer with, and whether it could answer now">Serving</th>
-            <th class="num" title="How often this node interrupted work in the last week">Yields 7d</th>
-            <th>State</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      </table>
-    </div>
-    <p class="empty" id="nodes-empty" hidden>No nodes yet. Enroll one, then approve it.</p>
-  </section>
+    <nav class="views">
+      <a href="#/overview" data-view="overview"><span class="ico">◐</span> Overview</a>
+      <a href="#/machines" data-view="machines"><span class="ico">▤</span> Machines
+        <span class="count" id="nav-machines"></span></a>
+      <a href="#/models"   data-view="models"><span class="ico">◈</span> Models
+        <span class="count" id="nav-models"></span></a>
+      <a href="#/work"     data-view="work"><span class="ico">≡</span> Work
+        <span class="count" id="nav-work"></span></a>
+      <a href="#/deploy"   data-view="deploy"><span class="ico">⇪</span> Deployment
+        <span class="count" id="nav-deploy"></span></a>
+      <a href="#/logs"     data-view="logs"><span class="ico">▦</span> Logs</a>
+    </nav>
 
-  <section class="panel">
-    <div class="panel-head"><h2>Queues</h2></div>
-    <div id="queues" class="queues"></div>
-  </section>
-
-  <section class="panel">
-    <div class="panel-head"><h2>Work</h2></div>
-    <div class="table-wrap">
-      <table id="jobs">
-        <thead>
-          <tr>
-            <th>What</th>
-            <th>Kind</th>
-            <th title="Claimed by whoever submitted it. Synthetic work must say so.">Source</th>
-            <th>Submitted by</th>
-            <th class="num">Progress</th>
-            <th>State</th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      </table>
-      <p id="jobs-empty" class="empty">Nothing has been submitted yet.</p>
+    <div class="sidebar-foot">
+      <div class="whoami">
+        <span id="signed-in-as"></span>
+        <button id="sign-out" class="link">Sign out</button>
+      </div>
+      <div class="theme" id="theme">
+        <button data-theme="auto">Auto</button>
+        <button data-theme="light">Light</button>
+        <button data-theme="dark">Dark</button>
+      </div>
+      <div class="links">
+        <a href="/docs" target="_blank" rel="noreferrer">API</a>
+        <a href="/openapi.yaml" target="_blank" rel="noreferrer">spec</a>
+      </div>
+      <div class="conn" id="conn"></div>
     </div>
-  </section>
-</main>
+  </aside>
+
+  <main id="view"></main>
+</div>
 
 <div id="drawer" class="drawer" hidden>
   <div class="drawer-head">
@@ -96,8 +70,49 @@
   <div id="drawer-body"></div>
 </div>
 
+<!--
+  Sign-in, which the console did not have. It authenticated with a user id used
+  directly as a bearer token: an identifier that appears in API responses, the
+  audit log and any screenshot, granting access that never expired and could not
+  be revoked without deleting the person.
+-->
+<div id="gate" class="gate" hidden>
+  <form id="login-form" class="gate-card" autocomplete="on">
+    <h1>dAI <span class="sub">fleet</span></h1>
+    <p class="gate-note">Sign in to manage the fleet.</p>
+    <label>Username
+      <input id="login-user" name="username" autocomplete="username" required>
+    </label>
+    <label>Password
+      <input id="login-pass" name="password" type="password"
+             autocomplete="current-password" required>
+    </label>
+    <p class="gate-error" id="login-error" hidden></p>
+    <button type="submit" class="primary">Sign in</button>
+  </form>
+
+  <form id="change-form" class="gate-card" hidden autocomplete="on">
+    <h1>Choose a password</h1>
+    <p class="gate-note" id="change-why">
+      This deployment is still using the password it shipped with. Change it
+      before going any further.
+    </p>
+    <label>Current password
+      <input id="change-current" name="currentPassword" type="password"
+             autocomplete="current-password" required>
+    </label>
+    <label>New password
+      <input id="change-new" name="newPassword" type="password"
+             autocomplete="new-password" required minlength="10">
+    </label>
+    <label>New password again
+      <input id="change-again" type="password" autocomplete="new-password" required>
+    </label>
+    <p class="gate-error" id="change-error" hidden></p>
+    <button type="submit" class="primary">Change password</button>
+  </form>
+</div>
+
 <div id="toast" class="toast" hidden></div>
 
-<script type="module" src="./app.js"></script>
-</body>
-</html>
+<script type="module" src="app.js"></script>

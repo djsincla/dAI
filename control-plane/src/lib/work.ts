@@ -1,6 +1,7 @@
 import type pg from 'pg'
 import { type Db, tx } from './db.js'
 import { filterRequestedKinds, type PresenceState, type WorkKind } from './policy.js'
+import { poolsFor, type PoolSpec } from './pools.js'
 
 /**
  * Lease duration. Sized from E4: model load is 1-3s and a harvest work unit is
@@ -30,6 +31,7 @@ export interface Lease {
 }
 
 export type NoWorkReason = 'empty' | 'none-of-these-kinds' | 'node-paused' | 'user-paused'
+  | 'no-pool'
 
 /**
  * Lease one unit for a node.
@@ -43,6 +45,10 @@ export async function leaseWork(
   node: {
     id: string; state: string; presence_state: string | null
     paused_until: Date | null; user_paused?: boolean
+    // Pool membership is decided from these, so they travel with the node
+    // rather than being re-read per lease.
+    tier: string; hostname: string; chip: string | null
+    memory_gb: string | number | null
   },
   requested: WorkKind[],
 ): Promise<Lease | { reason: NoWorkReason }> {
@@ -57,6 +63,14 @@ export async function leaseWork(
   const kinds = filterRequestedKinds(node.presence_state as PresenceState | null, requested)
   if (kinds.length === 0) return { reason: 'none-of-these-kinds' }
 
+  // Pool membership decided here, in one place, and handed to SQL as a list of
+  // ids. Writing the same rule again as a SQL predicate would be two
+  // implementations of one policy, and the copy that drifts is the one deciding
+  // whether gang work lands on a preemptible machine.
+  const { rows: allPools } = await db.query(`SELECT id, tier, membership FROM pools`)
+  const eligible = poolsFor(node, allPools as PoolSpec[]).map((p) => p.id)
+  if (eligible.length === 0) return { reason: 'no-pool' }
+
   return tx(db, async (c: pg.PoolClient) => {
     const { rows } = await c.query(
       `SELECT u.id, u.kind, u.payload, j.model_hash, j.label, j.source
@@ -65,17 +79,23 @@ export async function leaseWork(
         WHERE u.state = 'pending'
           AND u.kind = ANY($1::text[])
           AND u.attempts < $2
+          AND j.pool_id = ANY($3::uuid[])
         ORDER BY u.position
         LIMIT 1
         FOR UPDATE OF u SKIP LOCKED`,
-      [kinds, MAX_ATTEMPTS],
+      [kinds, MAX_ATTEMPTS, eligible],
     )
     const row = rows[0]
     if (!row) {
-      const { rows: any } = await c.query(
-        `SELECT 1 FROM work_units WHERE state = 'pending' LIMIT 1`,
+      const { rows: elsewhere } = await c.query(
+        `SELECT u.kind, j.pool_id FROM work_units u JOIN jobs j ON j.id = u.job_id
+          WHERE u.state = 'pending' LIMIT 1`,
       )
-      return { reason: any.length ? ('none-of-these-kinds' as const) : ('empty' as const) }
+      if (elsewhere.length === 0) return { reason: 'empty' as const }
+      // There is work, but not for this node. Which of the two reasons applies
+      // decides whether an operator looks at the node or at the pool.
+      const barred = !eligible.includes(elsewhere[0]!.pool_id as string)
+      return { reason: barred ? ('no-pool' as const) : ('none-of-these-kinds' as const) }
     }
 
     const { rows: leased } = await c.query(

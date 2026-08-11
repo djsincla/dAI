@@ -15,7 +15,8 @@ public protocol ControlPlaneClient: Actor {
     func fetchPolicy() async throws -> [PresenceState: StatePolicy]
     func heartbeat(state: PresenceState, onACPower: Bool?, thermalOK: Bool?,
                    userPaused: Bool, capability: [String: Double],
-                   residentModels: [String: Double], modelInfo: [String: Int]) async throws
+                   residentModels: [String: Double], storedModels: [String: Double]?,
+                   modelInfo: [String: Int]) async throws
     func leaseWork(kinds: [WorkKind]) async throws -> ControlPlane.Lease?
     var lastLeaseReason: String? { get }
     func report(unitId: String, completed: [WorkItem], unfinished: [WorkItem],
@@ -25,6 +26,8 @@ public protocol ControlPlaneClient: Actor {
                         promptTokens: Int, completionTokens: Int,
                         cachedTokens: Int, toolCalls: [ToolCall]) async throws
     func isDispatchCancelled(id: String) async -> Bool
+    func assignedModels() async throws -> [ControlPlane.AssignedModel]
+    func downloadModelFile(modelId: String, path: String, to destination: URL) async throws -> String
 }
 
 extension ControlPlane: ControlPlaneClient {}
@@ -39,10 +42,12 @@ public extension ControlPlaneClient {
     func heartbeat(state: PresenceState, onACPower: Bool?, thermalOK: Bool?,
                    userPaused: Bool = false, capability: [String: Double] = [:],
                    residentModels: [String: Double] = [:],
+                   storedModels: [String: Double]? = nil,
                    modelInfo: [String: Int] = [:]) async throws {
         try await heartbeat(state: state, onACPower: onACPower, thermalOK: thermalOK,
                             userPaused: userPaused, capability: capability,
-                            residentModels: residentModels, modelInfo: modelInfo)
+                            residentModels: residentModels, storedModels: storedModels,
+                            modelInfo: modelInfo)
     }
 
     @discardableResult

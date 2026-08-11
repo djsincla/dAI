@@ -115,7 +115,7 @@ describe('serving over HTTP', () => {
 
   it('refuses with 503 when no node is connected', async () => {
     const r = await fetch(`${base}/v1/chat/completions`, {
-      method: 'POST', headers: asUser(fx.operatorId),
+      method: 'POST', headers: asUser(fx.operatorToken),
       body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
     })
     expect(r.status).toBe(503)
@@ -130,7 +130,7 @@ describe('serving over HTTP', () => {
     await new Promise((r) => setTimeout(r, 150))
 
     const r = await fetch(`${base}/v1/chat/completions`, {
-      method: 'POST', headers: asUser(fx.operatorId),
+      method: 'POST', headers: asUser(fx.operatorToken),
       body: JSON.stringify({ messages: [{ role: 'user', content: 'hello' }], max_tokens: 32 }),
     })
     expect(r.status).toBe(200)
@@ -147,7 +147,7 @@ describe('serving over HTTP', () => {
     await new Promise((r) => setTimeout(r, 150))
 
     const r = await fetch(`${base}/v1/chat/completions`, {
-      method: 'POST', headers: asUser(fx.operatorId),
+      method: 'POST', headers: asUser(fx.operatorToken),
       body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
     })
     // The whole point: a listening, healthy, capable node is still not
@@ -164,7 +164,7 @@ describe('serving over HTTP', () => {
     await new Promise((r) => setTimeout(r, 150))
 
     const r = await fetch(`${base}/v1/chat/completions`, {
-      method: 'POST', headers: asUser(fx.operatorId),
+      method: 'POST', headers: asUser(fx.operatorToken),
       body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }], max_tokens: 99999 }),
     })
     const body = await r.json()
@@ -177,7 +177,7 @@ describe('serving over HTTP', () => {
 
   it('rejects streaming rather than pretending to support it', async () => {
     const r = await fetch(`${base}/v1/chat/completions`, {
-      method: 'POST', headers: asUser(fx.operatorId),
+      method: 'POST', headers: asUser(fx.operatorToken),
       body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }], stream: true }),
     })
     expect(r.status).toBe(400)
@@ -224,7 +224,7 @@ describe('serving over HTTP', () => {
       `UPDATE nodes SET last_heartbeat = now() - interval '10 minutes' WHERE id = $1`,
       [fx.nodeId])
 
-    const r = await fetch(`${base}/v1/models`, { headers: asUser(fx.operatorId) })
+    const r = await fetch(`${base}/v1/models`, { headers: asUser(fx.operatorToken) })
     expect((await r.json()).data.map((m: any) => m.id)).not.toContain('qwen-7b')
   })
 
@@ -235,7 +235,7 @@ describe('serving over HTTP', () => {
       method: 'POST', headers: asNode(fx.fingerprint),
       body: JSON.stringify({ presenceState: 'LOCKED', residentModels: { 'qwen-7b': 4 } }),
     })
-    const r = await fetch(`${base}/v1/models`, { headers: asUser(fx.operatorId) })
+    const r = await fetch(`${base}/v1/models`, { headers: asUser(fx.operatorToken) })
     expect((await r.json()).data.map((m: any) => m.id)).toContain('qwen-7b')
   })
 
@@ -259,7 +259,7 @@ describe('serving over HTTP', () => {
     })()
     await new Promise((r) => setTimeout(r, 250))
 
-    const r = await fetch(`${base}/v1/models`, { headers: asUser(fx.operatorId) })
+    const r = await fetch(`${base}/v1/models`, { headers: asUser(fx.operatorToken) })
     const models = (await r.json()).data as any[]
     expect(models.map((m) => m.id)).toContain('qwen-7b')
     // The window is advertised so a client does not have to assume one.

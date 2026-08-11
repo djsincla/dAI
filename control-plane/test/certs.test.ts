@@ -58,15 +58,39 @@ describe('certificate authority', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  it('issues client-auth-only certificates', async () => {
-    // A node certificate must not be usable to impersonate the control plane to
-    // another node.
+  it('issues certificates a node can use as either end of a connection', async () => {
+    // A node is a client to the control plane and a server to another node: one
+    // half of a split model listens and the other connects to it. Client-only
+    // certificates were refused by the connecting side for "unsuitable
+    // certificate purpose", which names the extension rather than the
+    // situation and reads like a broken link.
+    //
+    // Nothing here lets a node pose as the control plane. That is prevented by
+    // the control plane being signed by a different CA which agents pin
+    // separately, not by these bits.
     const { csr, dir } = makeCsr()
     const signed = await ca.sign(csr, 'node-1', 'orca')
     const text = execSync(`echo '${signed.certPem}' | openssl x509 -noout -text`).toString()
     expect(text).toContain('TLS Web Client Authentication')
-    expect(text).not.toContain('TLS Web Server Authentication')
+    expect(text).toContain('TLS Web Server Authentication')
     expect(text).toContain('CA:FALSE')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('issues a certificate openssl accepts for server use', async () => {
+    // The assertion above reads the extension; this one asks a verifier, which
+    // is what actually rejected it. `-purpose sslserver` is the check the
+    // connecting half of a split performs.
+    const { csr, dir } = makeCsr()
+    const signed = await ca.sign(csr, 'node-1', 'orca')
+    writeFileSync(join(dir, 'node.crt'), signed.certPem)
+    writeFileSync(join(dir, 'ca.crt'), ca.certPem)
+    for (const purpose of ['sslserver', 'sslclient']) {
+      const out = execSync(
+        `openssl verify -purpose ${purpose} -CAfile ${dir}/ca.crt ${dir}/node.crt`,
+      ).toString()
+      expect(out).toContain('OK')
+    }
     rmSync(dir, { recursive: true, force: true })
   })
 
@@ -214,7 +238,7 @@ describe('enrollment and issuance over HTTP', () => {
     }
     const approve = (id: string) =>
       fetch(`${base}/admin/v1/nodes/${id}/approve`, {
-        method: 'POST', headers: asUser(fx.operatorId), body: '{}',
+        method: 'POST', headers: asUser(fx.operatorToken), body: '{}',
       })
 
     const first = await enrollSame()
@@ -251,7 +275,7 @@ describe('enrollment and issuance over HTTP', () => {
   it('issues a usable certificate on approval', async () => {
     const e = await enroll()
     const approve = await fetch(`${base}/admin/v1/nodes/${e.nodeId}/approve`, {
-      method: 'POST', headers: asUser(fx.operatorId) })
+      method: 'POST', headers: asUser(fx.operatorToken) })
     expect(approve.status).toBe(200)
 
     const poll = await fetch(`${base}/agent/v1/enroll/${e.nodeId}`, {
@@ -259,10 +283,21 @@ describe('enrollment and issuance over HTTP', () => {
     expect(poll.status).toBe(200)
     const issued = await poll.json()
     expect(issued.certPem).toContain('BEGIN CERTIFICATE')
-    // The node CA is informational. What a node actually needs is the *server*
-    // CA, and confusing the two fails every later connection with a certificate
+    // Both CAs, and they are not interchangeable. The server CA is what a node
+    // pins to verify the control plane; the node CA is what it needs to verify
+    // another node, now that one machine holding half a model has to trust the
+    // machine holding the other half. Handing over only the server CA - which
+    // is what this used to do - fails a peer handshake with "unknown CA", an
     // error that reads like a network problem.
     expect(issued.nodeCaPem).toContain('BEGIN CERTIFICATE')
+    expect(issued.nodeCaPem).not.toBe(issued.serverCaPem)
+    // Asked of a verifier rather than of the string, because what matters is
+    // that this is the CA under which the certificate just issued checks out.
+    writeFileSync(join(e.dir, 'node.crt'), issued.certPem)
+    writeFileSync(join(e.dir, 'node-ca.crt'), issued.nodeCaPem)
+    expect(execSync(
+      `openssl verify -CAfile ${e.dir}/node-ca.crt ${e.dir}/node.crt`).toString(),
+    ).toContain('OK')
 
     // The stored fingerprint must match what a TLS handshake would report, or
     // the node authenticates once and never again.
@@ -274,7 +309,7 @@ describe('enrollment and issuance over HTTP', () => {
   it('will not hand the certificate over twice', async () => {
     const e = await enroll()
     await fetch(`${base}/admin/v1/nodes/${e.nodeId}/approve`, {
-      method: 'POST', headers: asUser(fx.operatorId) })
+      method: 'POST', headers: asUser(fx.operatorToken) })
     const first = await fetch(`${base}/agent/v1/enroll/${e.nodeId}`, {
       headers: { 'x-enrollment-token': e.enrollmentToken } })
     expect(first.status).toBe(200)
@@ -305,7 +340,7 @@ describe('enrollment and issuance over HTTP', () => {
     })
     const e = await r.json()
     const approve = await fetch(`${base}/admin/v1/nodes/${e.nodeId}/approve`, {
-      method: 'POST', headers: asUser(fx.operatorId) })
+      method: 'POST', headers: asUser(fx.operatorToken) })
     expect(approve.status).toBe(400)
     const { rows } = await db.query(`SELECT state FROM nodes WHERE id=$1`, [e.nodeId])
     expect(rows[0].state).toBe('pending')
@@ -319,7 +354,7 @@ describe('enrollment and issuance over HTTP', () => {
     expect(policy.status).toBe(200)
 
     const revoke = await fetch(`${base}/admin/v1/nodes/${fx.nodeId}/revoke`, {
-      method: 'POST', headers: asUser(fx.operatorId) })
+      method: 'POST', headers: asUser(fx.operatorToken) })
     expect(revoke.status).toBe(200)
 
     const after = await fetch(`${base}/agent/v1/policy`, {

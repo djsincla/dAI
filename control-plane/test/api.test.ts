@@ -26,6 +26,32 @@ afterAll(async () => { await db?.end() })
 const asNode = (fp: string) => ({ 'x-node-fingerprint': fp, 'content-type': 'application/json' })
 const asUser = (id: string) => ({ authorization: `Bearer ${id}`, 'content-type': 'application/json' })
 
+describe('node detail, for a machine that has actually reported', () => {
+  it('serialises timestamps as strings rather than 500ing', async () => {
+    // pg returns timestamptz as a Date and the schema declares a string. The
+    // response validator inspects the object before serialisation, so this
+    // failed for every machine that had ever sent a heartbeat - which is to
+    // say every real one. The seeded demo machines had a null here and passed,
+    // so the fleet view showed headroom for the fake machines and a dash for
+    // the real ones, and the 500 underneath was swallowed by the caller.
+    await db.query(`UPDATE nodes SET last_heartbeat = now() WHERE id = $1`, [fx.nodeId])
+
+    const r = await fetch(`${base}/admin/v1/nodes/${fx.nodeId}/detail`,
+      { headers: asUser(fx.ownerToken) })
+    expect(r.status).toBe(200)
+    const d = await r.json()
+    expect(typeof d.lastHeartbeat).toBe('string')
+    expect(d.hostname).toBe('rotorua')
+  })
+
+  it('lists a heartbeating machine without failing validation', async () => {
+    await db.query(`UPDATE nodes SET last_heartbeat = now() WHERE id = $1`, [fx.nodeId])
+    const r = await fetch(`${base}/admin/v1/nodes`, { headers: asUser(fx.ownerToken) })
+    expect(r.status).toBe(200)
+    expect(typeof (await r.json())[0].lastHeartbeat).toBe('string')
+  })
+})
+
 describe('agent surface', () => {
   it('answers 401 for a malformed token, not 500', async () => {
     // Session tokens are uuids and the column is one, so anything else made
@@ -142,7 +168,7 @@ describe('agent surface', () => {
 
     // An operator unpausing the node administratively must not touch it.
     await fetch(`${base}/admin/v1/nodes/${fx.nodeId}/pause`, {
-      method: 'POST', headers: asUser(fx.operatorId), body: JSON.stringify({ until: null }),
+      method: 'POST', headers: asUser(fx.operatorToken), body: JSON.stringify({ until: null }),
     })
     const { rows } = await db.query('SELECT user_paused, state FROM nodes WHERE id=$1',
                                     [fx.nodeId])
@@ -164,7 +190,7 @@ describe('agent surface', () => {
       body: JSON.stringify({ presenceState: 'ABSENT', onACPower: true,
                              thermalOk: true, userPaused: true }),
     })
-    const r = await fetch(`${base}/admin/v1/fleet/summary`, { headers: asUser(fx.operatorId) })
+    const r = await fetch(`${base}/admin/v1/fleet/summary`, { headers: asUser(fx.operatorToken) })
     const summary = await r.json() as any
     const gpu = summary.now?.gpuGb ?? summary.gpuGb ?? 0
     expect(gpu).toBe(0)
@@ -233,7 +259,7 @@ describe('work dispatch over HTTP', () => {
   async function job(kind: string, items = 16) {
     const r = await fetch(`${base}/admin/v1/jobs`, {
       method: 'POST',
-      headers: asUser(fx.operatorId),
+      headers: asUser(fx.operatorToken),
       body: JSON.stringify({
         poolId: fx.poolId, kind,
         items: Array.from({ length: items }, (_, i) => ({ id: i, prompt: `p${i}` })),
@@ -296,7 +322,7 @@ describe('authorization', () => {
     // is running it. Synthetic work especially has to be visible as synthetic,
     // or its throughput reads as real activity.
     const r = await fetch(`${base}/admin/v1/jobs`, {
-      method: 'POST', headers: asUser(fx.operatorId),
+      method: 'POST', headers: asUser(fx.operatorToken),
       body: JSON.stringify({
         poolId: fx.poolId, kind: 'embed', batchSize: 2,
         label: 'Nightly corpus reindex', source: 'test-harness',
@@ -311,7 +337,7 @@ describe('authorization', () => {
     expect(created.submittedBy).toBeTruthy()
 
     const list = await (await fetch(`${base}/admin/v1/jobs`,
-      { headers: asUser(fx.operatorId) })).json() as any[]
+      { headers: asUser(fx.operatorToken) })).json() as any[]
     const found = list.find((j) => j.id === created.id)
     expect(found.label).toBe('Nightly corpus reindex')
     expect(found.source).toBe('test-harness')
@@ -333,7 +359,7 @@ describe('authorization', () => {
     // stored, nothing able to read it. A work API that accepts a request and
     // cannot answer it is not finished, however good its dispatch is.
     const submitted = await (await fetch(`${base}/admin/v1/jobs`, {
-      method: 'POST', headers: asUser(fx.operatorId),
+      method: 'POST', headers: asUser(fx.operatorToken),
       body: JSON.stringify({
         poolId: fx.poolId, kind: 'embed', batchSize: 2,
         label: 'results round trip', source: 'test-harness',
@@ -362,7 +388,7 @@ describe('authorization', () => {
 
     const page = await (await fetch(
       `${base}/admin/v1/jobs/${submitted.id}/results`,
-      { headers: asUser(fx.operatorId) })).json() as any
+      { headers: asUser(fx.operatorToken) })).json() as any
 
     const items = page.units.flatMap((u: any) => u.items)
     expect(items).toHaveLength(4)
@@ -376,7 +402,7 @@ describe('authorization', () => {
 
   it('pages results in submission order', async () => {
     const submitted = await (await fetch(`${base}/admin/v1/jobs`, {
-      method: 'POST', headers: asUser(fx.operatorId),
+      method: 'POST', headers: asUser(fx.operatorToken),
       body: JSON.stringify({
         poolId: fx.poolId, kind: 'embed', batchSize: 1,
         items: [{ id: 1 }, { id: 2 }, { id: 3 }],
@@ -398,13 +424,13 @@ describe('authorization', () => {
 
     const first = await (await fetch(
       `${base}/admin/v1/jobs/${submitted.id}/results?limit=2`,
-      { headers: asUser(fx.operatorId) })).json() as any
+      { headers: asUser(fx.operatorToken) })).json() as any
     expect(first.units).toHaveLength(2)
     expect(first.nextAfter).not.toBeNull()
 
     const rest = await (await fetch(
       `${base}/admin/v1/jobs/${submitted.id}/results?limit=2&after=${first.nextAfter}`,
-      { headers: asUser(fx.operatorId) })).json() as any
+      { headers: asUser(fx.operatorToken) })).json() as any
     expect(rest.units).toHaveLength(1)
     expect(rest.nextAfter).toBeNull()
 
@@ -415,7 +441,7 @@ describe('authorization', () => {
   it('requires operator on the pool to submit a job', async () => {
     const r = await fetch(`${base}/admin/v1/jobs`, {
       method: 'POST',
-      headers: asUser(fx.strangerId),
+      headers: asUser(fx.strangerToken),
       body: JSON.stringify({ poolId: fx.poolId, kind: 'embed', items: [{ id: 1 }] }),
     })
     expect(r.status).toBe(403)
@@ -424,7 +450,7 @@ describe('authorization', () => {
   it('lets an operator submit', async () => {
     const r = await fetch(`${base}/admin/v1/jobs`, {
       method: 'POST',
-      headers: asUser(fx.operatorId),
+      headers: asUser(fx.operatorToken),
       body: JSON.stringify({ poolId: fx.poolId, kind: 'embed', items: [{ id: 1 }] }),
     })
     expect(r.status).toBe(201)
@@ -440,9 +466,9 @@ describe('authorization', () => {
     // door: the node stayed out of the fleet until somebody edited the
     // database.
     const pause = () => fetch(`${base}/admin/v1/nodes/${fx.nodeId}/pause`,
-      { method: 'POST', headers: asUser(fx.operatorId), body: '{}' })
+      { method: 'POST', headers: asUser(fx.operatorToken), body: '{}' })
     const resume = () => fetch(`${base}/admin/v1/nodes/${fx.nodeId}/resume`,
-      { method: 'POST', headers: asUser(fx.operatorId), body: '{}' })
+      { method: 'POST', headers: asUser(fx.operatorToken), body: '{}' })
 
     await pause()
     let { rows } = await db.query('SELECT state FROM nodes WHERE id=$1', [fx.nodeId])
@@ -465,9 +491,9 @@ describe('authorization', () => {
                              thermalOk: true, userPaused: true }),
     })
     await fetch(`${base}/admin/v1/nodes/${fx.nodeId}/pause`,
-      { method: 'POST', headers: asUser(fx.operatorId), body: '{}' })
+      { method: 'POST', headers: asUser(fx.operatorToken), body: '{}' })
     await fetch(`${base}/admin/v1/nodes/${fx.nodeId}/resume`,
-      { method: 'POST', headers: asUser(fx.operatorId), body: '{}' })
+      { method: 'POST', headers: asUser(fx.operatorToken), body: '{}' })
 
     const { rows } = await db.query('SELECT state, user_paused FROM nodes WHERE id=$1',
                                     [fx.nodeId])
@@ -477,7 +503,7 @@ describe('authorization', () => {
 
   it('lets the machine owner pause their own node without any role binding', async () => {
     const r = await fetch(`${base}/admin/v1/nodes/${fx.nodeId}/pause`, {
-      method: 'POST', headers: asUser(fx.ownerId), body: JSON.stringify({}),
+      method: 'POST', headers: asUser(fx.ownerToken), body: JSON.stringify({}),
     })
     expect(r.status).toBe(200)
     expect((await r.json()).state).toBe('paused')
@@ -485,18 +511,18 @@ describe('authorization', () => {
 
   it('refuses to let an unrelated user pause someone else\'s node', async () => {
     const r = await fetch(`${base}/admin/v1/nodes/${fx.nodeId}/pause`, {
-      method: 'POST', headers: asUser(fx.strangerId), body: JSON.stringify({}),
+      method: 'POST', headers: asUser(fx.strangerToken), body: JSON.stringify({}),
     })
     expect(r.status).toBe(403)
   })
 
   it('stops dispatching to a paused node', async () => {
     await fetch(`${base}/admin/v1/jobs`, {
-      method: 'POST', headers: asUser(fx.operatorId),
+      method: 'POST', headers: asUser(fx.operatorToken),
       body: JSON.stringify({ poolId: fx.poolId, kind: 'embed', items: [{ id: 1 }] }),
     })
     await fetch(`${base}/admin/v1/nodes/${fx.nodeId}/pause`, {
-      method: 'POST', headers: asUser(fx.ownerId), body: JSON.stringify({}),
+      method: 'POST', headers: asUser(fx.ownerToken), body: JSON.stringify({}),
     })
     const out = await (await fetch(`${base}/agent/v1/work?kinds=embed`, {
       headers: asNode(fx.fingerprint) })).json()
@@ -508,7 +534,7 @@ describe('authorization', () => {
       `INSERT INTO nodes (hostname, state, cert_fingerprint) VALUES ('new','pending','fp-new')`)
     const { rows } = await db.query(`SELECT id FROM nodes WHERE cert_fingerprint='fp-new'`)
     const r = await fetch(`${base}/admin/v1/nodes/${rows[0].id}/approve`, {
-      method: 'POST', headers: asUser(fx.operatorId),
+      method: 'POST', headers: asUser(fx.operatorToken),
     })
     expect(r.status).toBe(403)
   })

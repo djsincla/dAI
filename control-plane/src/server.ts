@@ -6,8 +6,10 @@ import { fileURLToPath } from 'node:url'
 import { createPool, type Db } from './lib/db.js'
 import { agentRoutes } from './routes/agent.js'
 import { adminRoutes } from './routes/admin.js'
+import { authRoutes } from './routes/auth.js'
+import { monitorRoutes } from './routes/monitor.js'
 import { startReaper } from './lib/work.js'
-import { Acl, aclMiddleware, describeAcls } from './lib/netacl.js'
+import { Acl, aclMiddleware, closedAclMiddleware, describeAcls } from './lib/netacl.js'
 import { Broker } from './lib/broker.js'
 import { Ca } from './lib/ca.js'
 import { compatRoutes, servingRoutes } from './routes/serving.js'
@@ -183,15 +185,24 @@ export function createApp(db: Db, surface: Surface = 'both'): Express {
     app.use('/agent/v1', aclMiddleware(agentAcl, 'agent'), agentRoutes(db, broker, ca))
   }
   if (surface !== 'agent') {
+    // Before the admin routes, because signing in cannot itself require being
+    // signed in. Still behind the admin network ACL: obtaining a credential is
+    // not something to expose more widely than using one.
+    // Monitoring, reachable only from configured addresses and disabled
+    // entirely when none are. No credential, deliberately: the alternative is a
+    // long-lived secret in a scraper's config file that nobody ever rotates.
+    const monitorAcl = new Acl(process.env.DAI_MONITOR_CIDRS)
+    app.use('/monitor/v1', closedAclMiddleware(monitorAcl, 'monitoring'), monitorRoutes(db))
+
+    app.use('/admin/v1/auth', aclMiddleware(adminAcl, 'admin'), authRoutes(db))
     app.use('/admin/v1', aclMiddleware(adminAcl, 'admin'), adminRoutes(db, ca, broker))
     // OpenAI-compatible surface. Separate from /admin because its callers are
     // applications rather than people, and it will want its own rate limits and
     // availability treatment.
     //
-    // Access is by network ACL, and that is the whole of it: there are no API
-    // keys. Said plainly because this comment used to claim keys that do not
-    // exist, which reads as a decision already taken rather than one still
-    // open. Anyone who can reach the subnet can use the fleet.
+    // Access needs a credential now as well as a reachable network: either a
+    // signed-in session or a named API key. It used to be network ACL alone,
+    // which meant anyone who could reach the subnet could use the fleet.
     app.use('/v1', aclMiddleware(adminAcl, 'serving'), servingRoutes(db, broker))
     // The same router under /api, so /api/v0/models resolves. Tools written
     // against LM Studio probe that path for the context window, and the point

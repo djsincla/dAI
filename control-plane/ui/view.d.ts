@@ -42,3 +42,61 @@ export declare function progressOf(job: JobView): {
 export declare function capacityOf(node: NodeView, headroomGb?: number): {
   gpu: number; ane: number
 }
+
+export interface Distribution {
+  state: 'drift' | 'complete' | 'unused' | 'idle'
+  label: string
+  holding: number
+  wanting: number
+}
+export function distributionOf(model: any): Distribution
+export function humanBytes(n: number): string
+export function copyState(placement: any): { state: string; label: string }
+
+export function machinesThatCouldHold(sizeBytes: number, nodes: any[]): {
+  fits: number; total: number
+}
+export function importCost(candidate: any): { state: string; label: string }
+
+export interface Attention {
+  level: 'decide' | 'warn' | 'ok'
+  key: string
+  text: string
+  detail?: string | null
+  view?: string
+}
+export function attentionItems(state: any): Attention[]
+
+export const STALE_AFTER_MS: number
+export function isStale(node: any, now?: number): boolean
+export function withFreshness(nodes: any[], now?: number): any[]
+
+export function importProgress(row: any): {
+  state: 'running' | 'done' | 'failed'
+  percent: number | null
+  label: string
+}
+
+export function matchesQuery(row: any, query: string, fields: any[]): boolean
+export function sortRows(rows: any[], key: string, dir: string, accessors: any): any[]
+export function nextSort(current: any, key: string): { key: string; dir: string } | null
+
+export const MIN_WINDOW_S: number
+export const MAX_WINDOW_S: number
+export function windowFromDrag(current: number, deltaPx: number, widthPx: number): number
+export function clampWindow(seconds: number): number
+export function bucketFor(windowSeconds: number): number
+export function describeWindow(seconds: number): string
+
+export function rolloutState(row: any): { state: string; label: string }
+export function upgradeOutcome(row: any): { state: string; label: string }
+
+export function groupMode(pool: any): 'list' | 'rule'
+export function groupMismatches(pool: any, nodes: any[], models: any[]): any[]
+export function groupWarning(mismatches: any[]): { level: string; label: string; reasons: string[] } | null
+export function groupMachines(nodes: any[], pools: any[], matcher: (n: any, p: any) => boolean): {
+  groups: { pool: any; mode: string; nodes: any[] }[]
+  ungrouped: any[]
+}
+
+export function matchesGroup(node: any, pool: any): boolean

@@ -1,4 +1,5 @@
 import AsyncHTTPClient
+import CryptoKit
 import Foundation
 import NIOCore
 import NIOPosix
@@ -276,6 +277,14 @@ public actor ControlPlane {
     public struct IssuedIdentity: Sendable {
         public let certPEM: String
         public let serverCAPEM: String?
+        /// The CA that signs *node* certificates.
+        ///
+        /// Needed because nodes now talk to each other: a machine holding half a
+        /// model has to verify the machine holding the other half, and the
+        /// server CA cannot vouch for it. Kept separate from serverCAPEM so
+        /// that trusting a peer never widens what is trusted as a control
+        /// plane.
+        public let nodeCAPEM: String?
     }
 
     /// Collect the certificate after approval. Returns nil while still pending.
@@ -289,7 +298,8 @@ public actor ControlPlane {
         if code == 202 { return nil }
         let d = json(data)
         guard let cert = d["certPem"]?.stringValue else { return nil }
-        return IssuedIdentity(certPEM: cert, serverCAPEM: d["serverCaPem"]?.stringValue)
+        return IssuedIdentity(certPEM: cert, serverCAPEM: d["serverCaPem"]?.stringValue,
+                              nodeCAPEM: d["nodeCaPem"]?.stringValue)
     }
 
     // MARK: - Policy
@@ -314,12 +324,176 @@ public actor ControlPlane {
         return out
     }
 
+    // MARK: - Models
+
+    public struct AssignedModel: Sendable {
+        public let id: String
+        public let runtime: String
+        public let kind: String
+        public let files: [ModelFile]
+    }
+
+    public struct ModelFile: Sendable {
+        public let path: String
+        public let sizeBytes: Int
+        public let sha256: String
+    }
+
+    /// What this node has been told to hold.
+    public func assignedModels() async throws -> [AssignedModel] {
+        let (_, data) = try await request("GET", "/agent/v1/models/assigned")
+        guard let list = (try? JSONDecoder().decode(JSONValue.self, from: data))?.arrayValue
+            else { return [] }
+        return list.compactMap { (item: JSONValue) -> AssignedModel? in
+            guard let d = item.objectValue,
+                  let id = d["id"]?.stringValue,
+                  let files = d["files"]?.arrayValue else { return nil }
+            return AssignedModel(
+                id: id,
+                runtime: d["runtime"]?.stringValue ?? "mlx",
+                kind: d["kind"]?.stringValue ?? "generate",
+                files: files.compactMap { (f: JSONValue) -> ModelFile? in
+                    guard let fd = f.objectValue,
+                          let path = fd["path"]?.stringValue,
+                          let sha = fd["sha256"]?.stringValue else { return nil }
+                    return ModelFile(path: path,
+                                     sizeBytes: fd["sizeBytes"]?.intValue ?? 0,
+                                     sha256: sha)
+                })
+        }
+    }
+
+    /// The URL of one model file.
+    ///
+    /// Built as a string rather than with `appendingPathComponent`, which
+    /// percent-encodes what it is given: an already-encoded `%2F` came back as
+    /// `%252F` and every download 404'd against a route that was working. The
+    /// same method mangled a query string earlier in this project's life, in
+    /// the same silent way.
+    static func modelFileURL(base: URL, modelId: String, path: String) -> String {
+        let id = modelId.addingPercentEncoding(withAllowedCharacters: .daiPathSegment) ?? modelId
+        let file = path.addingPercentEncoding(withAllowedCharacters: .daiPathSegment) ?? path
+        let root = base.absoluteString.hasSuffix("/")
+            ? String(base.absoluteString.dropLast())
+            : base.absoluteString
+        return "\(root)/agent/v1/models/\(id)/files/\(file)"
+    }
+
+    /// Stream one model file to `destination`, returning its sha256.
+    ///
+    /// Streamed to disk rather than collected in memory: a shard is gigabytes
+    /// and the machine this runs on is somebody's workstation, so buffering one
+    /// would take memory away from the very person the agent exists to avoid
+    /// disturbing.
+    ///
+    /// Both path components are percent-encoded, because a model id contains a
+    /// slash and would otherwise become two path segments and a 404.
+    public func downloadModelFile(modelId: String, path: String,
+                                  to destination: URL) async throws -> String {
+        let url = Self.modelFileURL(base: base, modelId: modelId, path: path)
+        var req = HTTPClientRequest(url: url)
+        req.method = .GET
+
+        // Generous, because this is measured in gigabytes over whatever network
+        // the building has, and a transfer killed at ten minutes would never
+        // finish a 5GB shard on a slow link.
+        let response = try await client.execute(req, timeout: .hours(2))
+        guard (200..<300).contains(Int(response.status.code)) else {
+            throw Failure.http(Int(response.status.code), "downloading \(modelId)/\(path)")
+        }
+
+        let fm = FileManager.default
+        try? fm.createDirectory(at: destination.deletingLastPathComponent(),
+                                withIntermediateDirectories: true)
+        // Written under a temporary name and renamed only after the hash is
+        // checked, so an interrupted transfer cannot leave a file that looks
+        // finished. A partial shard has a plausible size and fails much later,
+        // as a corrupt-weights crash on whichever machine loads it first.
+        let temp = destination.appendingPathExtension("partial")
+        try? fm.removeItem(at: temp)
+        fm.createFile(atPath: temp.path, contents: nil)
+        guard let handle = try? FileHandle(forWritingTo: temp) else {
+            throw Failure.transport("cannot write \(temp.path)")
+        }
+        defer { try? handle.close() }
+
+        var hasher = SHA256()
+        for try await chunk in response.body {
+            let bytes = Data(buffer: chunk)
+            hasher.update(data: bytes)
+            try handle.write(contentsOf: bytes)
+        }
+        try handle.close()
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    // MARK: - Agent builds
+
+    public struct DesiredBuild: Sendable {
+        public let version: String?
+        public let sha256: String?
+        public let sizeBytes: Int?
+    }
+
+    /// What this node should be running, or nothing when nobody manages it.
+    public func desiredBuild() async throws -> DesiredBuild {
+        let (_, data) = try await request("GET", "/agent/v1/agent/desired")
+        let d = (try? JSONDecoder().decode(JSONValue.self, from: data))?.objectValue ?? [:]
+        return DesiredBuild(version: d["version"]?.stringValue,
+                            sha256: d["sha256"]?.stringValue,
+                            sizeBytes: d["sizeBytes"]?.intValue)
+    }
+
+    /// Stream an agent binary to `destination`, returning its sha256.
+    public func downloadAgentBuild(version: String, to destination: URL) async throws -> String {
+        let encoded = version.addingPercentEncoding(
+            withAllowedCharacters: .daiPathSegment) ?? version
+        let root = base.absoluteString.hasSuffix("/")
+            ? String(base.absoluteString.dropLast()) : base.absoluteString
+        var req = HTTPClientRequest(url: "\(root)/agent/v1/agent/builds/\(encoded)/binary")
+        req.method = .GET
+
+        let response = try await client.execute(req, timeout: .minutes(30))
+        guard (200..<300).contains(Int(response.status.code)) else {
+            throw Failure.http(Int(response.status.code), "downloading agent \(version)")
+        }
+
+        let fm = FileManager.default
+        try? fm.removeItem(at: destination)
+        fm.createFile(atPath: destination.path, contents: nil)
+        guard let handle = try? FileHandle(forWritingTo: destination) else {
+            throw Failure.transport("cannot write \(destination.path)")
+        }
+        defer { try? handle.close() }
+
+        var hasher = SHA256()
+        for try await chunk in response.body {
+            let bytes = Data(buffer: chunk)
+            hasher.update(data: bytes)
+            try handle.write(contentsOf: bytes)
+        }
+        try handle.close()
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Say what an upgrade did. Includes the rollbacks this server cannot see.
+    public func reportUpgrade(fromVersion: String?, toVersion: String,
+                              state: String, detail: String?) async throws {
+        var body: [String: JSONValue] = [
+            "toVersion": .string(toVersion), "state": .string(state),
+        ]
+        if let fromVersion { body["fromVersion"] = .string(fromVersion) }
+        if let detail { body["detail"] = .string(detail) }
+        _ = try await request("POST", "/agent/v1/agent/upgrades", body: .object(body))
+    }
+
     // MARK: - Work
 
     public func heartbeat(state: PresenceState, onACPower: Bool?, thermalOK: Bool?,
                           userPaused: Bool = false,
                           capability: [String: Double] = [:],
                           residentModels: [String: Double] = [:],
+                          storedModels: [String: Double]? = nil,
                           modelInfo: [String: Int] = [:]) async throws {
         var body: [String: JSONValue] = [
             "presenceState": .string(state.rawValue),
@@ -333,6 +507,21 @@ public actor ControlPlane {
         // holding a stale pause with no way to learn otherwise, and a fleet
         // view that under-reports capacity is a fleet view people stop reading.
         body["userPaused"] = .bool(userPaused)
+        // What this machine is running, on every beat rather than at enrolment:
+        // a binary can be replaced by the control plane, by an MDM, or by
+        // somebody at a keyboard, and only the node knows which one won.
+        body["agentVersion"] = .string(AgentVersion.version)
+        if !AgentVersion.fingerprint.isEmpty {
+            body["agentFingerprint"] = .string(AgentVersion.fingerprint)
+        }
+        // Sent only when it has been scanned. Absent means unchanged, so a beat
+        // from a loop that does not know what is on disk cannot erase what
+        // another loop reported: two loops heartbeat for one node, and the last
+        // time one spoke for the other the catalogue was wiped a second after
+        // being written.
+        if let storedModels {
+            body["storedModels"] = .object(storedModels.mapValues { .number($0) })
+        }
         if !modelInfo.isEmpty {
             // What each resident model actually accepts. Advertised so a client
             // does not have to assume a window: guessing high runs a
@@ -483,4 +672,11 @@ extension CharacterSet {
     /// and exactly what a strict server-side validator expects.
     static let daiQueryValue = CharacterSet(charactersIn:
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+
+    /// The same set, used for a path segment that must stay one segment.
+    ///
+    /// A model id contains a slash. Left alone it becomes two path components
+    /// and the server answers 404 on a route that exists, which is a failure
+    /// this codebase has already produced once by a different route.
+    static let daiPathSegment = daiQueryValue
 }

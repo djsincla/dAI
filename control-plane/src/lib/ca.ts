@@ -182,9 +182,22 @@ export class Ca {
       extensions: [
         new x509.BasicConstraintsExtension(false, undefined, true),
         new x509.KeyUsagesExtension(usages, true),
-        // Client auth only. A node certificate must not be usable to
-        // impersonate the control plane to another node.
-        new x509.ExtendedKeyUsageExtension([x509.ExtendedKeyUsage.clientAuth]),
+        // Both, because a node is now sometimes the server.
+        //
+        // Nodes talk to each other: one holding half a model listens, and the
+        // one holding the other half connects. The listener presents this
+        // certificate, and a client-only certificate is refused for
+        // "unsuitable certificate purpose" - a message that names the
+        // extension rather than the situation, and reads like a broken link.
+        //
+        // This does not let a node pose as the control plane. The control
+        // plane's certificate is signed by a different CA, and agents pin that
+        // one; nothing signed here can satisfy it. The separation of the two
+        // CAs is what enforces that, not the key usage bits.
+        new x509.ExtendedKeyUsageExtension([
+          x509.ExtendedKeyUsage.clientAuth,
+          x509.ExtendedKeyUsage.serverAuth,
+        ]),
       ],
     })
 

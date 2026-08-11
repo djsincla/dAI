@@ -1,0 +1,331 @@
+import Foundation
+import NIOCore
+import NIOPosix
+import NIOSSL
+
+/// A direct link between two machines running halves of one model.
+///
+/// Deliberately not routed through the control plane. A hidden state crosses
+/// this link once per token, so every hop is added to every token a person is
+/// waiting on: a relay would put a third machine, and a second network trip, in
+/// the middle of the tightest loop in the system.
+///
+/// Mutually authenticated with the same certificates the fleet already issues,
+/// in both directions. A machine will run whatever arrives here through the
+/// second half of a model and return the result, so the question of who is
+/// allowed to send is not a detail.
+///
+/// One connection, one peer, and no reconnection. If the link drops the token
+/// in flight is lost and the job is over, which is the honest behaviour: a
+/// pipeline that silently reconnected mid-sequence would resume with a key-value
+/// cache that no longer matches the conversation, and produce fluent nonsense
+/// rather than an error.
+public actor PipelineChannel {
+    public enum Failure: Error, CustomStringConvertible {
+        case notConnected
+        case peerClosed
+        case handshakeTimedOut
+        case transport(String)
+
+        public var description: String {
+            switch self {
+            case .notConnected: return "no peer is connected"
+            case .peerClosed: return "the other machine closed the link"
+            case .handshakeTimedOut: return "the other machine did not connect in time"
+            case let .transport(m): return m
+            }
+        }
+    }
+
+    private let group: EventLoopGroup
+    private let ownsGroup: Bool
+    /// Resolved when a peer has connected, or when the wait ran out.
+    ///
+    /// A future rather than an optional because binding and accepting are
+    /// separate moments: the port has to be known before anybody can connect to
+    /// it, so returning it only after a peer arrived was a deadlock written into
+    /// the signature.
+    private var connected: EventLoopFuture<Channel>?
+    private var bound: Channel?
+    private var inbox: FrameInbox
+
+    /// `group` is injectable so a test can run both ends in one process, and so
+    /// the agent can share the loop group it already has rather than starting
+    /// threads for a link that is idle most of the time.
+    public init(group: EventLoopGroup? = nil) {
+        if let group {
+            self.group = group
+            self.ownsGroup = false
+        } else {
+            self.group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+            self.ownsGroup = true
+        }
+        self.inbox = FrameInbox()
+    }
+
+    // MARK: - Connecting
+
+    /// Wait for the other half to connect.
+    ///
+    /// The machine holding the later layers listens, because it is the one that
+    /// produces the token and therefore the one a scheduler addresses.
+    public func listen(port: Int, identity: NodeIdentity, peerCAPEM: String,
+                       timeout: TimeInterval = 60) async throws -> Int {
+        try await listen(port: port,
+                         tls: Self.serverContext(identity: identity, peerCAPEM: peerCAPEM),
+                         timeout: timeout)
+    }
+
+    /// Listen with a context somebody else built.
+    ///
+    /// Separated so the socket path can be tested. The identity-based version
+    /// above signs through the Secure Enclave, and an Enclave key cannot be
+    /// created in a test process, so without this seam the only tested part
+    /// would be the codec while the actual connection went unexercised.
+    public func listen(port: Int, tls: NIOSSLContext,
+                       timeout: TimeInterval = 60) async throws -> Int {
+        let accepted = group.next().makePromise(of: Channel.self)
+        let inbox = self.inbox
+
+        let bootstrap = ServerBootstrap(group: group)
+            .serverChannelOption(ChannelOptions.backlog, value: 1)
+            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .childChannelOption(ChannelOptions.socketOption(.tcp_nodelay), value: 1)
+            .childChannelInitializer { ch in
+                do {
+                    let ssl = try NIOSSLServerHandler(context: tls)
+                    return ch.pipeline.addHandler(ssl).flatMap {
+                        ch.pipeline.addHandler(FrameHandler(inbox: inbox))
+                    }.map {
+                        accepted.succeed(ch)
+                    }
+                } catch {
+                    return ch.eventLoop.makeFailedFuture(error)
+                }
+            }
+
+        let server = try await bootstrap.bind(host: "0.0.0.0", port: port).get()
+        self.bound = server
+
+        // A peer that never arrives must not leave a job holding a machine open
+        // indefinitely.
+        group.next().scheduleTask(in: .seconds(Int64(timeout))) {
+            accepted.fail(Failure.handshakeTimedOut)
+        }
+        self.connected = accepted.futureResult
+        // Returned as soon as the socket is bound. Port 0 means the kernel
+        // chose, and the caller needs to know which one before the other machine
+        // can be told where to connect.
+        return server.localAddress?.port ?? port
+    }
+
+    /// The name to offer in SNI, or nil when there is no name to offer.
+    ///
+    /// Anything that parses as an IPv4 or IPv6 address is not a name. Kept as a
+    /// separate function so it can be tested without a socket.
+    public static func sniName(for serverName: String) -> String? {
+        if serverName.isEmpty { return nil }
+        if let _ = try? SocketAddress(ipAddress: serverName, port: 0) { return nil }
+        return serverName
+    }
+
+    /// Connect to the machine holding the later layers.
+    public func connect(host: String, port: Int, identity: NodeIdentity,
+                        peerCAPEM: String, serverName: String) async throws {
+        try await connect(host: host, port: port,
+                          tls: Self.clientContext(identity: identity, peerCAPEM: peerCAPEM),
+                          serverName: serverName)
+    }
+
+    public func connect(host: String, port: Int, tls: NIOSSLContext,
+                        serverName: String) async throws {
+        let inbox = self.inbox
+
+        let channel = try await ClientBootstrap(group: group)
+            .channelOption(ChannelOptions.socketOption(.tcp_nodelay), value: 1)
+            .channelInitializer { ch in
+                do {
+                    // SNI is a hostname field and TLS forbids putting an
+                    // address in it, so a peer reached by address is offered no
+                    // server name at all. That costs nothing here: the peer is
+                    // trusted because it presents a certificate signed by the
+                    // fleet CA, not because of what it is called, and the name
+                    // is not checked either way.
+                    let ssl = try NIOSSLClientHandler(
+                        context: tls, serverHostname: Self.sniName(for: serverName))
+                    return ch.pipeline.addHandler(ssl).flatMap {
+                        ch.pipeline.addHandler(FrameHandler(inbox: inbox))
+                    }
+                } catch {
+                    return ch.eventLoop.makeFailedFuture(error)
+                }
+            }
+            .connect(host: host, port: port).get()
+        self.connected = channel.eventLoop.makeSucceededFuture(channel)
+    }
+
+    // MARK: - Moving tensors
+
+    /// The connected channel, waiting for the peer if it has not arrived yet.
+    private func active() async throws -> Channel {
+        guard let connected else { throw Failure.notConnected }
+        let channel = try await connected.get()
+        guard channel.isActive else { throw Failure.peerClosed }
+        return channel
+    }
+
+    public func send(_ frame: TensorFrame) async throws {
+        let channel = try await active()
+        var buffer = channel.allocator.buffer(capacity: 0)
+        buffer.writeBytes(TensorCodec.encode(frame))
+        try await channel.writeAndFlush(buffer).get()
+    }
+
+    /// The next tensor from the other machine.
+    ///
+    /// Waits rather than polling. A pipeline step has nothing else to do until
+    /// the hidden state arrives, and a spin loop here would burn a core on the
+    /// machine that is meant to be being polite.
+    public func receive() async throws -> TensorFrame {
+        try await inbox.next()
+    }
+
+    public func close() async {
+        if let connected, let channel = try? await connected.get() {
+            try? await channel.close().get()
+        }
+        try? await bound?.close().get()
+        connected = nil
+        bound = nil
+        await inbox.finish()
+        if ownsGroup { try? await group.shutdownGracefully() }
+    }
+
+    // MARK: - TLS
+
+    /// The same identity the agent already uses to reach the control plane: a
+    /// certificate on disk and a key that never leaves the Secure Enclave, so
+    /// signing happens through a custom key rather than by handing bytes over.
+    private static func chain(_ identity: NodeIdentity) throws -> [NIOSSLCertificateSource] {
+        try NIOSSLCertificate.fromPEMBytes(Array(identity.certificatePEM.utf8))
+            .map { .certificate($0) }
+    }
+
+    private static func key(_ identity: NodeIdentity) -> NIOSSLPrivateKeySource {
+        .privateKey(NIOSSLPrivateKey(customPrivateKey: EnclaveSigner(key: identity.key)))
+    }
+
+    private static func serverContext(identity: NodeIdentity,
+                                      peerCAPEM: String) throws -> NIOSSLContext {
+        var config = TLSConfiguration.makeServerConfiguration(
+            certificateChain: try chain(identity), privateKey: key(identity))
+        // Verified in both directions. A machine that will run a model on
+        // whatever arrives has to know the sender is a fleet member, not merely
+        // that something connected. Only the fleet CA is acceptable; leaving the
+        // system anchors in place would mean any publicly trusted certificate
+        // also works, which is not what this is for.
+        config.certificateVerification = .noHostnameVerification
+        config.trustRoots = .certificates(
+            try NIOSSLCertificate.fromPEMBytes(Array(peerCAPEM.utf8)))
+        return try NIOSSLContext(configuration: config)
+    }
+
+    private static func clientContext(identity: NodeIdentity,
+                                      peerCAPEM: String) throws -> NIOSSLContext {
+        var config = TLSConfiguration.makeClientConfiguration()
+        config.certificateChain = try chain(identity)
+        config.privateKey = key(identity)
+        // The certificate has to be signed by the fleet CA; it does not have to
+        // match a hostname. A node certificate carries a node id as its subject
+        // and machines are reached by whatever address they happen to have, so
+        // full verification would reject every genuine peer.
+        config.certificateVerification = .noHostnameVerification
+        config.trustRoots = .certificates(
+            try NIOSSLCertificate.fromPEMBytes(Array(peerCAPEM.utf8)))
+        return try NIOSSLContext(configuration: config)
+    }
+}
+
+/// Frames that have arrived, and whoever is waiting for one.
+///
+/// A separate actor because it is written to from an event loop thread and read
+/// from a task, and the two must not share state without a boundary. Buffered
+/// rather than dropped: the sending machine may be a step ahead, and a tensor
+/// discarded because nobody was waiting yet is a token that never completes.
+actor FrameInbox {
+    private var queue: [TensorFrame] = []
+    private var waiter: CheckedContinuation<TensorFrame, Error>?
+    private var failure: Error?
+
+    func deliver(_ frame: TensorFrame) {
+        if let waiter {
+            self.waiter = nil
+            waiter.resume(returning: frame)
+        } else {
+            queue.append(frame)
+        }
+    }
+
+    /// Record why the link stopped working, keeping the *first* reason.
+    ///
+    /// Closing a channel makes it go inactive, so a handshake failure is
+    /// immediately followed by a "peer closed" that would otherwise overwrite
+    /// it. Every real cause then arrives at the operator as "the other machine
+    /// closed the link", which says nothing about a wrong trust root, an
+    /// expired certificate or a rejected frame.
+    func fail(_ error: Error) {
+        if failure == nil { failure = error }
+        if let waiter {
+            self.waiter = nil
+            waiter.resume(throwing: failure ?? error)
+        }
+    }
+
+    func finish() {
+        fail(PipelineChannel.Failure.peerClosed)
+    }
+
+    func next() async throws -> TensorFrame {
+        if !queue.isEmpty { return queue.removeFirst() }
+        if let failure { throw failure }
+        return try await withCheckedThrowingContinuation { continuation in
+            self.waiter = continuation
+        }
+    }
+}
+
+/// Decodes the stream and hands whole frames to the inbox.
+final class FrameHandler: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = ByteBuffer
+
+    private var decoder = TensorFrameDecoder()
+    private let inbox: FrameInbox
+
+    init(inbox: FrameInbox) { self.inbox = inbox }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        var buffer = unwrapInboundIn(data)
+        guard let bytes = buffer.readBytes(length: buffer.readableBytes) else { return }
+        do {
+            for frame in try decoder.push(Data(bytes)) {
+                Task { await inbox.deliver(frame) }
+            }
+        } catch {
+            // A malformed frame ends the link rather than being skipped. There
+            // is no way to resynchronise a stream whose framing is wrong, and
+            // guessing where the next frame starts would feed a model whatever
+            // the guess landed on.
+            Task { await inbox.fail(error) }
+            context.close(promise: nil)
+        }
+    }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        Task { await inbox.fail(PipelineChannel.Failure.peerClosed) }
+    }
+
+    func errorCaught(context: ChannelHandlerContext, error: Error) {
+        Task { await inbox.fail(PipelineChannel.Failure.transport(String(describing: error))) }
+        context.close(promise: nil)
+    }
+}

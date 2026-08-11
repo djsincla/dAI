@@ -1102,11 +1102,18 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
     // The file the adapter opens, chosen once here rather than worked out on
     // each node: two machines guessing differently would render two different
     // scenes under one job and nothing downstream would say so.
-    const entry = b.entryPath
-      ?? attachments.filter((a) => a.path.toLowerCase().endsWith('.blend')).map((a) => a.path)[0]
+    const scenes = attachments.filter((a) => a.path.toLowerCase().endsWith('.blend'))
+    const entry = b.entryPath ?? (scenes.length === 1 ? scenes[0]!.path : undefined)
     if (!entry) {
-      res.status(400).json({ error: 'bad_request',
-                             detail: 'no scene among the attachments; name one with entryPath' })
+      // Refused rather than resolved by a rule like "the first one". Picking
+      // silently means rendering a different scene from the one the submitter
+      // meant, and nothing downstream says so: the frames simply come out
+      // wrong. The older scene catalogue got this right and this did not.
+      const detail = scenes.length === 0
+        ? 'no scene among the attachments; name one with entryPath'
+        : `more than one scene attached, name one with entryPath: `
+          + scenes.map((a) => a.path).sort().join(', ')
+      res.status(400).json({ error: 'bad_request', detail })
       return
     }
     if (!attachments.some((a) => a.path === entry)) {

@@ -297,7 +297,10 @@ describe('work dispatch over HTTP', () => {
       }),
     })
     expect(r.status).toBe(200)
-    expect(await r.json()).toEqual({ requeued: 5 })
+    // jobFinished rides along on every result so a node learns the job is over
+    // at the moment it ends, rather than at the next poll: it is holding tens of
+    // gigabytes of somebody else's scene, on somebody else's machine.
+    expect(await r.json()).toEqual({ requeued: 5, jobFinished: false })
   })
 
   it('returns 409 for a result against an expired lease', async () => {

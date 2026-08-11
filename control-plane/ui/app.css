@@ -576,3 +576,116 @@ th.sortable.desc::after { content: ' \2193'; opacity: 1; color: var(--accent); }
   font-size: 12.5px; color: var(--muted);
 }
 #signed-in-as { font-weight: 550; color: var(--ink-soft, var(--text)); }
+
+/* ------------------------------------------------------------- api explorer */
+
+/*
+  Built to be scanned first and read second. A method, a path and a summary is
+  what somebody looking for an endpoint reads; everything else belongs behind a
+  disclosure, because the first attempt put it all on screen at once and made a
+  page nobody could find anything in.
+*/
+
+.api-list { display: flex; flex-direction: column; gap: 22px; }
+
+.api-group h3 {
+  margin: 0 0 8px; font-size: 12px; font-weight: 650;
+  letter-spacing: .09em; text-transform: uppercase; color: var(--muted);
+}
+.api-group h3 .count {
+  font-weight: 500; color: var(--muted); opacity: .7; margin-left: 6px;
+  letter-spacing: 0;
+}
+
+.api-op {
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--panel); margin-bottom: 6px; overflow: hidden;
+}
+.api-op.open { border-color: var(--accent-line); }
+
+.api-op-head {
+  width: 100%; display: grid;
+  grid-template-columns: 14px 62px minmax(0, auto) minmax(0, 1fr);
+  align-items: center; gap: 10px;
+  background: none; border: 0; padding: 9px 12px;
+  text-align: left; cursor: pointer; color: var(--text); font: inherit;
+}
+.api-op-head:hover { background: var(--panel-2); }
+.api-op-head .chev { color: var(--muted); font-size: 11px; }
+
+/* Method colour is semantic, not decoration: it is the difference between a
+   call that reads and one that changes something. */
+.method {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px; font-weight: 700; letter-spacing: .05em;
+  padding: 3px 0; border-radius: 5px; text-align: center;
+}
+.m-get    { background: var(--good-bg); color: var(--good-fg); }
+.m-post   { background: var(--accent-soft); color: var(--teal-700); }
+.m-put    { background: var(--warn-bg); color: var(--warn-fg); }
+.m-patch  { background: var(--warn-bg); color: var(--warn-fg); }
+.m-delete { background: var(--bad-bg); color: var(--bad-fg); }
+
+.api-path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px; color: var(--text); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.api-summary {
+  color: var(--muted); font-size: 12.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.api-op-body {
+  border-top: 1px solid var(--line); padding: 14px 14px 16px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.api-desc { margin: 0; color: var(--muted); font-size: 13px; max-width: 78ch; }
+
+.api-params { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+.api-params label, .api-body-label { display: grid; gap: 5px; }
+.api-params span, .api-body-label > span {
+  font-size: 12px; color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.api-params em, .api-body-label em {
+  font-style: normal; opacity: .65; font-size: 11px; margin-left: 4px;
+}
+.api-params input, .api-op-body textarea {
+  background: var(--bg); border: 1px solid var(--line-strong); border-radius: 7px;
+  padding: 7px 9px; font-size: 13px; color: var(--text); width: 100%;
+}
+.api-op-body textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px; line-height: 1.5; resize: vertical;
+}
+.api-params input:focus, .api-op-body textarea:focus {
+  outline: 2px solid var(--accent-line); outline-offset: -1px; border-color: var(--accent);
+}
+
+.api-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+/* Armed state for the second click. Amber rather than red: this is a warning
+   that the next click acts, not a report that something went wrong. */
+.api-actions button.arm {
+  background: var(--warn-fg); border-color: var(--warn-fg);
+}
+.api-blocked { max-width: 60ch; }
+
+.api-response { display: flex; flex-direction: column; gap: 8px; }
+.api-status { display: flex; align-items: center; gap: 10px; }
+.api-out {
+  margin: 0; padding: 11px 13px; border-radius: 7px;
+  background: var(--bg); border: 1px solid var(--line);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px; line-height: 1.55; color: var(--text);
+  max-height: 420px; overflow: auto; white-space: pre;
+}
+.api-note { margin: 0; font-size: 12.5px; }
+.api-note.warn { color: var(--warn-fg); }
+.api-note.bad  { color: var(--bad-fg); }
+.api-note.flat { color: var(--muted); }
+
+@media (max-width: 720px) {
+  .api-op-head { grid-template-columns: 14px 56px 1fr; }
+  .api-summary { display: none; }
+}

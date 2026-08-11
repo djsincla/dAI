@@ -115,6 +115,41 @@ func gpuRunsAtFullDutyAndStandardQoSWhenUnobserved(state: PresenceState) {
     #expect(defaultPolicy[.idle]!.maxCompletionTokens <= defaultPolicy[.locked]!.maxCompletionTokens)
 }
 
+@Test func policyAndCapabilityAreDifferentQuestions() {
+    // These were one number, and a machine doing nothing has two entirely
+    // different causes. "Policy forbids it" is answered by locking the screen;
+    // "there is no runtime for it" is answered by installing one. Reporting
+    // only the first sent a reader looking at presence detection when the
+    // machine had no Metal toolchain.
+    let absent = defaultPolicy[.absent]!
+    #expect(permittedKinds(policy: absent).contains(.render))
+    #expect(runnableKinds(absent, hasGPU: true, hasANE: true).contains(.render) == false)
+}
+
+@Test func nothingOffersAKindItCannotRun() {
+    // What the node advertises to the scheduler. Offering work it must
+    // immediately hand back wastes a lease and looks, from the fleet view, like
+    // a node failing everything it is given.
+    let absent = defaultPolicy[.absent]!
+    #expect(runnableKinds(absent, hasGPU: false, hasANE: false) == [])
+    #expect(runnableKinds(absent, hasGPU: false, hasANE: true) == [.embed])
+    #expect(runnableKinds(absent, hasGPU: true, hasANE: false) == [.generate])
+    #expect(runnableKinds(absent, hasGPU: true, hasANE: true) == [.embed, .generate])
+
+    // Present at a machine: GPU work is forbidden whatever runtimes exist.
+    let active = defaultPolicy[.active]!
+    #expect(runnableKinds(active, hasGPU: true, hasANE: true) == [.embed])
+}
+
+@Test func renderIsDeclaredButNotImplemented() {
+    // Stated as a value rather than left to be inferred from a throw in the
+    // batch loop. When a render runtime lands, this test is the thing that
+    // fails and points at every place that has to agree.
+    #expect(WorkKind.render.isImplemented == false)
+    #expect(WorkKind.embed.isImplemented)
+    #expect(WorkKind.generate.isImplemented)
+}
+
 @Test func permittedKindsMatchTheTable() {
     for s in [PresenceState.active, .passive, .idle] {
         #expect(permittedKinds(s) == [.embed])

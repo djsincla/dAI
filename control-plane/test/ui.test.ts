@@ -2,6 +2,11 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
+  bodySkeleton, buildUrl, callableHere, formatResponse, groupOperations,
+  isReadOnly, matchesOperation, operationsFrom, resolveRef, responseSize, statusTone,
+  surfaceOf,
+} from '../ui/view.js'
+import {
   attentionItems, capacityOf, copyState, distributionOf, humanBytes, importCost,
   bucketFor, clampWindow, describeWindow, groupMachines, groupMismatches,
   groupMode, groupWarning, importProgress, isStale, isSynthetic, kindsFor,
@@ -661,5 +666,188 @@ describe('hidden actually hides', () => {
     // the change form hidden; the stylesheet has to honour it.
     expect(html).toMatch(/id="change-form"[^>]*\bhidden\b/)
     expect(html).toMatch(/id="gate"[^>]*\bhidden\b/)
+  })
+})
+
+
+/**
+ * The API explorer, which turns the contract into something operators use.
+ *
+ * The console already linked to a rendered copy of the document, which is good
+ * for reading and no help in answering "what does this return on my fleet".
+ * Answering that meant leaving the console, finding a token and writing a curl
+ * line, so nobody did.
+ */
+describe('reading the contract as operations', () => {
+  const spec = {
+    paths: {
+      '/admin/v1/nodes': {
+        get: { tags: ['admin'], summary: 'List machines', responses: { 200: {} } },
+      },
+      '/admin/v1/nodes/{nodeId}/approve': {
+        post: {
+          tags: ['admin'], summary: 'Approve',
+          parameters: [{ name: 'nodeId', in: 'path', required: true }],
+          responses: { 200: {}, 404: {} },
+        },
+      },
+      '/agent/v1/heartbeat': {
+        post: { tags: ['agent'], summary: 'Report presence', responses: { 204: {} } },
+      },
+      '/monitor/v1/metrics': { get: { tags: ['monitor'], summary: 'Metrics', responses: { 200: {} } } },
+    },
+  }
+
+  it('flattens every method on every path', () => {
+    const ops = operationsFrom(spec)
+    expect(ops.map((o) => `${o.method} ${o.path}`).sort()).toEqual([
+      'GET /admin/v1/nodes',
+      'GET /monitor/v1/metrics',
+      'POST /admin/v1/nodes/{nodeId}/approve',
+      'POST /agent/v1/heartbeat',
+    ])
+  })
+
+  it('carries path parameters through', () => {
+    const op = operationsFrom(spec).find((o) => o.path.endsWith('/approve'))!
+    expect(op.params).toEqual([
+      { name: 'nodeId', in: 'path', required: true, description: '' },
+    ])
+  })
+
+  it('knows which surface an endpoint belongs to', () => {
+    expect(surfaceOf('/agent/v1/heartbeat')).toBe('agent')
+    expect(surfaceOf('/admin/v1/nodes')).toBe('admin')
+    expect(surfaceOf('/monitor/v1/metrics')).toBe('monitor')
+    expect(surfaceOf('/v1/chat/completions')).toBe('serving')
+  })
+
+  it('will not offer to send what a browser cannot send', () => {
+    // The agent surface is mutually authenticated with a node's client
+    // certificate. A browser has none and never will, so those are listed and
+    // not sendable - shown rather than hidden, because "why can I not call
+    // this" is a question the page should answer rather than avoid.
+    const ops = operationsFrom(spec)
+    expect(callableHere(ops.find((o) => o.surface === 'admin')!)).toBe(true)
+    expect(callableHere(ops.find((o) => o.surface === 'monitor')!)).toBe(true)
+    expect(callableHere(ops.find((o) => o.surface === 'agent')!)).toBe(false)
+  })
+
+  it('separates the calls that only read from the ones that act', () => {
+    // Decides which ones ask twice before sending. An explorer is a thing
+    // people click on to find out what an endpoint does, and the endpoint they
+    // are most curious about is the one that revokes a machine.
+    const ops = operationsFrom(spec)
+    expect(isReadOnly(ops.find((o) => o.method === 'GET')!)).toBe(true)
+    expect(isReadOnly(ops.find((o) => o.method === 'POST')!)).toBe(false)
+  })
+
+  it('groups by tag with the surfaces in a useful order', () => {
+    expect(groupOperations(operationsFrom(spec)).map((g) => g.tag))
+      .toEqual(['admin', 'agent', 'monitor'])
+  })
+
+  it('filters on what somebody would actually type', () => {
+    const op = operationsFrom(spec)[0]!
+    expect(matchesOperation(op, '')).toBe(true)
+    expect(matchesOperation(op, 'nodes')).toBe(true)
+    expect(matchesOperation(op, 'GET')).toBe(true)
+    expect(matchesOperation(op, 'machines')).toBe(true)   // the summary
+    expect(matchesOperation(op, 'renderfarm')).toBe(false)
+  })
+})
+
+describe('building a request', () => {
+  const op = {
+    id: 'post:/admin/v1/nodes/{nodeId}/approve',
+    method: 'POST',
+    path: '/admin/v1/nodes/{nodeId}/approve',
+    params: [
+      { name: 'nodeId', in: 'path', required: true },
+      { name: 'reason', in: 'query', required: false },
+    ],
+  } as any
+
+  it('refuses a half-built URL rather than sending one', () => {
+    // `/admin/v1/nodes//approve` answers 404, and the reader concludes the
+    // endpoint does not exist rather than that their box was empty.
+    expect(buildUrl(op, {})).toEqual({ error: 'needs nodeId' })
+  })
+
+  it('substitutes path parameters and encodes them', () => {
+    expect(buildUrl(op, { nodeId: 'a/b' }).url).toBe('/admin/v1/nodes/a%2Fb/approve')
+  })
+
+  it('appends only the query parameters that were filled in', () => {
+    expect(buildUrl(op, { nodeId: 'n1' }).url).toBe('/admin/v1/nodes/n1/approve')
+    expect(buildUrl(op, { nodeId: 'n1', reason: 'new mac' }).url)
+      .toBe('/admin/v1/nodes/n1/approve?reason=new+mac')
+  })
+})
+
+describe('starting from a request body rather than a blank box', () => {
+  const spec = {
+    components: {
+      schemas: {
+        Pool: {
+          type: 'object',
+          required: ['name', 'tier'],
+          properties: {
+            name: { type: 'string' },
+            tier: { type: 'string', enum: ['harvest', 'cluster'] },
+            minMemoryGb: { type: 'integer' },
+            nodeIds: { type: 'array', items: { type: 'string', format: 'uuid' } },
+          },
+        },
+        Loop: { $ref: '#/components/schemas/Loop' },
+      },
+    },
+  }
+
+  it('fills required fields first, so the shape reads as the minimum request', () => {
+    // A blank box makes the reader go and find the schema themselves, which is
+    // the errand this page exists to remove.
+    const body = bodySkeleton(spec, { $ref: '#/components/schemas/Pool' })
+    expect(Object.keys(body)).toEqual(['name', 'tier', 'minMemoryGb', 'nodeIds'])
+    expect(body.tier).toBe('harvest')   // the first enum value, not an empty string
+    expect(body.minMemoryGb).toBe(0)
+    expect(body.nodeIds).toEqual(['00000000-0000-0000-0000-000000000000'])
+  })
+
+  it('prefers an example over a guess', () => {
+    expect(bodySkeleton(spec, { type: 'string', example: 'orca' })).toBe('orca')
+  })
+
+  it('does not hang on a schema that refers to itself', () => {
+    expect(resolveRef(spec, { $ref: '#/components/schemas/Loop' })).toBe(null)
+    expect(bodySkeleton(spec, { $ref: '#/components/schemas/Loop' })).toBe(null)
+  })
+})
+
+describe('showing what came back', () => {
+  it('pretty-prints JSON and leaves everything else alone', () => {
+    expect(formatResponse('{"a":1}', 'application/json')).toBe('{\n  "a": 1\n}')
+    expect(formatResponse('# HELP up\nup 1', 'text/plain')).toBe('# HELP up\nup 1')
+  })
+
+  it('shows a body that lied about being JSON exactly as it arrived', () => {
+    // That mismatch is itself the finding, so it must not be swallowed.
+    expect(formatResponse('<html>500</html>', 'application/json')).toBe('<html>500</html>')
+  })
+
+  it('does not round a small body away to nothing', () => {
+    // humanBytes measures model files and rounds to kilobytes, because a real
+    // file should never read as "0 kB". A response body is routinely two
+    // hundred bytes, and rounding that to zero says the endpoint returned
+    // nothing when it returned the answer.
+    expect(responseSize(212)).toBe('212 B')
+    expect(responseSize(4096)).toBe('4.1 kB')
+    expect(responseSize(2_500_000)).toBe('2.5 MB')
+  })
+
+  it('reads a status at a glance', () => {
+    expect(statusTone(200)).toBe('good')
+    expect(statusTone(403)).toBe('warn')
+    expect(statusTone(500)).toBe('bad')
   })
 })

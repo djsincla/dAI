@@ -19,6 +19,9 @@ import {
   machinesThatCouldHold, matchesGroup, matchesQuery, nextSort, pauseAction, progressOf,
   rolloutState, servingFor, sortRows, upgradeOutcome, windowFromDrag,
   withFreshness,
+  bodySkeleton, buildUrl, callableHere, formatResponse, groupOperations,
+  isReadOnly, matchesOperation, operationsFrom, responseSize, statusTone,
+  whyNotCallable,
 } from './view.js'
 
 const $ = (sel) => document.querySelector(sel)
@@ -1529,6 +1532,273 @@ const VIEWS = {
     </section>`,
 }
 
+/* ------------------------------------------------------------- api explorer */
+
+/**
+ * The contract, made usable.
+ *
+ * The console already linked to a rendered copy of the OpenAPI document, which
+ * is good for reading and no help at all in answering "what does this actually
+ * return on my fleet". Answering that meant leaving the console, finding a
+ * token and writing a curl line, so in practice nobody did and the API stayed a
+ * document rather than a tool.
+ *
+ * Two decisions worth stating.
+ *
+ * It sends with the session you are already signed in with. There is no box to
+ * paste a token into, because a console that asks people to handle raw
+ * credentials teaches them to keep credentials lying around.
+ *
+ * Anything that is not a GET asks twice. An explorer is a thing people click on
+ * to find out what an endpoint does, and the endpoint they are most curious
+ * about is the one that revokes a machine. The second click names the method
+ * and the path so what is about to happen is on screen when it is confirmed.
+ */
+let apiSpec = null
+let apiOperations = []
+const apiExpanded = new Set()
+
+async function loadApi() {
+  if (!apiSpec) {
+    const res = await fetch('/openapi.json', { headers: { accept: 'application/json' } })
+    if (!res.ok) {
+      $('#api-list').innerHTML =
+        `<p class="empty">Could not read the contract (${res.status}).</p>`
+      return
+    }
+    apiSpec = await res.json()
+    apiOperations = operationsFrom(apiSpec)
+  }
+  renderApi()
+}
+
+function renderApi() {
+  const list = $('#api-list')
+  if (!list) return
+  const query = $('#api-search')?.value ?? ''
+  const shown = apiOperations.filter((op) => matchesOperation(op, query))
+  const groups = groupOperations(shown)
+
+  $('#api-count').textContent =
+    `${shown.length} of ${apiOperations.length}`
+  $('#api-empty').hidden = shown.length > 0
+
+  list.innerHTML = groups.map((g) => `
+    <div class="api-group">
+      <h3>${escape(g.tag)} <span class="count">${g.operations.length}</span></h3>
+      ${g.operations.map(renderOperation).join('')}
+    </div>`).join('')
+
+  for (const el of list.querySelectorAll('.api-op')) bindOperation(el)
+}
+
+function bindOperation(el) {
+  if (!el) return
+  const head = el.querySelector('.api-op-head')
+  if (head) head.addEventListener('click', () => toggleOperation(head.dataset.op))
+  const send = el.querySelector('[data-send]')
+  if (send) send.addEventListener('click', () => sendOperation(send.dataset.send))
+}
+
+/**
+ * One endpoint, collapsed to a line.
+ *
+ * A method, a path and a summary is what somebody scanning for an endpoint
+ * reads; everything else is what they need once they have found it, and putting
+ * it all on screen at once made a page nobody could scan.
+ */
+function renderOperation(op) {
+  const open = apiExpanded.has(op.id)
+  const callable = callableHere(op)
+  return `
+    <div class="api-op${open ? ' open' : ''}" id="op-${escape(cssId(op.id))}">
+      <button class="api-op-head" data-op="${escape(op.id)}"
+              aria-expanded="${open}">
+        <span class="chev">${open ? '&#9662;' : '&#9656;'}</span>
+        <span class="method m-${escape(op.method.toLowerCase())}">${escape(op.method)}</span>
+        <code class="api-path">${escape(op.path)}</code>
+        <span class="api-summary">${escape(op.summary)}</span>
+      </button>
+      ${open ? renderOperationBody(op, callable) : ''}
+    </div>`
+}
+
+function renderOperationBody(op, callable) {
+  const body = op.requestBody
+    ? JSON.stringify(bodySkeleton(apiSpec, op.requestBody), null, 2) : ''
+  const params = op.params.filter((p) => p.in === 'path' || p.in === 'query')
+
+  return `
+    <div class="api-op-body">
+      ${op.description ? `<p class="api-desc">${escape(op.description).replace(/\n\n/g, '<br><br>')}</p>` : ''}
+      ${params.length ? `
+        <div class="api-params">
+          ${params.map((p) => `
+            <label>
+              <span>${escape(p.name)}
+                <em>${escape(p.in)}${p.required ? ', required' : ''}</em></span>
+              <input data-param="${escape(op.id)}|${escape(p.name)}"
+                     placeholder="${escape(p.description.split('\n')[0].slice(0, 60))}">
+            </label>`).join('')}
+        </div>` : ''}
+      ${op.requestBody ? `
+        <label class="api-body-label">
+          <span>Request body <em>json</em></span>
+          <textarea data-body="${escape(op.id)}" spellcheck="false"
+                    rows="${Math.min(18, body.split('\n').length + 1)}">${escape(body)}</textarea>
+        </label>` : ''}
+      <div class="api-actions">
+        ${callable
+          ? `<button class="primary" data-send="${escape(op.id)}">
+               Send ${escape(op.method)}</button>`
+          : `<span class="note api-blocked">Cannot be sent from here:
+               ${escape(whyNotCallable(op))}</span>`}
+        <span class="note">Responds ${escape(op.responses.join(', ') || 'unspecified')}</span>
+      </div>
+      <div class="api-response" data-response="${escape(op.id)}" hidden></div>
+    </div>`
+}
+
+/** An id that is safe in a CSS selector and stable per operation. */
+function cssId(id) { return id.replace(/[^A-Za-z0-9]/g, '-') }
+
+/**
+ * Open or close one endpoint, replacing only that row.
+ *
+ * Redrawing the whole list would be simpler and is what this did first, and it
+ * threw away the scroll position every time: clicking an endpoint near the
+ * bottom jumped the page somewhere else, which reads as the click having done
+ * something other than what it did. It also discarded any request body the
+ * reader had already typed into another open endpoint.
+ */
+function toggleOperation(id) {
+  const op = apiOperations.find((o) => o.id === id)
+  if (apiExpanded.has(id)) apiExpanded.delete(id)
+  else apiExpanded.add(id)
+
+  const el = document.getElementById(`op-${cssId(id)}`)
+  if (!op || !el) { renderApi(); return }
+  el.outerHTML = renderOperation(op)
+  bindOperation(document.getElementById(`op-${cssId(id)}`))
+}
+
+/**
+ * Send it, and show exactly what came back.
+ *
+ * Status, timing and body, including the failures. An explorer that only
+ * rendered successes would hide the half of the contract people come here to
+ * understand: what a 403 says, and whether a 404 means "no such node" or "no
+ * such route".
+ */
+async function sendOperation(id) {
+  const op = apiOperations.find((o) => o.id === id)
+  const box = document.querySelector(`[data-response="${CSS.escape(id)}"]`)
+  const button = document.querySelector(`[data-send="${CSS.escape(id)}"]`)
+  if (!op || !box || !button) return
+
+  const values = {}
+  for (const input of document.querySelectorAll(`[data-param^="${CSS.escape(id)}|"]`)) {
+    values[input.dataset.param.split('|')[1]] = input.value
+  }
+  const built = buildUrl(op, values)
+  if (built.error) {
+    showApiResponse(box, { note: built.error, tone: 'warn' })
+    return
+  }
+
+  let payload
+  const textarea = document.querySelector(`[data-body="${CSS.escape(id)}"]`)
+  if (textarea && textarea.value.trim()) {
+    try {
+      payload = JSON.parse(textarea.value)
+    } catch (err) {
+      // Caught here rather than sent, so a typo comes back as a typo instead of
+      // a 400 that reads like the endpoint rejected a correct request.
+      showApiResponse(box, { note: `Request body is not valid JSON: ${err.message}`,
+                             tone: 'warn' })
+      return
+    }
+  }
+
+  // The second click, for anything that can change something.
+  if (!isReadOnly(op) && button.dataset.armed !== 'yes') {
+    button.dataset.armed = 'yes'
+    button.classList.add('arm')
+    button.textContent = `Confirm ${op.method} ${op.path}`
+    showApiResponse(box, {
+      note: 'This changes something on the fleet. Click again to send it.',
+      tone: 'warn',
+    })
+    return
+  }
+
+  button.disabled = true
+  const started = performance.now()
+  try {
+    const res = await fetch(built.url, {
+      method: op.method,
+      headers: {
+        authorization: `Bearer ${session.get()}`,
+        ...(payload === undefined ? {} : { 'content-type': 'application/json' }),
+      },
+      ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
+    })
+    const text = await res.text()
+    showApiResponse(box, {
+      status: res.status,
+      statusText: res.statusText,
+      ms: Math.round(performance.now() - started),
+      contentType: res.headers.get('content-type') ?? '',
+      body: text,
+    })
+  } catch (err) {
+    showApiResponse(box, { note: `Request failed: ${err.message}`, tone: 'bad' })
+  } finally {
+    button.disabled = false
+    button.dataset.armed = ''
+    button.classList.remove('arm')
+    button.textContent = `Send ${op.method}`
+  }
+}
+
+function showApiResponse(box, r) {
+  box.hidden = false
+  if (r.note) {
+    box.innerHTML = `<p class="api-note ${escape(r.tone ?? 'flat')}">${escape(r.note)}</p>`
+    return
+  }
+  const tone = statusTone(r.status)
+  const formatted = formatResponse(r.body, r.contentType)
+  box.innerHTML = `
+    <div class="api-status">
+      <span class="pill ${escape(tone)}">${r.status} ${escape(r.statusText ?? '')}</span>
+      <span class="note">${r.ms} ms${r.body ? `, ${responseSize(r.body.length)}` : ''}</span>
+    </div>
+    ${formatted ? `<pre class="api-out">${escape(formatted)}</pre>`
+                : '<p class="api-note flat">No body.</p>'}`
+}
+
+VIEWS.api = () => `
+  <header class="view-head">
+    <h1>API</h1>
+    <p class="note">
+      Every endpoint this control plane serves, and a way to call it with the
+      session you are already signed in with.
+    </p>
+  </header>
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Endpoints</h2>
+      <div class="controls">
+        <input id="api-search" class="search" type="search"
+               placeholder="Filter by path, method or summary" autocomplete="off">
+        <span class="note" id="api-count"></span>
+      </div>
+    </div>
+    <div id="api-list" class="api-list"></div>
+    <p class="empty" id="api-empty" hidden>Nothing matches that filter.</p>
+  </section>`
+
 const currentView = () => {
   const name = location.hash.replace(/^#\/?/, '') || 'overview'
   return VIEWS[name] ? name : 'overview'
@@ -1556,6 +1826,10 @@ function mount(name) {
   if (name === 'machines') $('#new-group').addEventListener('click', createGroup)
   if (name === 'overview') bindChartDrag()
   if (name === 'logs') bindLogControls()
+  if (name === 'api') {
+    $('#api-search').addEventListener('input', renderApi)
+    loadApi()
+  }
   if (name === 'deploy') loadDeployment(lastData?.pools ?? [])
   if (lastData) paint(lastData)
 }

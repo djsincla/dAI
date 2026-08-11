@@ -642,3 +642,249 @@ export function groupMachines(nodes, pools, matcher) {
     ungrouped: nodes.filter((n) => !grouped.has(n.id)),
   }
 }
+
+/* ------------------------------------------------------------- api explorer */
+
+/**
+ * The contract, as something a page can draw and call.
+ *
+ * The console has always linked to a rendered copy of the OpenAPI document,
+ * which is good for reading and useless for finding out what an endpoint
+ * actually returns on this fleet. Answering that meant leaving the console,
+ * finding a token, and writing a curl line - so in practice nobody did, and the
+ * API stayed a document rather than something operators used.
+ *
+ * These functions turn the document into operations a view can list, expand and
+ * send, and they live here rather than in the page because every one of them is
+ * a judgement worth checking: which surface an endpoint belongs to, whether the
+ * browser can call it at all, and what a starting request body should look like.
+ */
+
+/** Every operation in the document, flattened and ordered for a person. */
+export function operationsFrom(spec) {
+  const METHODS = ['get', 'post', 'put', 'patch', 'delete']
+  const out = []
+  for (const [path, item] of Object.entries(spec?.paths ?? {})) {
+    for (const method of METHODS) {
+      const op = item?.[method]
+      if (!op) continue
+      const params = [...(item.parameters ?? []), ...(op.parameters ?? [])]
+      out.push({
+        id: `${method}:${path}`,
+        method: method.toUpperCase(),
+        path,
+        surface: surfaceOf(path),
+        tag: op.tags?.[0] ?? surfaceOf(path),
+        summary: op.summary ?? '',
+        description: op.description ?? '',
+        params: params.map((p) => ({
+          name: p.name, in: p.in, required: !!p.required,
+          description: p.description ?? '',
+        })),
+        requestBody: op.requestBody?.content?.['application/json']?.schema ?? null,
+        bodyRequired: !!op.requestBody?.required,
+        responses: Object.keys(op.responses ?? {}).sort(),
+      })
+    }
+  }
+  return out
+}
+
+/**
+ * Which surface an endpoint belongs to, which decides whether this page can
+ * call it at all.
+ *
+ * The agent surface is mutually authenticated with a node's client certificate.
+ * A browser has no such certificate and never will, so those operations are
+ * listed and not sendable - shown rather than hidden, because "why can I not
+ * call this" is a question the page should answer rather than avoid.
+ */
+export function surfaceOf(path) {
+  if (path.startsWith('/agent/')) return 'agent'
+  if (path.startsWith('/admin/')) return 'admin'
+  if (path.startsWith('/monitor/')) return 'monitor'
+  if (path.startsWith('/v1/') || path.startsWith('/serving/')) return 'serving'
+  return 'other'
+}
+
+/** Whether the console's own session can send this. */
+export function callableHere(op) {
+  return op.surface === 'admin' || op.surface === 'monitor'
+}
+
+export function whyNotCallable(op) {
+  if (op.surface === 'agent') {
+    return 'mutually authenticated with a node certificate, which a browser does not have'
+  }
+  if (op.surface === 'serving') {
+    return 'served on the inference surface, which takes an API key rather than a session'
+  }
+  return 'not reachable from this page'
+}
+
+/**
+ * Whether sending this can change something.
+ *
+ * Used to put a confirmation in front of the ones that can. An explorer exists
+ * to be clicked on by somebody finding out what an endpoint does, and the
+ * endpoint they are most curious about is the one that revokes a machine.
+ */
+export function isReadOnly(op) {
+  return op.method === 'GET' || op.method === 'HEAD'
+}
+
+/** Operations grouped under their tag, each group sorted by path then method. */
+export function groupOperations(ops) {
+  const byTag = new Map()
+  for (const op of ops) {
+    if (!byTag.has(op.tag)) byTag.set(op.tag, [])
+    byTag.get(op.tag).push(op)
+  }
+  const order = ['admin', 'agent', 'monitor', 'serving']
+  return [...byTag.entries()]
+    .map(([tag, operations]) => ({
+      tag,
+      operations: operations.sort((a, b) =>
+        a.path.localeCompare(b.path) || a.method.localeCompare(b.method)),
+    }))
+    .sort((a, b) => {
+      const ai = order.indexOf(a.tag), bi = order.indexOf(b.tag)
+      return (ai === -1 ? order.length : ai) - (bi === -1 ? order.length : bi)
+        || a.tag.localeCompare(b.tag)
+    })
+}
+
+/** Free-text search over the things somebody would actually type. */
+export function matchesOperation(op, query) {
+  const q = (query ?? '').trim().toLowerCase()
+  if (!q) return true
+  return [op.path, op.method, op.summary, op.tag].join(' ').toLowerCase().includes(q)
+}
+
+/**
+ * Follow a `$ref` to the schema it names.
+ *
+ * Only local refs, which is all this document has. A remote one would be a
+ * network fetch from a page rendering a contract, and the contract is supposed
+ * to be self-contained.
+ */
+export function resolveRef(spec, schema, seen = new Set()) {
+  let node = schema
+  while (node && typeof node.$ref === 'string') {
+    if (seen.has(node.$ref)) return null
+    seen.add(node.$ref)
+    if (!node.$ref.startsWith('#/')) return null
+    node = node.$ref.slice(2).split('/').reduce((o, k) => o?.[k], spec)
+  }
+  return node ?? null
+}
+
+/**
+ * A request body to start from, built from the schema.
+ *
+ * A blank box is a worse starting point than a wrong one: it makes the reader
+ * go and find the schema themselves, which is the errand this page exists to
+ * remove. Required properties are filled first and always present, so what
+ * appears is a request that has a chance of being accepted rather than an
+ * inventory of every optional field.
+ */
+export function bodySkeleton(spec, schema, depth = 0) {
+  const node = resolveRef(spec, schema)
+  if (!node || depth > 4) return null
+  if (node.example !== undefined) return node.example
+  if (node.default !== undefined) return node.default
+  if (Array.isArray(node.enum) && node.enum.length) return node.enum[0]
+
+  switch (node.type) {
+    case 'object': {
+      const out = {}
+      const required = new Set(node.required ?? [])
+      const props = Object.entries(node.properties ?? {})
+      // Required first, then the rest, so the shape reads as the minimum
+      // request with the options after it.
+      for (const [name, sub] of props.filter(([n]) => required.has(n))) {
+        out[name] = bodySkeleton(spec, sub, depth + 1)
+      }
+      for (const [name, sub] of props.filter(([n]) => !required.has(n))) {
+        out[name] = bodySkeleton(spec, sub, depth + 1)
+      }
+      return out
+    }
+    case 'array':
+      return node.items ? [bodySkeleton(spec, node.items, depth + 1)] : []
+    case 'integer':
+    case 'number':
+      return 0
+    case 'boolean':
+      return false
+    case 'string':
+      return node.format === 'date-time' ? new Date(0).toISOString()
+        : node.format === 'uuid' ? '00000000-0000-0000-0000-000000000000' : ''
+    default:
+      return null
+  }
+}
+
+/**
+ * The URL to send, with path parameters substituted and query parameters
+ * appended.
+ *
+ * Returns an error rather than a half-built URL when a required path parameter
+ * is missing. Sending `/admin/v1/nodes//approve` produces a 404 that reads like
+ * the endpoint does not exist, and the reader concludes the wrong thing about
+ * the API rather than about their own empty box.
+ */
+export function buildUrl(op, values = {}) {
+  const missing = []
+  let path = op.path
+  for (const p of op.params.filter((p) => p.in === 'path')) {
+    const v = (values[p.name] ?? '').trim()
+    if (!v) { missing.push(p.name); continue }
+    path = path.replace(`{${p.name}}`, encodeURIComponent(v))
+  }
+  if (missing.length) return { error: `needs ${missing.join(', ')}` }
+
+  const query = new URLSearchParams()
+  for (const p of op.params.filter((p) => p.in === 'query')) {
+    const v = (values[p.name] ?? '').trim()
+    if (v) query.set(p.name, v)
+  }
+  const qs = query.toString()
+  return { url: qs ? `${path}?${qs}` : path }
+}
+
+/** Pretty JSON when it is JSON, and the raw text when it is not. */
+export function formatResponse(text, contentType = '') {
+  if (!text) return ''
+  if (!contentType.includes('json')) return text
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2)
+  } catch {
+    // A body that claims to be JSON and is not is worth seeing exactly as it
+    // arrived, because that mismatch is itself the finding.
+    return text
+  }
+}
+
+/**
+ * The size of a response body.
+ *
+ * Not `humanBytes`, which rounds to kilobytes because it measures model files
+ * and a real one should never read as "0 kB". A response body is routinely two
+ * hundred bytes, and rounding that to zero says the endpoint returned nothing
+ * when it returned the answer.
+ */
+export function responseSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return '-'
+  if (bytes < 1000) return `${bytes} B`
+  if (bytes < 1e6) return `${(bytes / 1e3).toFixed(1)} kB`
+  return `${(bytes / 1e6).toFixed(1)} MB`
+}
+
+/** How a status code should read at a glance. */
+export function statusTone(status) {
+  if (status >= 200 && status < 300) return 'good'
+  if (status >= 400 && status < 500) return 'warn'
+  if (status >= 500) return 'bad'
+  return 'flat'
+}

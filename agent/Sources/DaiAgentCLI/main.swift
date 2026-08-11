@@ -395,8 +395,21 @@ case "work":
                                  serverCAPEM: serverCA ?? ca)
             },
             log: { print($0) })
+        // Rendering, when this machine has a renderer. A machine without one is
+        // an ordinary fleet member that does AI work and never offers the kind,
+        // so nil here is a configuration rather than a fault.
+        let renderer = RenderRuntime()
+        let scenes = renderer == nil ? nil
+            : SceneSync(controlPlane: cp, base: SceneSync.defaultBase(), log: { print($0) })
+        if let renderer {
+            print("renderer: \(await renderer.rendererPath)")
+        } else {
+            print("no renderer on this machine; render work will not be offered")
+        }
+
         let worker = Worker(controlPlane: cp, gpu: gpu, ane: ane,
-                            status: status, modelSync: modelSync, renewer: renewer,
+                            status: status, modelSync: modelSync,
+                            renderer: renderer, scenes: scenes, renewer: renewer,
                             promoteAfter: promote)
 
         // Batch and serving run side by side in one process, because a node
@@ -532,6 +545,82 @@ case "serve":
         print("serve command finished after \(seconds)s")
         await cp.shutdown()
     } catch { print("serve failed: \(error)"); exit(1) }
+
+case "render":
+    // Held outside the do block so the failure path can close it.
+    var renderClient: ControlPlane?
+    // usage: dai-agent render <url> [seconds]
+    //
+    // Takes one render unit and does it, now, regardless of who is sitting at
+    // the machine. The daemon will not do that - rendering is GPU work and
+    // waits for the machine to be free - and that is exactly why this exists:
+    // proving a machine can render should not require waiting until nobody is
+    // using it. An operator ran this deliberately; the presence rule protects
+    // them from the fleet, not from themselves.
+    guard args.count > 2 else {
+        print("usage: dai-agent render <url> [seconds]")
+        print("  Leases one render unit and renders it, ignoring presence.")
+        exit(2)
+    }
+    do {
+        let dir = Enroll.identityDir()
+        let identity = try NodeIdentity.load(
+            certificate: dir.appendingPathComponent("node.crt"),
+            enclaveKey: Enroll.keyPath(dir))
+        let ca = try String(contentsOf: dir.appendingPathComponent("ca.crt"), encoding: .utf8)
+        let cp = try ControlPlane(base: URL(string: args[2])!, identity: identity,
+                                  serverCAPEM: ca)
+        renderClient = cp
+        guard let renderer = RenderRuntime() else {
+            print("no renderer on this machine"); await cp.shutdown(); exit(1)
+        }
+        print("renderer: \(await renderer.rendererPath)")
+
+        let scenes = SceneSync(controlPlane: cp, base: SceneSync.defaultBase(),
+                               log: { print($0) })
+        let deadline = Date().addingTimeInterval(args.count > 3 ? Double(args[3]) ?? 120 : 120)
+        var done = 0
+        while Date() < deadline {
+            guard let lease = try await cp.leaseWork(kinds: [.render]) else {
+                print("no render work: \(await cp.lastLeaseReason ?? "unknown")")
+                break
+            }
+            guard let sceneId = lease.sceneId else {
+                print("unit \(lease.unitId) names no scene"); break
+            }
+            let ready = try await scenes.ensure(sceneId: sceneId)
+            var completed: [WorkItem] = []
+            let started = Date()
+            for item in lease.items {
+                guard let frame = item["frame"]?.intValue else { continue }
+                let out = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("dai-render-\(lease.unitId)")
+                defer { try? FileManager.default.removeItem(at: out) }
+                let outcome = try await renderer.render(scene: ready.entry, frame: frame,
+                                                        into: out,
+                                                        samples: item["samples"]?.intValue)
+                let bytes = try await cp.uploadOutput(unitId: lease.unitId,
+                                                      name: outcome.file.lastPathComponent,
+                                                      file: outcome.file)
+                print(String(format: "frame %d in %.1fs, %.1fMB returned",
+                             frame, outcome.seconds, Double(bytes) / 1_048_576))
+                completed.append(.object(["id": item["id"] ?? .null]))
+                done += 1
+            }
+            _ = try await cp.report(unitId: lease.unitId, completed: completed,
+                                    unfinished: [], seconds: Date().timeIntervalSince(started))
+        }
+        print("rendered \(done) frame(s)")
+        await cp.shutdown()
+    } catch {
+        // Shut the client down before reporting. Letting it fall out of scope
+        // while an error unwinds trips a deinit assertion, and what reaches the
+        // operator is a message about a leaked HTTP client rather than the
+        // reason their render did not happen.
+        await renderClient?.shutdown()
+        print("render failed: \(error)")
+        exit(1)
+    }
 
 case "split":
     // usage: dai-agent split <model-dir> <rank> <size> <listen-port|peer-host:port> [prompt]

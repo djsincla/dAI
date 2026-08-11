@@ -1,5 +1,6 @@
 import express, { type Express, type NextFunction, type Request, type Response } from 'express'
 import * as OpenApiValidator from 'express-openapi-validator'
+import { parse as parseYaml } from 'yaml'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -57,6 +58,10 @@ export function createApp(db: Db, surface: Surface = 'both'): Express {
   if (process.env.TRUST_PROXY) app.set('trust proxy', process.env.TRUST_PROXY)
 
   app.use(express.json({ limit: '32mb' }))
+  // Rendered frames arrive as bytes, not JSON. Capped well above a 4K PNG and
+  // well below anything that would let one node exhaust the control plane's
+  // memory by claiming to have rendered a very large frame.
+  app.use(express.raw({ type: 'application/octet-stream', limit: '256mb' }))
 
   app.get('/healthz', (_req, res) => { res.json({ ok: true, surface }) })
 
@@ -65,6 +70,20 @@ export function createApp(db: Db, surface: Surface = 'both'): Express {
   // version they fetched is the version the server validates against.
   app.get('/openapi.yaml', (_req, res) => {
     res.type('application/yaml').send(readFileSync(OPENAPI_PATH, 'utf8'))
+  })
+
+  /**
+   * The same contract as JSON.
+   *
+   * Parsed here rather than in every client. The console's API explorer needs
+   * the document as data, and shipping a YAML parser to a browser to read a file
+   * this process has already parsed is a dependency bought for nothing.
+   *
+   * Read from disk each time rather than cached, so editing the spec during
+   * development shows up on refresh - the same reason /openapi.yaml does.
+   */
+  app.get('/openapi.json', (_req, res) => {
+    res.json(parseYaml(readFileSync(OPENAPI_PATH, 'utf8')))
   })
   app.get('/docs', (_req, res) => {
     res.type('html').send(DOCS_HTML)

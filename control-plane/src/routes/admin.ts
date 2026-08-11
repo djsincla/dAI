@@ -1,3 +1,6 @@
+import { framesFor, outputsRoot, registerScene, sceneById } from '../lib/scenes.js'
+import { safePath } from '../lib/repository.js'
+import { existsSync } from 'node:fs'
 import { Router } from 'express'
 import { type Db, tx } from '../lib/db.js'
 import { nodeMatchesPool, poolMode, poolsFor } from '../lib/pools.js'
@@ -999,10 +1002,80 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
     })
   })
 
+  r.get('/scenes', async (_req, res) => {
+    const { rows } = await db.query(
+      `SELECT id, entry, size_bytes, frame_start, frame_end, renderer
+         FROM scenes ORDER BY imported_at DESC`)
+    res.json({
+      scenes: (rows as any[]).map((s) => ({
+        id: s.id, entry: s.entry, sizeBytes: Number(s.size_bytes),
+        frameStart: s.frame_start, frameEnd: s.frame_end, renderer: s.renderer,
+      })),
+    })
+  })
+
+  r.post('/scenes', async (req, res) => {
+    const b = req.body as {
+      id: string; entry?: string | null
+      frameStart?: number | null; frameEnd?: number | null
+    }
+    const result = await registerScene(db, { ...b, importedBy: req.user!.id })
+    if ('error' in result) {
+      res.status(400).json({ error: 'bad_request', detail: result.error })
+      return
+    }
+    await db.query(
+      `INSERT INTO audit_log (user_id, action, subject, detail)
+       VALUES ($1,'scene.registered',$2,$3)`,
+      [req.user!.id, b.id, JSON.stringify({ sizeBytes: result.scene.sizeBytes,
+                                            files: result.scene.files.length })],
+    )
+    res.status(201).json(result.scene)
+  })
+
+  r.get('/jobs/:jobId/outputs', async (req, res) => {
+    const { rows: job } = await db.query(`SELECT 1 FROM jobs WHERE id=$1`, [req.params.jobId])
+    if (job.length === 0) {
+      res.status(404).json({ error: 'not_found' })
+      return
+    }
+    const { rows } = await db.query(
+      `SELECT o.name, o.size_bytes, o.sha256, o.created_at, n.hostname
+         FROM work_outputs o LEFT JOIN nodes n ON n.id = o.node_id
+        WHERE o.job_id = $1 ORDER BY o.name`, [req.params.jobId])
+    res.json({
+      outputs: (rows as any[]).map((o) => ({
+        name: o.name, sizeBytes: Number(o.size_bytes), sha256: o.sha256,
+        renderedBy: o.hostname ?? null,
+        createdAt: new Date(o.created_at).toISOString(),
+      })),
+    })
+  })
+
+  r.get('/jobs/:jobId/outputs/:name', async (req, res) => {
+    const { jobId, name } = req.params as { jobId: string; name: string }
+    // Checked against the catalogue before the disk, so this can only ever
+    // serve a file some node actually reported producing.
+    const { rows } = await db.query(
+      `SELECT 1 FROM work_outputs WHERE job_id=$1 AND name=$2`, [jobId, name])
+    if (rows.length === 0) {
+      res.status(404).json({ error: 'not_found' })
+      return
+    }
+    const full = safePath(outputsRoot(), jobId, name)
+    if (!full || !existsSync(full)) {
+      res.status(404).json({ error: 'not_found', detail: 'recorded but not on disk' })
+      return
+    }
+    res.sendFile(full)
+  })
+
   r.post('/jobs', async (req, res) => {
     const b = req.body as {
       poolId: string; kind: 'embed' | 'generate' | 'render'
-      modelHash?: string | null; batchSize?: number; items: unknown[]
+      modelHash?: string | null; batchSize?: number; items?: unknown[]
+      sceneId?: string | null; frameStart?: number; frameEnd?: number; frameStep?: number
+      samples?: number | null
       label?: string; source?: string
     }
     if (!(await requireRole(db, req.user!.id, b.poolId, 'operator'))) {
@@ -1010,11 +1083,36 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
       return
     }
 
-    const batchSize = b.batchSize ?? 8
+    // A render job is described by a scene and a range of frames, not by a list
+    // of items. The items are derived here, once, so that every node agrees
+    // about what frame 12 means and no unit has to be trusted to say.
+    let items = b.items ?? []
+    let sceneId: string | null = null
+    if (b.kind === 'render') {
+      const scene = b.sceneId ? await sceneById(db, b.sceneId) : null
+      if (!scene) {
+        res.status(400).json({ error: 'bad_request', detail: 'render needs a known sceneId' })
+        return
+      }
+      const range = framesFor(b.frameStart ?? scene.frameStart ?? 1,
+                              b.frameEnd ?? scene.frameEnd ?? scene.frameStart ?? 1,
+                              b.frameStep ?? 1,
+                              { frameStart: scene.frameStart, frameEnd: scene.frameEnd })
+      if ('error' in range) {
+        res.status(400).json({ error: 'bad_request', detail: range.error })
+        return
+      }
+      sceneId = scene.id
+      // The frame number is the only thing from a submission that reaches a
+      // command line, and it is a number by the time it is stored.
+      items = range.frames.map((frame) => ({ frame, samples: b.samples ?? null }))
+    }
+
+    const batchSize = b.batchSize ?? (b.kind === 'render' ? 1 : 8)
     const { rows } = await db.query(
-      `INSERT INTO jobs (pool_id, kind, model_hash, submitted_by, label, source)
-       VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
-      [b.poolId, b.kind, b.modelHash ?? null, req.user!.id,
+      `INSERT INTO jobs (pool_id, kind, model_hash, scene_id, submitted_by, label, source)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+      [b.poolId, b.kind, b.modelHash ?? null, sceneId, req.user!.id,
        b.label ?? null, b.source ?? 'api'],
     )
     const jobId = rows[0]!.id as string
@@ -1022,10 +1120,10 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
     // Units are batches of items. Position drives dispatch order and lets a
     // requeued remainder go back at the head.
     let position = 0
-    for (let i = 0; i < b.items.length; i += batchSize) {
+    for (let i = 0; i < items.length; i += batchSize) {
       await db.query(
         `INSERT INTO work_units (job_id, kind, payload, position) VALUES ($1,$2,$3,$4)`,
-        [jobId, b.kind, JSON.stringify(b.items.slice(i, i + batchSize)), position],
+        [jobId, b.kind, JSON.stringify(items.slice(i, i + batchSize)), position],
       )
       position += 1000 // leave gaps so requeues can slot in front
     }

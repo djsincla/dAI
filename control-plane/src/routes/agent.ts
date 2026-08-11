@@ -1,9 +1,10 @@
 import { Router } from 'express'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { Db } from '../lib/db.js'
 import { agentAuth } from '../lib/auth.js'
 import { poolsFor } from '../lib/pools.js'
 import { repositoryRoot, safePath } from '../lib/repository.js'
+import { outputsRoot, sceneById, scenesRoot } from '../lib/scenes.js'
 import { buildPath, desiredBuildFor } from '../lib/agentBuilds.js'
 import { POLICY, type WorkKind } from '../lib/policy.js'
 import { LeaseConflict, leaseWork, reportResult } from '../lib/work.js'
@@ -11,6 +12,8 @@ import { clientIp, nodeNetworkAllowed } from '../lib/netacl.js'
 import type { Broker } from '../lib/broker.js'
 import { type Ca, newEnrollmentToken, publicKeyIdOf } from '../lib/ca.js'
 import { existsSync, readFileSync } from 'node:fs'
+import { mkdir, rename, writeFile } from 'node:fs/promises'
+import { dirname } from 'node:path'
 
 const KINDS: WorkKind[] = ['embed', 'generate', 'render']
 
@@ -200,6 +203,104 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
       serverCaPem,
       nodeCaPem: ca.certPem,
     })
+  })
+
+  /**
+   * The scene manifest, so a node can work out what it is missing.
+   *
+   * The manifest rather than the bytes. A node compares this with what it has
+   * and fetches only the gaps, which is what makes a second unit of the same job
+   * on a machine that already holds the scene nearly free - and a scene is tens
+   * of gigabytes, so "nearly free" is the difference between a fleet that
+   * renders and one that spends its evening copying.
+   */
+  r.get('/scenes/:sceneId', async (req, res) => {
+    const scene = await sceneById(db, req.params.sceneId!)
+    if (!scene) {
+      res.status(404).json({ error: 'not_found', detail: 'no such scene' })
+      return
+    }
+    res.json({
+      id: scene.id, entry: scene.entry, sizeBytes: scene.sizeBytes, files: scene.files,
+    })
+  })
+
+  r.get('/scenes/:sceneId/files/:filePath', async (req, res) => {
+    const { sceneId, filePath } = req.params as { sceneId: string; filePath: string }
+    // Checked against the catalogue before the disk, so the repository can only
+    // ever serve bytes something registered claims to be part of a scene.
+    const { rows } = await db.query(
+      `SELECT 1 FROM scene_files WHERE scene_id=$1 AND path=$2`, [sceneId, filePath])
+    if (rows.length === 0) {
+      res.status(404).json({ error: 'not_found', detail: 'no such scene file' })
+      return
+    }
+    const full = safePath(scenesRoot(), sceneId, filePath)
+    if (!full || !existsSync(full)) {
+      res.status(404).json({ error: 'not_found', detail: 'registered but not in the repository' })
+      return
+    }
+    res.sendFile(full)
+  })
+
+  /**
+   * A finished frame, coming back.
+   *
+   * Only from the node holding the lease. Without that check any enrolled
+   * machine could overwrite any job's output, and a fleet where a node can
+   * quietly replace another node's frames is worse than one that cannot render
+   * at all: the failure is invisible until somebody watches the sequence.
+   */
+  r.put('/work/:unitId/output/:name', async (req, res) => {
+    const { unitId, name } = req.params as { unitId: string; name: string }
+    const { rows } = await db.query(
+      `SELECT u.id, u.job_id, u.lease_node_id, u.kind
+         FROM work_units u WHERE u.id = $1`, [unitId])
+    const unit = rows[0] as
+      { id: string; job_id: string; lease_node_id: string | null; kind: string } | undefined
+    if (!unit) {
+      res.status(404).json({ error: 'not_found', detail: 'no such work unit' })
+      return
+    }
+    if (unit.lease_node_id !== req.node!.id) {
+      res.status(403).json({ error: 'forbidden', detail: 'this unit is not leased to you' })
+      return
+    }
+    // The name lands on disk, so it is held to the same allow-list as every
+    // other caller-supplied path segment rather than trusted for having come
+    // from a node we authenticated.
+    const dest = safePath(outputsRoot(), unit.job_id, name)
+    if (!dest) {
+      res.status(400).json({ error: 'bad_request', detail: 'that output name cannot be a file' })
+      return
+    }
+    const body = req.body as Buffer
+    if (!Buffer.isBuffer(body) || body.length === 0) {
+      res.status(400).json({ error: 'bad_request', detail: 'no bytes' })
+      return
+    }
+
+    await mkdir(dirname(dest), { recursive: true })
+    // Written aside and moved into place, so a transfer that dies halfway
+    // leaves no file rather than a truncated frame that looks finished.
+    const partial = `${dest}.partial`
+    await writeFile(partial, body)
+    await rename(partial, dest)
+    const sha256 = createHash('sha256').update(body).digest('hex')
+
+    // Last write wins. A render unit is idempotent, so a requeued one
+    // legitimately produces a frame that already exists; refusing the second
+    // copy would fail a job for succeeding twice.
+    await db.query(
+      `INSERT INTO work_outputs (job_id, name, unit_id, node_id, size_bytes, sha256)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       ON CONFLICT (job_id, name) DO UPDATE
+         SET unit_id = EXCLUDED.unit_id, node_id = EXCLUDED.node_id,
+             size_bytes = EXCLUDED.size_bytes, sha256 = EXCLUDED.sha256,
+             created_at = now()`,
+      [unit.job_id, name, unit.id, req.node!.id, body.length, sha256],
+    )
+    res.json({ name, sizeBytes: body.length, sha256 })
   })
 
   /**

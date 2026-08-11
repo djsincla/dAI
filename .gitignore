@@ -55,3 +55,9 @@ control-plane/backups/
 # diffed against and rebased onto upstream. The parent repo tracks the source
 # files themselves, so a fresh clone builds without a second checkout step.
 agent/vendor/mlx-swift-examples/.git-fork/
+
+# Scene bundles and rendered frames. Both are job data rather than source: a
+# scene is tens of gigabytes and belongs to whoever submitted it, and the
+# frames are the output, which the requester takes and the fleet then forgets.
+control-plane/scenes/
+control-plane/outputs/

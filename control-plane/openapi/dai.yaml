@@ -207,6 +207,116 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
 
+  /agent/v1/scenes/{sceneId}:
+    get:
+      tags: [agent]
+      summary: What a scene is made of, so a node can fetch it
+      description: |
+        The manifest, not the bytes. A node compares it with what it has on disk
+        and fetches only what is missing, which is what makes a re-leased unit
+        on a machine that already rendered part of the job nearly free.
+      parameters:
+        - name: sceneId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The scene manifest
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, entry, files]
+                properties:
+                  id: { type: string }
+                  entry:
+                    type: string
+                    description: |
+                      The file the renderer opens. Comes from the catalogue and
+                      never from a work unit: this is the one string from a
+                      scene that reaches a command line.
+                  sizeBytes: { type: integer, format: int64 }
+                  files:
+                    type: array
+                    items:
+                      type: object
+                      required: [path, sizeBytes, sha256]
+                      properties:
+                        path: { type: string }
+                        sizeBytes: { type: integer, format: int64 }
+                        sha256: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /agent/v1/scenes/{sceneId}/files/{filePath}:
+    get:
+      tags: [agent]
+      summary: One file of a scene
+      parameters:
+        - name: sceneId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: filePath
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The file
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /agent/v1/work/{unitId}/output/{name}:
+    put:
+      tags: [agent]
+      summary: Hand back a rendered frame
+      description: |
+        The half of the work model that only rendering needed. An embed or a
+        generate unit returns a number or some text, and the result column holds
+        it. A render unit returns a picture, and a job whose output exists only
+        on whichever machine happened to render it has not been done.
+
+        Accepted only from the node currently holding the lease, and only for a
+        name that unit is supposed to produce. Last write wins: a render unit is
+        idempotent, so a requeued one legitimately produces a file that already
+        exists, and refusing the second copy would fail a job for succeeding
+        twice.
+      parameters:
+        - name: unitId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '200':
+          description: Stored
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [name, sizeBytes, sha256]
+                properties:
+                  name: { type: string }
+                  sizeBytes: { type: integer, format: int64 }
+                  sha256: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /agent/v1/me:
     get:
       tags: [agent]
@@ -1594,6 +1704,121 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
 
         '401': { $ref: '#/components/responses/Unauthorized' }
+  /admin/v1/scenes:
+    get:
+      tags: [admin]
+      summary: Scenes the fleet can render
+      responses:
+        '200':
+          description: The catalogue
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  scenes:
+                    type: array
+                    items: { $ref: '#/components/schemas/Scene' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [admin]
+      summary: Register a directory in the scene repository as a scene
+      description: |
+        Catalogued where it already sits rather than copied. Scenes are large
+        and short-lived, and copying a 40GB bundle to register it costs 40GB of
+        disk and several minutes before a job can even be submitted.
+
+        Re-registering the same id re-walks the directory, which is how a scene
+        that gained or lost a file is corrected. Files are replaced wholesale, so
+        a catalogue that only ever grew cannot send nodes after a file that is no
+        longer part of the scene.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id:
+                  type: string
+                  description: |
+                    Also the directory name under the scene repository root, so
+                    it is constrained to the same allow-list as a model id.
+                entry:
+                  type: string
+                  nullable: true
+                  description: |
+                    The file the renderer opens. Worked out automatically when
+                    the bundle holds exactly one .blend; required when it holds
+                    several, because the right answer is for a person to say
+                    which, not for two machines to guess differently and render
+                    two different scenes under one name.
+                frameStart: { type: integer, nullable: true }
+                frameEnd: { type: integer, nullable: true }
+      responses:
+        '201':
+          description: Registered
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Scene' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/v1/jobs/{jobId}/outputs:
+    get:
+      tags: [admin]
+      summary: Frames this job has produced
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: What has come back so far
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  outputs:
+                    type: array
+                    items:
+                      type: object
+                      required: [name, sizeBytes, sha256]
+                      properties:
+                        name: { type: string }
+                        sizeBytes: { type: integer, format: int64 }
+                        sha256: { type: string }
+                        renderedBy: { type: string, nullable: true }
+                        createdAt: { type: string, format: date-time }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/v1/jobs/{jobId}/outputs/{name}:
+    get:
+      tags: [admin]
+      summary: Download one frame
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The frame
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /admin/v1/jobs:
     get:
       tags: [admin]
@@ -1622,6 +1847,16 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Job' }
+        '400':
+          description: |
+            The submission does not describe work that can be done: a render job
+            naming no scene, or a frame range the scene does not cover. Refused
+            here rather than at the node, because a frame past the end of a
+            scene renders black, lands as a real file, and looks like a
+            successful job until somebody plays it back.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '403': { $ref: '#/components/responses/Forbidden' }
 
         '401': { $ref: '#/components/responses/Unauthorized' }
@@ -1854,6 +2089,15 @@ components:
             Content hash from the signed catalogue. A work unit carries data and
             references a model; it cannot name an interpreter, a path, or a
             command. That bounds the blast radius of a compromised control plane.
+        sceneId:
+          type: string
+          nullable: true
+          description: |
+            The scene a render unit belongs to, from the job rather than from
+            the unit. The same rule as modelHash, and rendering is where it
+            would be easiest to break: a render job is naturally described as
+            "run this file", and a fleet that accepted that description is one
+            where submitting a job means executing code on fifty machines.
         items:
           type: array
           items: { type: object, additionalProperties: true }
@@ -1884,6 +2128,25 @@ components:
         seconds: { type: number }
         failed: { type: boolean, default: false }
 
+    Scene:
+      type: object
+      required: [id, entry, sizeBytes]
+      properties:
+        id: { type: string }
+        entry: { type: string }
+        sizeBytes: { type: integer, format: int64 }
+        frameStart: { type: integer, nullable: true }
+        frameEnd: { type: integer, nullable: true }
+        renderer: { type: string, enum: [blender] }
+        files:
+          type: array
+          items:
+            type: object
+            required: [path, sizeBytes, sha256]
+            properties:
+              path: { type: string }
+              sizeBytes: { type: integer, format: int64 }
+              sha256: { type: string }
     Node:
       type: object
       required: [id, hostname, tier, state]
@@ -2044,12 +2307,35 @@ components:
 
     JobRequest:
       type: object
-      required: [poolId, kind, items]
+      required: [poolId, kind]
       properties:
         poolId: { type: string, format: uuid }
         kind: { $ref: '#/components/schemas/WorkKind' }
         modelHash: { type: string, nullable: true }
-        batchSize: { type: integer, minimum: 1, default: 8 }
+        batchSize:
+          type: integer
+          minimum: 1
+          description: |
+            Items per unit. Defaults to 8, and to 1 for render: a unit is the
+            granularity at which work is thrown away when somebody sits down at
+            the machine, and one frame is already minutes.
+        sceneId:
+          type: string
+          nullable: true
+          description: |
+            Required for render. The frames are derived from the range below
+            rather than supplied as items, so every node agrees about what frame
+            12 means and no unit has to be trusted to say.
+        frameStart: { type: integer, nullable: true }
+        frameEnd: { type: integer, nullable: true }
+        frameStep: { type: integer, minimum: 1, nullable: true }
+        samples:
+          type: integer
+          nullable: true
+          description: |
+            Overrides what the scene asks for. Omitted by default, because
+            substituting a number would silently render somebody's final frame
+            at preview quality.
         label:
           type: string
           description: |

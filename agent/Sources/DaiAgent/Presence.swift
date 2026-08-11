@@ -35,17 +35,12 @@ public enum WorkKind: String, Sendable, CaseIterable {
 
     /// Whether anything in this build can actually run the kind.
     ///
-    /// `render` is declared throughout - the schema accepts it, the scheduler
-    /// treats it as GPU work, the policy tables permit it in LOCKED and ABSENT
-    /// - and implemented nowhere. That is a deliberate position rather than an
-    /// oversight: the design is that adding a kind needs a runtime, a policy row
-    /// and a unit-sizing rule, and only the last two exist.
-    ///
-    /// Stated here so the difference between "the policy would allow this" and
-    /// "this machine would attempt it" is a value that can be read and tested,
-    /// rather than something a reader has to infer from a `throw` buried in the
-    /// batch loop.
-    public var isImplemented: Bool { self != .render }
+    /// All three now are. Kept as a value rather than deleted because it is what
+    /// a fourth kind will need on the day it is declared and before it works,
+    /// and because the alternative - inferring it from a `throw` buried in the
+    /// batch loop - is what let `render` be advertised for months while
+    /// answering every unit with an error.
+    public var isImplemented: Bool { true }
 }
 
 public enum QoS: String, Sendable { case background, standard }
@@ -205,10 +200,19 @@ public func permittedKinds(policy p: StatePolicy) -> [WorkKind] {
 ///
 /// This is also what the node offers the scheduler, so it is never handed work
 /// it must immediately give back.
-public func runnableKinds(_ p: StatePolicy, hasGPU: Bool, hasANE: Bool) -> [WorkKind] {
+public func runnableKinds(_ p: StatePolicy, hasGPU: Bool, hasANE: Bool,
+                          hasRenderer: Bool = false) -> [WorkKind] {
     permittedKinds(policy: p).filter { kind in
         guard kind.isImplemented else { return false }
-        return kind.isGPU ? hasGPU : hasANE
+        switch kind {
+        case .embed: return hasANE
+        case .generate: return hasGPU
+        // A renderer, not a GPU runtime. A machine can have Blender and no MLX
+        // or the reverse, and treating them as one capability would have a node
+        // with a Metal toolchain and no renderer offered every render unit in
+        // the queue.
+        case .render: return hasRenderer
+        }
     }
 }
 

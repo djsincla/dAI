@@ -420,7 +420,18 @@ public actor ControlPlane {
     /// slash and would otherwise become two path segments and a 404.
     public func downloadModelFile(modelId: String, path: String,
                                   to destination: URL) async throws -> String {
-        let url = Self.modelFileURL(base: base, modelId: modelId, path: path)
+        try await stream(Self.modelFileURL(base: base, modelId: modelId, path: path),
+                         to: destination, describing: "\(modelId)/\(path)")
+    }
+
+    /// Stream a URL to a file, returning its sha256.
+    ///
+    /// Shared by models and scenes because the requirement is identical and the
+    /// details are the kind that are got wrong once per copy: streamed rather
+    /// than buffered, written under a temporary name, and renamed only by the
+    /// caller once the hash matches.
+    private func stream(_ url: String, to destination: URL,
+                        describing what: String) async throws -> String {
         var req = HTTPClientRequest(url: url)
         req.method = .GET
 
@@ -429,7 +440,7 @@ public actor ControlPlane {
         // finish a 5GB shard on a slow link.
         let response = try await client.execute(req, timeout: .hours(2))
         guard (200..<300).contains(Int(response.status.code)) else {
-            throw Failure.http(Int(response.status.code), "downloading \(modelId)/\(path)")
+            throw Failure.http(Int(response.status.code), "downloading \(what)")
         }
 
         let fm = FileManager.default
@@ -455,6 +466,89 @@ public actor ControlPlane {
         }
         try handle.close()
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    // MARK: - Scenes and rendered frames
+
+    public struct SceneManifest: Sendable {
+        public let id: String
+        /// The file the renderer opens, from the catalogue rather than from the
+        /// unit. A render job is naturally described as "run this file", and a
+        /// fleet that took that description from a work unit would be one where
+        /// submitting a job means executing code on fifty machines.
+        public let entry: String
+        public let files: [File]
+
+        public struct File: Sendable {
+            public let path: String
+            public let sizeBytes: Int
+            public let sha256: String
+
+            public init(path: String, sizeBytes: Int, sha256: String) {
+                self.path = path
+                self.sizeBytes = sizeBytes
+                self.sha256 = sha256
+            }
+        }
+
+        public init(id: String, entry: String, files: [File]) {
+            self.id = id
+            self.entry = entry
+            self.files = files
+        }
+    }
+
+    /// What a scene is made of, so this node can work out what it is missing.
+    public func sceneManifest(id: String) async throws -> SceneManifest {
+        let encoded = id.addingPercentEncoding(withAllowedCharacters: .daiPathSegment) ?? id
+        let (code, data) = try await request("GET", "agent/v1/scenes/\(encoded)")
+        guard code == 200 else { throw Failure.http(code, "fetching scene \(id)") }
+        let d = json(data)
+        guard let entry = d["entry"]?.stringValue else {
+            throw Failure.http(code, "scene \(id) has no entry file")
+        }
+        let files = (d["files"]?.arrayValue ?? []).compactMap { item -> SceneManifest.File? in
+            guard let o = item.objectValue, let path = o["path"]?.stringValue,
+                  let sha = o["sha256"]?.stringValue else { return nil }
+            return SceneManifest.File(path: path,
+                                      sizeBytes: o["sizeBytes"]?.intValue ?? 0,
+                                      sha256: sha)
+        }
+        return SceneManifest(id: id, entry: entry, files: files)
+    }
+
+    /// Stream one scene file to `destination`, returning its sha256.
+    public func downloadSceneFile(sceneId: String, path: String,
+                                  to destination: URL) async throws -> String {
+        let id = sceneId.addingPercentEncoding(withAllowedCharacters: .daiPathSegment) ?? sceneId
+        let file = path.addingPercentEncoding(withAllowedCharacters: .daiPathSegment) ?? path
+        let root = base.absoluteString.hasSuffix("/")
+            ? String(base.absoluteString.dropLast()) : base.absoluteString
+        return try await stream("\(root)/agent/v1/scenes/\(id)/files/\(file)",
+                                to: destination, describing: "\(sceneId)/\(path)")
+    }
+
+    /// Hand a finished frame back.
+    ///
+    /// Streamed from disk rather than read into memory. A frame is tens of
+    /// megabytes and this runs on somebody's workstation; the render already
+    /// took the memory it needed and giving it back matters more here than
+    /// anywhere else in the agent.
+    @discardableResult
+    public func uploadOutput(unitId: String, name: String, file: URL) async throws -> Int {
+        let encoded = name.addingPercentEncoding(withAllowedCharacters: .daiPathSegment) ?? name
+        let root = base.absoluteString.hasSuffix("/")
+            ? String(base.absoluteString.dropLast()) : base.absoluteString
+        var req = HTTPClientRequest(url: "\(root)/agent/v1/work/\(unitId)/output/\(encoded)")
+        req.method = .PUT
+        req.headers.add(name: "content-type", value: "application/octet-stream")
+        let bytes = try Data(contentsOf: file)
+        req.body = .bytes(ByteBuffer(bytes: bytes))
+        let response = try await client.execute(req, timeout: .minutes(30))
+        guard (200..<300).contains(Int(response.status.code)) else {
+            throw Failure.http(Int(response.status.code), "uploading \(name)")
+        }
+        return bytes.count
     }
 
     // MARK: - Agent builds
@@ -583,7 +677,23 @@ public actor ControlPlane {
         public let unitId: String
         public let kind: WorkKind
         public let modelHash: String?
+        /// The scene a render unit belongs to, from the job rather than from the
+        /// unit. The unit says which frame; the job says of what. Keeping those
+        /// two apart is what stops a submission naming the content it wants.
+        public var sceneId: String?
         public let items: [WorkItem]
+
+        public init(jobLabel: String? = nil, jobSource: String = "api",
+                    unitId: String, kind: WorkKind, modelHash: String? = nil,
+                    sceneId: String? = nil, items: [WorkItem]) {
+            self.jobLabel = jobLabel
+            self.jobSource = jobSource
+            self.unitId = unitId
+            self.kind = kind
+            self.modelHash = modelHash
+            self.sceneId = sceneId
+            self.items = items
+        }
     }
 
     /// Lease a unit of work, or learn why none was given.
@@ -623,7 +733,8 @@ public actor ControlPlane {
         return Lease(jobLabel: d["jobLabel"]?.stringValue,
                      jobSource: d["jobSource"]?.stringValue ?? "api",
                      unitId: id, kind: kind,
-                     modelHash: d["modelHash"]?.stringValue, items: items)
+                     modelHash: d["modelHash"]?.stringValue,
+                     sceneId: d["sceneId"]?.stringValue, items: items)
     }
 
     /// Report completed items and hand back what was not reached.

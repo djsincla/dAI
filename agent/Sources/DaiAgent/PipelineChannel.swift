@@ -301,14 +301,32 @@ final class FrameHandler: ChannelInboundHandler, @unchecked Sendable {
     private var decoder = TensorFrameDecoder()
     private let inbox: FrameInbox
 
+    /// The last delivery, so the next one can wait for it.
+    ///
+    /// Frames arrive in order - `channelRead` runs on one event loop thread and
+    /// TCP does not reorder - and that order was being thrown away on the last
+    /// step. Delivering each frame from its own unstructured `Task` hands them
+    /// to the scheduler as independent pieces of work, and two of them can run
+    /// in either order. Under load they do.
+    ///
+    /// This corrupts a pipeline silently. A hidden state that arrives one step
+    /// early is the right shape and the wrong contents, so the model answers
+    /// fluently from a conversation that never happened. Chaining each delivery
+    /// behind the previous one restores the order the network already had.
+    private var lastDelivery: Task<Void, Never>?
+
     init(inbox: FrameInbox) { self.inbox = inbox }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         var buffer = unwrapInboundIn(data)
         guard let bytes = buffer.readBytes(length: buffer.readableBytes) else { return }
         do {
-            for frame in try decoder.push(Data(bytes)) {
-                Task { await inbox.deliver(frame) }
+            let frames = try decoder.push(Data(bytes))
+            guard !frames.isEmpty else { return }
+            let previous = lastDelivery
+            lastDelivery = Task { [inbox] in
+                await previous?.value
+                for frame in frames { await inbox.deliver(frame) }
             }
         } catch {
             // A malformed frame ends the link rather than being skipped. There

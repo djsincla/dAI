@@ -100,6 +100,49 @@ actor FakeControlPlane: ControlPlaneClient {
 
     func assignedModels() async throws -> [ControlPlane.AssignedModel] { assigned }
 
+    /// Set up from a test, which is outside the actor.
+    func serveScene(_ manifest: ControlPlane.SceneManifest, bytes: [String: Data]) {
+        scene = manifest
+        sceneBytes = bytes
+    }
+
+    func queue(_ lease: ControlPlane.Lease) { queued.append(lease) }
+
+    /// The scene this fake serves, and what it was asked for. Rendering is the
+    /// one kind whose work has to travel in both directions, so both halves are
+    /// recorded: a frame that rendered and did not arrive is a hole in a
+    /// sequence nobody notices until it is played back.
+    var scene: ControlPlane.SceneManifest?
+    var sceneBytes: [String: Data] = [:]
+    private(set) var sceneRequests: [String] = []
+    private(set) var uploads: [(unit: String, name: String, bytes: Int)] = []
+    struct NoScene: Error {}
+
+    func sceneManifest(id: String) async throws -> ControlPlane.SceneManifest {
+        guard let scene else { throw NoScene() }
+        return scene
+    }
+
+    func downloadSceneFile(sceneId: String, path: String,
+                           to destination: URL) async throws -> String {
+        sceneRequests.append(path)
+        guard let data = sceneBytes[path] else { throw NoScene() }
+        // Written to `<destination>.partial`, matching the real client: the
+        // caller renames only once the hash checks out.
+        let temp = destination.appendingPathExtension("partial")
+        try? FileManager.default.createDirectory(
+            at: temp.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: temp)
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    @discardableResult
+    func uploadOutput(unitId: String, name: String, file: URL) async throws -> Int {
+        let bytes = (try? Data(contentsOf: file))?.count ?? 0
+        uploads.append((unit: unitId, name: name, bytes: bytes))
+        return bytes
+    }
+
     /// What renewal should hand back. Nil makes renewal fail, which is the
     /// case that matters: a node whose renewal keeps failing eventually drops
     /// out of the fleet, and the loop has to survive that rather than stop.
@@ -167,4 +210,13 @@ actor FailingControlPlane: ControlPlaneClient {
     func downloadModelFile(modelId: String, path: String,
                            to destination: URL) async throws -> String { throw Unreachable() }
     func renew(csrPEM: String) async throws -> ControlPlane.Renewed { throw Unreachable() }
+    func sceneManifest(id: String) async throws -> ControlPlane.SceneManifest {
+        throw Unreachable()
+    }
+    func downloadSceneFile(sceneId: String, path: String,
+                           to destination: URL) async throws -> String { throw Unreachable() }
+    @discardableResult
+    func uploadOutput(unitId: String, name: String, file: URL) async throws -> Int {
+        throw Unreachable()
+    }
 }

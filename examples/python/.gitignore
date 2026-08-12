@@ -1,0 +1,6 @@
+# The corpus and the index are built, not authored. Two commands rebuild them
+# from the Legislature's own copy, and committing 35MB of vectors plus the cached
+# HTML they came from would put a build artifact in the history for good.
+corpus/
+__pycache__/
+*.pyc

@@ -100,3 +100,96 @@ export function has(root: string, modelId: string, filePath: string): boolean {
   const p = safePath(root, modelId, filePath)
   return p !== null && existsSync(p)
 }
+
+export interface FileFault {
+  path: string
+  fault: 'missing' | 'wrong-size' | 'wrong-hash' | 'unsafe-path'
+  expected?: string | number
+  actual?: string | number
+}
+
+export interface ModelReport {
+  modelId: string
+  ok: boolean
+  files: number
+  present: number
+  bytesMissing: number
+  faults: FileFault[]
+}
+
+/**
+ * Whether the repository actually holds what the catalogue says it holds.
+ *
+ * This exists because it did not, and nothing noticed. `model_files` recorded
+ * eleven files and 18.4GB for the model both machines in this fleet were
+ * serving, and the directory was not there at all. The nodes kept working -
+ * they had fetched their copies earlier - so the only symptom would have been a
+ * new machine failing to fetch a model the console said was available, at
+ * whatever future moment somebody added one.
+ *
+ * The catalogue and the bytes are separate things that can disagree, and a
+ * distribution system whose whole job is handing out those bytes should be able
+ * to answer "can I still do that" without anybody running `ls`.
+ *
+ * `deep` hashes every file. That is minutes for a large model, so it is not the
+ * default: existence and size catch a missing directory, a truncated transfer
+ * and a half-deleted model, which is the whole of what has actually gone wrong
+ * here. Hashing catches corruption, which is rarer and worth waiting for when
+ * you ask.
+ */
+export async function verifyModel(
+  root: string, modelId: string, files: StoredFile[], deep = false,
+): Promise<ModelReport> {
+  const faults: FileFault[] = []
+  let present = 0
+  let bytesMissing = 0
+
+  for (const f of files) {
+    const p = safePath(root, modelId, f.path)
+    if (!p) {
+      faults.push({ path: f.path, fault: 'unsafe-path' })
+      bytesMissing += Number(f.sizeBytes)
+      continue
+    }
+    let size: number
+    try {
+      size = (await stat(p)).size
+    } catch {
+      faults.push({ path: f.path, fault: 'missing', expected: Number(f.sizeBytes) })
+      bytesMissing += Number(f.sizeBytes)
+      continue
+    }
+    if (size !== Number(f.sizeBytes)) {
+      faults.push({
+        path: f.path, fault: 'wrong-size',
+        expected: Number(f.sizeBytes), actual: size,
+      })
+      continue
+    }
+    if (deep) {
+      const hash = createHash('sha256')
+      await pipeline(createReadStream(p), async function* (source) {
+        for await (const chunk of source) { hash.update(chunk as Buffer) }
+        // Consume without writing anywhere; the digest is the point.
+      })
+      const got = hash.digest('hex')
+      if (got !== f.sha256) {
+        faults.push({ path: f.path, fault: 'wrong-hash', expected: f.sha256, actual: got })
+        continue
+      }
+    }
+    present += 1
+  }
+
+  return {
+    modelId,
+    // A model with no file rows is not "fine", it is unusable: nothing can be
+    // fetched for it. Reported as a fault rather than silently passing, which
+    // is how an empty catalogue entry would otherwise look healthy.
+    ok: files.length > 0 && faults.length === 0,
+    files: files.length,
+    present,
+    bytesMissing,
+    faults,
+  }
+}

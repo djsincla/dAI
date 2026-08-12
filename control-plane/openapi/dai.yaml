@@ -1771,6 +1771,65 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
 
         '401': { $ref: '#/components/responses/Unauthorized' }
+  /admin/v1/models/verify:
+    get:
+      tags: [admin]
+      summary: Whether the repository still holds what the catalogue promises
+      description: >
+        The catalogue records what a model is; the repository holds the bytes.
+        They can disagree, and when they did nothing noticed: a model this fleet
+        was serving had eleven files and 18.4GB recorded and no directory at all.
+        The nodes had fetched their copies earlier, so the only symptom would
+        have been a new machine failing to fetch it, months later.
+
+
+        Cheap by default. `deep=1` hashes every byte, which catches corruption
+        rather than absence and takes minutes for a large model.
+      parameters:
+        - name: deep
+          in: query
+          required: false
+          schema: { type: string, enum: ['1', 'true'] }
+      responses:
+        '200':
+          description: One report per registered model
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [root, deep, models, healthy, broken, bytesMissing, reports]
+                properties:
+                  root: { type: string }
+                  deep: { type: boolean }
+                  models: { type: integer }
+                  healthy: { type: integer }
+                  broken: { type: integer }
+                  bytesMissing: { type: integer }
+                  reports:
+                    type: array
+                    items:
+                      type: object
+                      required: [modelId, ok, files, present, bytesMissing, faults]
+                      properties:
+                        modelId: { type: string }
+                        ok: { type: boolean }
+                        files: { type: integer }
+                        present: { type: integer }
+                        bytesMissing: { type: integer }
+                        faults:
+                          type: array
+                          items:
+                            type: object
+                            required: [path, fault]
+                            properties:
+                              path: { type: string }
+                              fault:
+                                type: string
+                                enum: [missing, wrong-size, wrong-hash, unsafe-path]
+                              expected: {}
+                              actual: {}
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
   /admin/v1/models/{modelId}:
     parameters:
       - name: modelId

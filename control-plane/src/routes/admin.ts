@@ -3,7 +3,7 @@ import {
   attach, blobPath, expireOutputs, hashOf, outputPath, putBlob, retentionAfterCollection,
 } from '../lib/attachments.js'
 import { resolve as resolveOpenJD, frameOf, type JobTemplate } from '../lib/openjd.js'
-import { safePath } from '../lib/repository.js'
+import { repositoryRoot, safePath, verifyModel } from '../lib/repository.js'
 import { existsSync } from 'node:fs'
 import { Router } from 'express'
 import { type Db, tx } from '../lib/db.js'
@@ -829,6 +829,48 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
   r.get('/models/available', async (_req, res) => {
     const { rows } = await db.query(`SELECT id FROM models`)
     res.json(await candidates(new Set(rows.map((r2) => r2.id as string))))
+  })
+
+  /**
+   * Whether the repository still holds what the catalogue promises.
+   *
+   * Answers the question nobody could ask before: this fleet's catalogue listed
+   * a model with eleven files and 18.4GB, and the directory was not there. The
+   * nodes serving it had fetched their copies earlier, so nothing was visibly
+   * broken until a new machine tried to fetch it - and that machine might not
+   * exist for months.
+   *
+   * Cheap by default so it can be run often, or wired to a check. `?deep=1`
+   * hashes every byte, which is minutes for a large model and the right thing
+   * to reach for when you suspect corruption rather than absence.
+   */
+  r.get('/models/verify', async (req, res) => {
+    const deep = req.query.deep === '1' || req.query.deep === 'true'
+    const root = repositoryRoot()
+    const { rows: models } = await db.query(`SELECT id FROM models ORDER BY id`)
+
+    const reports = []
+    for (const m of models as { id: string }[]) {
+      const { rows: files } = await db.query(
+        `SELECT path, size_bytes, sha256 FROM model_files WHERE model_id=$1 ORDER BY path`,
+        [m.id])
+      reports.push(await verifyModel(root, m.id, files.map((f) => ({
+        path: f.path as string,
+        sizeBytes: Number(f.size_bytes),
+        sha256: f.sha256 as string,
+      })), deep))
+    }
+
+    const broken = reports.filter((x) => !x.ok)
+    res.json({
+      root,
+      deep,
+      models: reports.length,
+      healthy: reports.length - broken.length,
+      broken: broken.length,
+      bytesMissing: broken.reduce((n, x) => n + x.bytesMissing, 0),
+      reports,
+    })
   })
 
   /**

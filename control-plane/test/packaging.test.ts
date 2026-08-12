@@ -436,3 +436,113 @@ describe('the package postinstall', () => {
     expect(out).toContain('install.sh --config')
   })
 })
+
+/**
+ * The control plane's own package.
+ *
+ * It used to run from a working tree: `npx tsx src/server.ts`, Postgres in
+ * compose, TLS from a script somebody remembered. None of that can be given to
+ * a machine somebody else owns.
+ */
+describe('the control plane launchd plist', () => {
+  const template = readFileSync(
+    join(process.cwd(), 'packaging', 'com.dai.control.plist.in'), 'utf8')
+
+  const render = () => template
+    .replace(/@BINARY_DIR@/g, '/usr/local/libexec/dai-control')
+    .replace(/@STATE_DIR@/g, '/var/db/dai-control')
+    .replace(/@LOG_DIR@/g, '/var/log/dai-control')
+    .replace(/@USER@/g, '_daictl')
+    .replace(/@DATABASE_URL@/g, 'postgres://dai:dai@localhost:5432/dai')
+    .replace(/@PORT@/g, '8452')
+    .replace(/@AGENT_CIDRS@/g, '')
+    .replace(/@ADMIN_CIDRS@/g, '10.0.0.0/8')
+    .replace(/@MONITOR_CIDRS@/g, '127.0.0.1/32')
+
+  it('leaves no placeholder unsubstituted', () => {
+    expect(render().match(/@[A-Z_]+@/g) ?? []).toEqual([])
+  })
+
+  it('runs the bundled runtime, not whatever node is on the machine', () => {
+    // A homebrew node is a 67KB shim against dylibs under /opt/homebrew, so a
+    // package that used `node` from PATH would work only where homebrew had
+    // installed the same versions.
+    expect(render()).toContain('<string>/usr/local/libexec/dai-control/node</string>')
+    expect(render()).toContain('dist/server.js')
+  })
+
+  it('does not run as root', () => {
+    // It holds the private key of the authority that signs every node's
+    // identity. An unprivileged account owning exactly that is a smaller
+    // target than root owning everything.
+    expect(render()).toContain('<string>_daictl</string>')
+    expect(render()).not.toMatch(/<key>UserName<\/key>\s*<string>root<\/string>/)
+  })
+
+  it('points TLS_CA at the server CA, not the node CA', () => {
+    // The one setting a deployment gets wrong invisibly. TLS_CA is read twice:
+    // the listener adds it to the certificates it accepts from clients, and the
+    // enrolment route hands it to agents as the authority to pin. Only the
+    // second decides whether a fleet works, and its default is the node CA -
+    // which is why agents in testing needed the right file copied by hand.
+    expect(render()).toContain('certs/srv-ca.crt')
+    expect(render()).not.toMatch(/TLS_CA<\/key>\s*<string>[^<]*certs\/ca\.crt</)
+  })
+
+  it('keeps the node CA somewhere other than the server certificates', () => {
+    // Two authorities that must not be conflated: anything trusted to talk to
+    // the fleet would otherwise also be able to impersonate a node.
+    expect(render()).toMatch(/CA_DIR<\/key>\s*<string>\/var\/db\/dai-control\/node-ca</)
+  })
+
+  it('restarts if it stops', () => {
+    // A fleet that cannot reach its control plane stops getting work and every
+    // machine in it looks broken.
+    expect(render()).toMatch(/KeepAlive<\/key>\s*<true\/>/)
+  })
+})
+
+describe('the control plane postinstall', () => {
+  const script = join(process.cwd(), 'packaging', 'scripts', 'postinstall')
+
+  it('succeeds and starts nothing when no database has been named', () => {
+    // The control plane cannot invent a database, and one started without a
+    // reachable Postgres restarts in a loop under KeepAlive - filling a log
+    // with the same failure rather than saying it once.
+    const root = mkdtempSync(join(tmpdir(), 'dai-ctl-postinstall-'))
+    const rewritten = readFileSync(script, 'utf8')
+      .replace(/^BINARY_DIR=.*$/m, `BINARY_DIR=${root}/usr/local/libexec/dai-control`)
+      .replace(/^CONFIG_DIR=.*$/m, `CONFIG_DIR="${root}/Library/Application Support/dAI"`)
+      .replace(/^LOG=.*$/m, `LOG=${root}/install.log`)
+    const runner = join(root, 'postinstall')
+    writeFileSync(runner, rewritten)
+    chmodSync(runner, 0o755)
+
+    const r = spawnSync('/bin/bash', [runner], { encoding: 'utf8' })
+    expect(r.status).toBe(0)
+    const out = `${r.stdout ?? ''}${r.stderr ?? ''}`
+    expect(out).toContain('installed and not running')
+    expect(out).toContain('--db postgres://')
+  })
+})
+
+describe('the control plane uninstaller', () => {
+  const source = readFileSync(join(process.cwd(), 'packaging', 'uninstall.sh'), 'utf8')
+
+  it('never touches the database', () => {
+    // It holds the fleet: every node's identity, the jobs, the audit log.
+    // Dropping it because somebody uninstalled a service would be the most
+    // destructive thing in this repository.
+    expect(source).not.toMatch(/DROP DATABASE|dropdb|psql/)
+    expect(source).toContain('The database was not touched')
+  })
+
+  it('keeps the node CA unless asked to purge', () => {
+    // Losing that key means enrolling and approving every machine again, even
+    // though the database still lists them.
+    const purgeBlock = source.slice(source.indexOf('if [[ $PURGE -eq 1 ]]'))
+    expect(purgeBlock).toContain('$STATE_DIR')
+    const beforePurge = source.slice(0, source.indexOf('if [[ $PURGE -eq 1 ]]'))
+    expect(beforePurge).not.toContain('rm -rf "$STATE_DIR"')
+  })
+})

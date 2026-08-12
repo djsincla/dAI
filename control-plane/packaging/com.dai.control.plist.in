@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The control plane, as a system daemon.
+
+  A daemon rather than an agent, for the same reason the harvest agent is one: a
+  LaunchAgent exists only inside a GUI login session, and the control plane has
+  to answer a fleet at four in the morning on a Mac sitting at its login window.
+
+  Rendered by the postinstall from the settings file. The alternative - a wrapper
+  script that sources an env file and execs node - keeps configuration out of the
+  plist but puts a shell in the middle of the service, and makes "what is this
+  process actually running with" a question you answer by reading two files
+  instead of one.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.dai.control</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@BINARY_DIR@/node</string>
+    <string>@BINARY_DIR@/dist/server.js</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>@BINARY_DIR@</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!--
+    Restarted if it stops. A fleet that cannot reach its control plane stops
+    getting work, stops reporting presence, and every machine in it looks
+    broken - so the failure to recover from is one process exiting, not fifty
+    agents deciding what to do about it.
+  -->
+  <key>KeepAlive</key>
+  <true/>
+
+  <!--
+    Not root. It serves HTTP, talks to Postgres and reads files it owns; none of
+    that needs privilege. It does hold the node CA's private key, which is the
+    thing worth protecting on this machine, and an unprivileged account that
+    owns exactly that is a smaller target than root owning everything.
+  -->
+  <key>UserName</key>
+  <string>@USER@</string>
+
+  <key>StandardOutPath</key>
+  <string>@LOG_DIR@/control.log</string>
+  <key>StandardErrorPath</key>
+  <string>@LOG_DIR@/control.err.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>NODE_ENV</key>
+    <string>production</string>
+
+    <key>DATABASE_URL</key>
+    <string>@DATABASE_URL@</string>
+    <key>PORT</key>
+    <string>@PORT@</string>
+
+    <!--
+      TLS material. The control plane refuses to be useful without it in any
+      real deployment: a fleet that talks to it in plaintext has no way to know
+      it is talking to the right one, and mutual TLS is how a node proves it is
+      a node at all.
+    -->
+    <key>TLS_CERT</key>
+    <string>@STATE_DIR@/certs/server.crt</string>
+    <key>TLS_KEY</key>
+    <string>@STATE_DIR@/certs/server.key</string>
+    <!--
+      The *server* CA - the one that signed the certificate above.
+      
+      TLS_CA is read in two places and they want different things. The listener
+      adds it to the certificates it will accept from clients, and the enrolment
+      route hands it to agents as the authority to pin when verifying this
+      machine. Only the second matters for a fleet that works, so this is the
+      server CA; a node given anything else refuses every connection with an
+      error that reads like the network being down.
+      
+      Its default, if unset, is the node CA - which is why agents in testing
+      needed the right file copied to them by hand.
+    -->
+    <key>TLS_CA</key>
+    <string>@STATE_DIR@/certs/srv-ca.crt</string>
+
+    <!--
+      The node CA, which signs agent identities. Deliberately a different
+      authority from the one above: conflating them would mean anything trusted
+      to talk to the fleet could also impersonate a node.
+    -->
+    <key>CA_DIR</key>
+    <string>@STATE_DIR@/node-ca</string>
+
+    <!--
+      Content, and where it goes. Models are kept; scenes, blobs and finished
+      frames are not, and the reaper deletes them on the schedule the retention
+      settings describe. All of it sits under one directory so an operator
+      backing this machine up has one thing to name.
+    -->
+    <key>DAI_MODEL_REPO</key>
+    <string>@STATE_DIR@/models</string>
+    <key>DAI_SCENE_REPO</key>
+    <string>@STATE_DIR@/scenes</string>
+    <key>DAI_BLOB_STORE</key>
+    <string>@STATE_DIR@/blobs</string>
+    <key>DAI_OUTPUT_DIR</key>
+    <string>@STATE_DIR@/outputs</string>
+
+    <!--
+      Which addresses may reach which surface. Empty means "anywhere", which is
+      right for the credentialed surfaces and wrong for monitoring - so an
+      unset DAI_MONITOR_CIDRS makes /monitor/v1 return 404 rather than publish
+      a map of the building to whoever asks.
+    -->
+    <key>DAI_AGENT_CIDRS</key>
+    <string>@AGENT_CIDRS@</string>
+    <key>DAI_ADMIN_CIDRS</key>
+    <string>@ADMIN_CIDRS@</string>
+    <key>DAI_MONITOR_CIDRS</key>
+    <string>@MONITOR_CIDRS@</string>
+  </dict>
+
+  <!--
+    Enough file descriptors for a fleet. Each node holds a long-poll for
+    dispatch, so the count scales with machines rather than with requests, and
+    the default of 256 is reached by a studio rather than by a load test.
+  -->
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>4096</integer>
+  </dict>
+</dict>
+</plist>

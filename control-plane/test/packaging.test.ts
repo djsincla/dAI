@@ -411,6 +411,55 @@ describe('install.sh --config', () => {
   })
 })
 
+describe('installing over files the package already laid down', () => {
+  const script = join(process.cwd(), '..', 'agent', 'packaging', 'install.sh')
+
+  /**
+   * The case a .pkg always hits and nothing tested.
+   *
+   * The package puts the binaries in /usr/local/libexec/dai and then the
+   * postinstall runs install.sh with --build pointing at that same directory,
+   * so the copy is a file onto itself. `install` calls that an error rather
+   * than a no-op - "are the same file" - and under `set -e` it ended the
+   * script, which failed the whole installation on a real machine.
+   *
+   * The tests above stop at "no build found" and never reach the copy, which is
+   * why they all passed while the package did not install.
+   */
+  const runWithBuildEqualToDestination = () => {
+    const root = mkdtempSync(join(tmpdir(), 'dai-samedir-'))
+    const binDir = join(root, 'usr/local/libexec/dai')
+    mkdirSync(binDir, { recursive: true })
+    writeFileSync(join(binDir, 'dai-agent'), '#!/bin/bash\ntrue\n')
+    chmodSync(join(binDir, 'dai-agent'), 0o755)
+    writeFileSync(join(root, 'server-ca.crt'), 'CA')
+
+    // Everything past the copy is launchd and directory surgery, so the script
+    // is stopped just after it - what is under test is whether it gets there.
+    const rewritten = readFileSync(script, 'utf8')
+      .replace(/^\[\[ \$EUID -eq 0 \]\].*$/m, 'true')
+      .replace(/^BINARY_DIR=.*$/m, `BINARY_DIR=${binDir}`)
+      .replace(/^(IDENTITY_DIR|STATE_DIR|LOG_DIR|MODEL_DIR)=/gm, `$1=${root}`)
+      .replace(/^install -d -m 700 "\$STATE_DIR".*$/m, 'echo REACHED_THE_END; exit 0')
+
+    const runner = join(root, 'install.sh')
+    writeFileSync(runner, rewritten)
+    chmodSync(runner, 0o755)
+    return spawnSync('/bin/bash', [runner, '--url', 'https://cp:8452', '--token', 'jt',
+                                   '--ca', join(root, 'server-ca.crt'), '--build', binDir],
+      { encoding: 'utf8' })
+  }
+
+  it('does not fail when the source and destination are the same directory', () => {
+    const r = runWithBuildEqualToDestination()
+    const out = `${r.stdout ?? ''}${r.stderr ?? ''}`
+    expect(out).not.toContain('are the same file')
+    expect(out).toContain('already in place')
+    expect(out).toContain('REACHED_THE_END')
+    expect(r.status).toBe(0)
+  })
+})
+
 describe('the package postinstall', () => {
   const script = join(process.cwd(), '..', 'agent', 'packaging', 'scripts', 'postinstall')
 

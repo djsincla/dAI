@@ -263,3 +263,44 @@ struct SyncFaultReportingTests {
         #expect(outcome.failed["*"]?.contains("could not ask what to hold") == true)
     }
 }
+
+/// Noticing that a reconciliation pass has wedged.
+///
+/// The loop used a boolean: set before a detached transfer, cleared when it
+/// finished. Nothing in that path has a timeout, so one hung transfer left the
+/// flag set for good and the node never attempted another pass - and never said
+/// why, because the log line is written when a pass completes. A machine in that
+/// state heartbeats normally and looks identical to one with nothing to do. It
+/// is how orca sat for twelve hours not fetching a model it had been assigned.
+struct StuckPassTests {
+    let hour: TimeInterval = 3600
+
+    @Test("no pass running is not a stuck pass")
+    func nothingRunning() {
+        #expect(Worker.passIsStuck(startedAt: nil, now: Date(), after: hour) == false)
+    }
+
+    @Test("a pass well inside the budget is left alone")
+    func stillWorking() {
+        let now = Date()
+        #expect(Worker.passIsStuck(startedAt: now.addingTimeInterval(-60),
+                                   now: now, after: hour) == false)
+    }
+
+    @Test("a pass past the budget is stuck, and another may start")
+    func wedged() {
+        let now = Date()
+        #expect(Worker.passIsStuck(startedAt: now.addingTimeInterval(-hour - 1),
+                                   now: now, after: hour) == true)
+    }
+
+    @Test("exactly at the budget counts as stuck")
+    func onTheBoundary() {
+        // Inclusive on purpose. The cost of starting one extra pass is a
+        // transfer that is idempotent and hash-checked; the cost of waiting is a
+        // machine that never syncs again.
+        let now = Date()
+        #expect(Worker.passIsStuck(startedAt: now.addingTimeInterval(-hour),
+                                   now: now, after: hour) == true)
+    }
+}

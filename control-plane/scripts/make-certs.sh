@@ -10,10 +10,34 @@
 # include key usage extension", which reads like a connectivity problem and is
 # not one.
 set -euo pipefail
-cd "$(dirname "$0")/.."
-mkdir -p certs && cd certs
 
-SANS="${SANS:-DNS:localhost,IP:127.0.0.1}"
+# --out and --host exist so the installer can use this script rather than carry
+# a second copy of the same openssl invocations. Without them it wrote to a
+# fixed directory relative to itself, which is the repository when run from the
+# repository and the wrong place entirely when run from a package.
+OUT=""; HOST=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --out)  OUT="$2"; shift 2 ;;
+    --host) HOST="$2"; shift 2 ;;
+    *) echo "unknown option: $1" >&2; exit 2 ;;
+  esac
+done
+
+if [[ -n "$OUT" ]]; then
+  mkdir -p "$OUT" && cd "$OUT"
+else
+  cd "$(dirname "$0")/.."
+  mkdir -p certs && cd certs
+fi
+
+# A certificate has to carry the name agents will actually use, or every one of
+# them refuses the connection - and the refusal reads as a network problem.
+if [[ -n "$HOST" ]]; then
+  SANS="${SANS:-DNS:$HOST,DNS:localhost,IP:127.0.0.1}"
+else
+  SANS="${SANS:-DNS:localhost,IP:127.0.0.1}"
+fi
 
 if [ -f srv-ca.crt ]; then echo "server CA already present; delete certs/srv-ca.* to regenerate"; exit 0; fi
 
@@ -35,7 +59,7 @@ openssl req -x509 -newkey rsa:4096 -sha256 -days 365 -nodes \
 chmod 600 srv-ca.key
 
 openssl req -newkey rsa:2048 -nodes -keyout server.key -out server.csr \
-  -subj "/CN=dai-control" 2>/dev/null
+  -subj "/CN=${HOST:-dai-control}" 2>/dev/null
 chmod 600 server.key
 
 openssl x509 -req -in server.csr -CA srv-ca.crt -CAkey srv-ca.key -CAcreateserial \

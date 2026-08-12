@@ -42,6 +42,11 @@ agent/.build/
 # packaging build products
 agent/packaging/.staging/
 agent/packaging/dist/
+control-plane/packaging/.staging/
+control-plane/packaging/dist/
+# The bundled runtime, fetched from nodejs.org and checksum-verified at build
+# time. Cached so a rebuild is not a download; never committed.
+control-plane/packaging/.node-cache/
 
 # xcodebuild derived data (the GPU-capable build lives here)
 agent/.xcbuild/

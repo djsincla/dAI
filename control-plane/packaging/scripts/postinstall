@@ -1,0 +1,36 @@
+#!/bin/bash
+#
+# What the control plane's .pkg does once its files are down.
+#
+# The same shape as the agent's: the work belongs to install.sh, and this reads
+# the settings an unattended install cannot be asked for. One installer, two
+# ways of reaching it.
+set -euo pipefail
+
+BINARY_DIR=/usr/local/libexec/dai-control
+CONFIG_DIR="/Library/Application Support/dAI"
+CONFIG="$CONFIG_DIR/control.json"
+LOG=/var/log/dai-control-install.log
+
+mkdir -p "$(dirname "$LOG")"
+exec > >(tee -a "$LOG") 2>&1
+echo "=== dai control plane postinstall $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+
+if [[ ! -f "$CONFIG" ]]; then
+  # Installed, and deliberately not started. The control plane cannot invent a
+  # database, and one started without a reachable Postgres would restart in a
+  # loop under KeepAlive - filling a log with the same failure rather than
+  # saying it once.
+  echo "no configuration at $CONFIG"
+  echo
+  echo "the control plane is installed and not running. Give it a database:"
+  echo "  sudo $BINARY_DIR/install.sh --db postgres://user:pass@host:5432/dai"
+  echo
+  echo "or write $CONFIG with databaseUrl, and run:"
+  echo "  sudo $BINARY_DIR/install.sh --config \"$CONFIG\""
+  mkdir -p "$CONFIG_DIR"
+  exit 0
+fi
+
+echo "configuring from $CONFIG"
+"$BINARY_DIR/install.sh" --config "$CONFIG"

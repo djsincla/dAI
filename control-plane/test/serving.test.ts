@@ -90,7 +90,21 @@ describe('serving over HTTP', () => {
     server = await new Promise<Server>((r) => { const s = app.listen(0, () => r(s)) })
     base = `http://127.0.0.1:${(server.address() as any).port}`
   })
+  /**
+   * Nodes parked on the reverse channel, so they can be taken off it.
+   *
+   * Nothing used to stop them. A long-poll was left in flight when the server
+   * closed, undici reported the reset as an unhandled error, and vitest exited
+   * non-zero while every test passed - which is invisible until something reads
+   * the exit code, and the thing that reads it is the release script.
+   */
+  const attached: { stop: () => void; loop: Promise<void> }[] = []
+
   afterEach(async () => {
+    // Detached before the server goes, not after.
+    for (const n of attached) n.stop()
+    await Promise.all(attached.map((n) => n.loop))
+    attached.length = 0
     broker.reset()
     await new Promise<void>((r) => server.close(() => r()))
   })
@@ -99,18 +113,33 @@ describe('serving over HTTP', () => {
   /** Park a node on the reverse channel and answer whatever arrives. */
   function attachNode(reply: (body: any) => any) {
     let stop = false
+    // The in-flight long poll has to be cancellable, or stopping the loop only
+    // stops the next request and the current one is still there when the server
+    // closes underneath it.
+    const inFlight = new AbortController()
     const loop = (async () => {
       while (!stop) {
-        const r = await fetch(`${base}/agent/v1/dispatch`, { headers: asNode(fx.fingerprint) })
-        if (r.status !== 200) continue
+        let r: Response
+        try {
+          r = await fetch(`${base}/agent/v1/dispatch`,
+            { headers: asNode(fx.fingerprint), signal: inFlight.signal })
+        } catch {
+          return  // aborted, which is how this loop is meant to end
+        }
+        // Every body is read or cancelled. An unread one keeps the connection
+        // holding data that is reset when the server goes.
+        if (r.status !== 200) { await r.body?.cancel(); continue }
         const d = await r.json()
-        await fetch(`${base}/agent/v1/dispatch/${d.dispatchId}/result`, {
+        const posted = await fetch(`${base}/agent/v1/dispatch/${d.dispatchId}/result`, {
           method: 'POST', headers: asNode(fx.fingerprint),
           body: JSON.stringify({ result: reply(d.body) }),
         })
+        await posted.body?.cancel()
       }
     })()
-    return { stop: () => { stop = true }, loop }
+    const handle = { stop: () => { stop = true; inFlight.abort() }, loop }
+    attached.push(handle)
+    return handle
   }
 
   it('refuses with 503 when no node is connected', async () => {
@@ -181,6 +210,7 @@ describe('serving over HTTP', () => {
       body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }], stream: true }),
     })
     expect(r.status).toBe(400)
+    await r.body?.cancel()
   })
 
   it('records resident models from the heartbeat, replacing rather than merging', async () => {

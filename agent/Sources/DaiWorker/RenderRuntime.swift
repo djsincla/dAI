@@ -149,6 +149,11 @@ public actor RenderRuntime {
         child.standardOutput = out
         child.standardError = out
 
+        // Armed before the process starts, because a handler attached after it
+        // has already exited is a handler that never runs.
+        let exit = Exit()
+        child.terminationHandler = { exit.finished($0.terminationStatus) }
+
         guard !stopped else { throw Failure.cancelled }
         try child.run()
         running = child
@@ -157,16 +162,13 @@ public actor RenderRuntime {
         // buffer is finite: waiting for exit before reading deadlocks a long
         // render at whatever the buffer holds, which looks exactly like a hung
         // renderer and is the agent's fault.
-        let handle = out.fileHandleForReading
-        let log = await Task.detached { () -> String in
-            String(data: handle.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        }.value
-        child.waitUntilExit()
+        let log = await Self.drain(out.fileHandleForReading)
+        let status = await exit.value
         running = nil
 
         if stopped { throw Failure.cancelled }
-        guard child.terminationStatus == 0 else {
-            throw Failure.exited(child.terminationStatus, Self.tail(of: log))
+        guard status == 0 else {
+            throw Failure.exited(status, Self.tail(of: log))
         }
 
         let produced = directory.appendingPathComponent(
@@ -196,6 +198,72 @@ public actor RenderRuntime {
         stopped = true
         running?.terminate()
         running = nil
+    }
+
+    // MARK: - Waiting without blocking a thread
+    //
+    // Neither of the obvious calls can be used from here, and both were, and
+    // the suite hung roughly one run in five because of it.
+    //
+    // `waitUntilExit()` spins a run loop on whatever thread calls it, waiting
+    // for a source registered by the thread that called `run()`. An actor is
+    // not a thread: the `await` between the two lets this method resume on a
+    // different one, and then the child exits, is reaped, and the wakeup is
+    // delivered to a run loop nobody is spinning. The wait never returns. It
+    // depends only on which thread the pool hands back, which is why it looked
+    // intermittent and why nothing in the render was ever wrong.
+    //
+    // `readDataToEndOfFile()` does return, but it blocks until the child closes
+    // the pipe - minutes, for a real frame. Run on the cooperative pool, as a
+    // detached task is, that is one of a dozen threads the whole agent shares,
+    // held by a process doing nothing but waiting for another process.
+    //
+    // So: the exit arrives as a callback, and the read gets a thread of its own.
+
+    /// A process exit, delivered once, to a caller that may not be waiting yet.
+    final class Exit: @unchecked Sendable {
+        private let lock = NSLock()
+        private var status: Int32?
+        private var waiter: CheckedContinuation<Int32, Never>?
+
+        func finished(_ code: Int32) {
+            lock.lock()
+            let waiter = self.waiter
+            self.waiter = nil
+            status = code
+            lock.unlock()
+            // Outside the lock: resuming runs the continuation's task, which
+            // may re-enter anything.
+            waiter?.resume(returning: code)
+        }
+
+        var value: Int32 {
+            get async {
+                await withCheckedContinuation { continuation in
+                    lock.lock()
+                    if let status {
+                        lock.unlock()
+                        continuation.resume(returning: status)
+                    } else {
+                        waiter = continuation
+                        lock.unlock()
+                    }
+                }
+            }
+        }
+    }
+
+    /// Somewhere to do a blocking read that is not the cooperative pool.
+    private static let readers = DispatchQueue(label: "com.dai.render.log",
+                                               attributes: .concurrent)
+
+    static func drain(_ handle: FileHandle) async -> String {
+        await withCheckedContinuation { continuation in
+            readers.async {
+                let data = handle.readDataToEndOfFile()
+                continuation.resume(returning: String(data: data, encoding: .utf8) ?? "")
+            }
+        }
     }
 
     /// The last few lines, which is where a renderer says what went wrong.

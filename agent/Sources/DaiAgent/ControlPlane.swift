@@ -684,7 +684,8 @@ public actor ControlPlane {
                           capability: [String: Double] = [:],
                           residentModels: [String: Double] = [:],
                           storedModels: [String: Double]? = nil,
-                          modelInfo: [String: Int] = [:]) async throws {
+                          modelInfo: [String: Int] = [:],
+                          syncFaults: [String: String]? = nil) async throws {
         var body: [String: JSONValue] = [
             "presenceState": .string(state.rawValue),
             // Replaced rather than merged: a model released on a yield is no
@@ -720,6 +721,17 @@ public actor ControlPlane {
             body["models"] = .array(modelInfo.map { name, context in
                 .object(["name": .string(name), "contextLength": .number(Double(context))])
             })
+        }
+        // Sent only after a reconciliation pass has run, so absent means "no
+        // news" rather than "all well". A pass that succeeded sends an empty
+        // object, which is what clears a fault the operator has already seen.
+        //
+        // Reported at all because the alternative is what this fleet did for
+        // twelve hours: a node failing every transfer, writing the reason to a
+        // log nobody reads, while the console showed a count of machines still
+        // wanting the model that never moved.
+        if let syncFaults {
+            body["syncFaults"] = .object(syncFaults.mapValues { .string($0) })
         }
         if let onACPower { body["onAcPower"] = .bool(onACPower) }
         if let thermalOK { body["thermalOk"] = .bool(thermalOK) }

@@ -145,6 +145,20 @@ CREATE TABLE IF NOT EXISTS nodes (
     -- and putting that on an interactive request path is the difference between
     -- a service and a curiosity.
     resident_models       jsonb NOT NULL DEFAULT '{}'::jsonb,
+    -- Why this node does not hold something it was assigned, model id -> reason,
+    -- as last reported by the node itself.
+    --
+    -- A transfer that fails is written to the node's own log and nowhere else,
+    -- so a machine that has silently stopped fetching looks exactly like one
+    -- that is up to date: the fleet view shows a count of nodes still wanting
+    -- the model and that count simply never moves. On this fleet a node went
+    -- twelve hours failing on "could not ask what to hold: connection reset"
+    -- with nothing to see anywhere but ssh.
+    --
+    -- Empty means the last pass had nothing to report, which is not the same as
+    -- never having run - last_model_sync answers that.
+    model_sync_faults     jsonb NOT NULL DEFAULT '{}'::jsonb,
+    last_model_sync       timestamptz,
     created_at            timestamptz NOT NULL DEFAULT now()
 );
 
@@ -297,6 +311,11 @@ CREATE TABLE IF NOT EXISTS model_files (
 --
 -- The fleet view could show what a machine had and never what it should have,
 -- so drift was invisible by construction. This is the declared half; the
+-- Added after the fact for fleets that already exist; see the column comments.
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS
+  model_sync_faults jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS last_model_sync timestamptz;
+
 -- observed half is nodes.resident_models, and the difference between them is
 -- the only thing worth looking at.
 CREATE TABLE IF NOT EXISTS pool_models (

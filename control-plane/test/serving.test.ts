@@ -245,6 +245,49 @@ describe('serving over HTTP', () => {
     await r.body?.cancel()
   })
 
+  it('records why a node is not holding what it was assigned', async () => {
+    // A transfer that fails is written to the node's own log and nowhere else,
+    // so a machine that has silently stopped fetching looks exactly like one
+    // that is up to date. On this fleet a node spent twelve hours failing on
+    // "could not ask what to hold" with nothing visible anywhere but ssh.
+    await fetch(`${base}/agent/v1/heartbeat`, {
+      method: 'POST', headers: asNode(fx.fingerprint),
+      body: JSON.stringify({
+        presenceState: 'LOCKED',
+        syncFaults: { 'org/model': 'HTTP 404 downloading org/model/config.json' },
+      }),
+    })
+    const seen = await db.query(
+      `SELECT model_sync_faults, last_model_sync FROM nodes WHERE id=$1`, [fx.nodeId])
+    expect(seen.rows[0].model_sync_faults).toEqual({
+      'org/model': 'HTTP 404 downloading org/model/config.json',
+    })
+    expect(seen.rows[0].last_model_sync).not.toBeNull()
+  })
+
+  it('leaves recorded faults alone when a beat does not mention them', async () => {
+    // Absent means "no pass has finished", not "all well". An agent that
+    // predates the field, or simply has not run a pass since, must not appear
+    // to have cleared a fault just by staying alive.
+    await db.query(
+      `UPDATE nodes SET model_sync_faults = '{"org/model":"disk full"}'::jsonb WHERE id=$1`,
+      [fx.nodeId])
+    await fetch(`${base}/agent/v1/heartbeat`, {
+      method: 'POST', headers: asNode(fx.fingerprint),
+      body: JSON.stringify({ presenceState: 'LOCKED' }),
+    })
+    const kept = await db.query(`SELECT model_sync_faults FROM nodes WHERE id=$1`, [fx.nodeId])
+    expect(kept.rows[0].model_sync_faults).toEqual({ 'org/model': 'disk full' })
+
+    // An empty object is a positive report and does clear them.
+    await fetch(`${base}/agent/v1/heartbeat`, {
+      method: 'POST', headers: asNode(fx.fingerprint),
+      body: JSON.stringify({ presenceState: 'LOCKED', syncFaults: {} }),
+    })
+    const cleared = await db.query(`SELECT model_sync_faults FROM nodes WHERE id=$1`, [fx.nodeId])
+    expect(cleared.rows[0].model_sync_faults).toEqual({})
+  })
+
   it('records resident models from the heartbeat, replacing rather than merging', async () => {
     const send = (models: Record<string, number>) =>
       fetch(`${base}/agent/v1/heartbeat`, {

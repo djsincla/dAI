@@ -93,6 +93,8 @@ public actor Worker {
     /// pass while the first was still running, and a slow link would end up
     /// fetching the same model a dozen times over.
     private var modelSyncRunning = false
+    /// Reported on the next beat; nil until a pass has finished.
+    private var pendingSyncFaults: [String: String]?
 
     /// Holds the machine awake while it is on AC and nobody has paused it.
     /// Released when either stops being true, and when the process dies.
@@ -208,6 +210,23 @@ public actor Worker {
         guard let outcome else { return }
         for id in outcome.fetched { log("fetched model \(id)") }
         for (id, why) in outcome.failed { log("model \(id) failed: \(why)") }
+
+        // Kept for the next heartbeat rather than only written to the log. A
+        // node that cannot fetch what it was assigned is invisible otherwise:
+        // the fleet view shows a count of machines still wanting the model and
+        // that count does not move whether the transfer is running, queued or
+        // failing every time.
+        //
+        // A pass that reported nothing sets an empty map rather than nil, which
+        // is what clears a fault that has since been fixed. nil means no pass
+        // has finished, and says nothing.
+        var faults = outcome.failed
+        if let skipped = outcome.skipped, faults.isEmpty {
+            // Not a failure, but the same question: why is this machine not
+            // holding what it was told to hold.
+            faults["*"] = skipped
+        }
+        pendingSyncFaults = faults
     }
 
     /// One frame: fetch what the scene needs, render it, hand it back.
@@ -326,7 +345,13 @@ public actor Worker {
                 userPaused: paused,
                 capability: capability,
                 residentModels: await residentModels(),
-                storedModels: StoredModels.scan(base: MLXRuntime.hubBase))
+                storedModels: StoredModels.scan(base: MLXRuntime.hubBase),
+                syncFaults: pendingSyncFaults)
+            // Cleared only once the report has actually landed. A dropped
+            // heartbeat is common and the reason a node is not holding its
+            // models is exactly the sort of thing that would be lost by
+            // clearing optimistically.
+            pendingSyncFaults = nil
         } catch {
             // Best effort. An unreachable control plane must never widen what
             // the agent will do, so a failed heartbeat is simply dropped.

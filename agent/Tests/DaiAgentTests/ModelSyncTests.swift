@@ -174,7 +174,7 @@ struct ModelSyncTests {
     }
 
     @Test("says so when it cannot ask what to hold")
-    func reportsUnreachableControlPlane() async {
+    func reportsFailingControlPlane() async {
         // A `try?` here made a node that could not reach the endpoint
         // indistinguishable from one with nothing assigned. This project has
         // already lost a day to exactly that: a lease request 404'd, the error
@@ -208,5 +208,58 @@ struct ModelSyncTests {
         #expect(await sync.syncIfDue(mayTransfer: true, now: now) != nil)
         #expect(await sync.syncIfDue(mayTransfer: true, now: now.addingTimeInterval(60)) == nil)
         #expect(await sync.syncIfDue(mayTransfer: true, now: now.addingTimeInterval(301)) != nil)
+    }
+}
+
+/// Telling the fleet why a machine is not holding what it was assigned.
+///
+/// Written after a node in this fleet spent twelve hours failing every transfer
+/// with "could not ask what to hold: connection reset by peer", writing the
+/// reason to a log nobody reads. The console showed a count of machines still
+/// wanting the model, and that count is the same whether a transfer is running,
+/// queued, or failing on every attempt.
+struct SyncFaultReportingTests {
+    @Test("a failed transfer is reported rather than only logged")
+    func reportsAFailure() async throws {
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dai-fault-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let cp = FakeControlPlane()
+        let weights = Data("weights".utf8)
+        var hash = SHA256()
+        hash.update(data: weights)
+        let digest = hash.finalize().map { String(format: "%02x", $0) }.joined()
+        await cp.setAssigned([ControlPlane.AssignedModel(
+            id: "org/model", runtime: "mlx", kind: "generate",
+            files: [ControlPlane.ModelFile(path: "a.safetensors",
+                                           sizeBytes: weights.count, sha256: digest)])])
+        // Assigned, but the bytes are not on offer: exactly the repository
+        // divergence that made this worth reporting.
+        await cp.setContents([:])
+
+        let sync = ModelSync(controlPlane: cp, base: base,
+                             status: StatusPublisher(path: base.appendingPathComponent("s").path))
+        let outcome = await sync.sync(mayTransfer: true)
+
+        #expect(outcome.fetched.isEmpty)
+        #expect(outcome.failed["org/model"] != nil)
+    }
+
+    @Test("being unable to ask at all is a fault, not silence")
+    func reportsUnreachable() async throws {
+        // The failure that actually happened. A control plane it cannot reach
+        // must not look like a control plane with nothing to assign, which is
+        // the mistake this codebase has already made once and fixed for leases.
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dai-fault-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let sync = ModelSync(controlPlane: FailingControlPlane(), base: base,
+                             status: StatusPublisher(path: base.appendingPathComponent("s").path))
+        let outcome = await sync.sync(mayTransfer: true)
+
+        #expect(outcome.failed["*"] != nil)
+        #expect(outcome.failed["*"]?.contains("could not ask what to hold") == true)
     }
 }

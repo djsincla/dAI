@@ -26,6 +26,7 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
     const { rows } = await db.query(
       `SELECT id, hostname, chip, memory_gb, metal_working_set_gb, tier, tiers, state,
               owner_user_id, presence_state, last_heartbeat, capability_profiles,
+              model_sync_faults, last_model_sync,
               user_paused, user_paused_at, resident_models, model_context
          -- Superseded records are history, not fleet. They are the previous
          -- enrollment of a machine that is still here under a newer identity,
@@ -42,6 +43,12 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
       tier: n.tier, tiers: n.tiers,
       state: n.state,
       ownerUserId: n.owner_user_id,
+      // Surfaced beside the node rather than buried in its log. A machine that
+      // has quietly stopped fetching what it was assigned is indistinguishable
+      // from one that is up to date, and the count of nodes still wanting a
+      // model never moves either way.
+      syncFaults: n.model_sync_faults ?? {},
+      lastModelSync: n.last_model_sync,
       presenceState: n.presence_state,
       userPaused: n.user_paused ?? false,
       userPausedAt: n.user_paused_at ? new Date(n.user_paused_at).toISOString() : null,

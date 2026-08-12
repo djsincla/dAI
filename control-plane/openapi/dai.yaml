@@ -2343,6 +2343,19 @@ components:
             sha256 of the running executable. A version string is a claim; this
             is evidence, and it is what proves the binary on disk is the one the
             control plane believes it deployed.
+        syncFaults:
+          type: object
+          additionalProperties: { type: string }
+          description: >
+            Model id -> why this node does not hold it, from the last
+            reconciliation pass. The key `*` means the pass could not run at
+            all, which is a different fault from any single model failing and
+            the one that went unnoticed here for twelve hours.
+
+
+            Absent means no pass has finished since the last beat and says
+            nothing; an empty object means a pass ran cleanly, and is what
+            clears a fault an operator has already seen.
         storedModels:
           type: object
           additionalProperties: { type: number }
@@ -2479,6 +2492,17 @@ components:
       type: object
       required: [id, hostname, tier, state]
       properties:
+        syncFaults:
+          type: object
+          additionalProperties: { type: string }
+          description: >
+            Why this machine is not holding what it was assigned, as it last
+            reported. Empty on a healthy node.
+        lastModelSync:
+          type: string
+          format: date-time
+          nullable: true
+          description: When this node last finished a reconciliation pass.
         id: { type: string, format: uuid }
         hostname: { type: string }
         chip: { type: string }

@@ -24,6 +24,9 @@ actor FakeControlPlane: ControlPlaneClient {
     var cancelled: Set<String> = []
     private(set) var lastLeaseReason: String?
     private(set) var lastStoredModels: [String: Double]?
+    /// The last sync faults reported, so a test can assert that a node told the
+    /// control plane why it is not holding what it was assigned.
+    private(set) var lastSyncFaults: [String: String]?
 
     func setQueued(_ leases: [ControlPlane.Lease]) { queued = leases }
 
@@ -39,9 +42,10 @@ actor FakeControlPlane: ControlPlaneClient {
     func heartbeat(state: PresenceState, onACPower: Bool?, thermalOK: Bool?,
                    userPaused: Bool, capability: [String: Double],
                    residentModels: [String: Double], storedModels: [String: Double]?,
-                   modelInfo: [String: Int]) async throws {
+                   modelInfo: [String: Int], syncFaults: [String: String]?) async throws {
         heartbeats.append((state, userPaused, residentModels, modelInfo))
         if let storedModels { lastStoredModels = storedModels }
+        if let syncFaults { lastSyncFaults = syncFaults }
     }
 
     func leaseWork(kinds: [WorkKind]) async throws -> ControlPlane.Lease? {
@@ -226,7 +230,8 @@ actor FailingControlPlane: ControlPlaneClient {
     func heartbeat(state: PresenceState, onACPower: Bool?, thermalOK: Bool?,
                    userPaused: Bool, capability: [String: Double],
                    residentModels: [String: Double], storedModels: [String: Double]?,
-                   modelInfo: [String: Int]) async throws { throw Unreachable() }
+                   modelInfo: [String: Int], syncFaults: [String: String]?)
+        async throws { throw Unreachable() }
     func leaseWork(kinds: [WorkKind]) async throws -> ControlPlane.Lease? { throw Unreachable() }
     var lastLeaseReason: String? { nil }
     func report(unitId: String, completed: [WorkItem], unfinished: [WorkItem],

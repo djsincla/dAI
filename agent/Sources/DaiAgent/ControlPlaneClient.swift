@@ -16,7 +16,7 @@ public protocol ControlPlaneClient: Actor {
     func heartbeat(state: PresenceState, onACPower: Bool?, thermalOK: Bool?,
                    userPaused: Bool, capability: [String: Double],
                    residentModels: [String: Double], storedModels: [String: Double]?,
-                   modelInfo: [String: Int]) async throws
+                   modelInfo: [String: Int], syncFaults: [String: String]?) async throws
     func leaseWork(kinds: [WorkKind]) async throws -> ControlPlane.Lease?
     var lastLeaseReason: String? { get }
     func report(unitId: String, completed: [WorkItem], unfinished: [WorkItem],
@@ -55,11 +55,12 @@ public extension ControlPlaneClient {
                    userPaused: Bool = false, capability: [String: Double] = [:],
                    residentModels: [String: Double] = [:],
                    storedModels: [String: Double]? = nil,
-                   modelInfo: [String: Int] = [:]) async throws {
+                   modelInfo: [String: Int] = [:],
+                   syncFaults: [String: String]? = nil) async throws {
         try await heartbeat(state: state, onACPower: onACPower, thermalOK: thermalOK,
                             userPaused: userPaused, capability: capability,
                             residentModels: residentModels, storedModels: storedModels,
-                            modelInfo: modelInfo)
+                            modelInfo: modelInfo, syncFaults: syncFaults)
     }
 
     @discardableResult

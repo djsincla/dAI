@@ -375,6 +375,9 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
       storedModels?: Record<string, number>
       agentVersion?: string
       agentFingerprint?: string
+      // model id -> why this node does not hold it. Sent only after a sync pass
+      // has run, so absent means "nothing new to say" rather than "all well".
+      syncFaults?: Record<string, string>
     }
     const node = req.node!
 
@@ -417,7 +420,14 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
               -- holding nothing and triggering a fleet-wide redistribution.
               stored_models = COALESCE($9::jsonb, stored_models),
               agent_version = COALESCE($10, agent_version),
-              agent_fingerprint = COALESCE($11, agent_fingerprint)
+              agent_fingerprint = COALESCE($11, agent_fingerprint),
+              -- Absent means unchanged, for the same reason stored_models is:
+              -- an agent that predates the field must not appear to have
+              -- cleared its faults just by heartbeating. A pass that succeeded
+              -- sends an empty object, which does clear them.
+              model_sync_faults = COALESCE($12::jsonb, model_sync_faults),
+              last_model_sync = CASE WHEN $12::jsonb IS NULL
+                                     THEN last_model_sync ELSE now() END
         WHERE id = $6`,
       [b.presenceState, b.onAcPower ?? null, b.thermalOk ?? null,
        JSON.stringify(profiles), JSON.stringify(b.residentModels ?? {}), node.id,
@@ -427,7 +437,8 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
          : JSON.stringify(Object.fromEntries(
              b.models.map((m) => [m.name, m.contextLength]))),
        b.storedModels ? JSON.stringify(b.storedModels) : null,
-       b.agentVersion ?? null, b.agentFingerprint ?? null ],
+       b.agentVersion ?? null, b.agentFingerprint ?? null,
+       b.syncFaults === undefined ? null : JSON.stringify(b.syncFaults) ],
     )
     // Presence history feeds the capacity graph, which cannot be drawn from
     // current state alone.

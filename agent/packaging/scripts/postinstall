@@ -1,0 +1,50 @@
+#!/bin/bash
+#
+# What the .pkg does after laying its files down.
+#
+# Without this the package was a file drop: it put a binary in
+# /usr/local/libexec/dai and an app in /Applications and stopped, leaving no
+# service account, no rendered launchd plists and no running daemon. Its own
+# header called it the fleet-distribution path, and it installed nothing.
+#
+# The work itself is install.sh's, called rather than copied. Two installers
+# that do the same thing drift, and the one nobody runs by hand is the one that
+# rots - so the unattended path and the person-at-the-machine path are the same
+# script with the same arguments.
+#
+# Exit status matters more here than usual. A non-zero exit fails the package
+# in Installer and in every MDM, which is right when the machine cannot become
+# a fleet member and wrong when it simply has not been told which fleet yet.
+set -euo pipefail
+
+BINARY_DIR=/usr/local/libexec/dai
+CONFIG_DIR="/Library/Application Support/dAI"
+CONFIG="$CONFIG_DIR/config.json"
+LOG=/var/log/dai-install.log
+
+# Installer discards stdout, so the record of what happened has to be written
+# somewhere a person can find it after the fact.
+exec > >(tee -a "$LOG") 2>&1
+echo "=== dai postinstall $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+
+if [[ ! -f "$CONFIG" ]]; then
+  # Installed, and deliberately not started.
+  #
+  # A daemon started with no control plane sits in a reconnect loop that reads
+  # as a network fault on every machine at once. Leaving it unloaded means the
+  # package succeeds, the files are in place, and the fleet is joined the
+  # moment the configuration arrives - which for MDM may be a separate payload
+  # landing seconds later.
+  echo "no configuration at $CONFIG"
+  echo "the agent is installed and not running. To join a fleet, write that"
+  echo "file (url, joinToken, caPath) and run:"
+  echo "  sudo $BINARY_DIR/install.sh --config \"$CONFIG\""
+  mkdir -p "$CONFIG_DIR"
+  exit 0
+fi
+
+echo "configuring from $CONFIG"
+# --build points at the files this package just laid down, because install.sh
+# otherwise looks for a build directory that exists only on the machine that
+# compiled it.
+"$BINARY_DIR/install.sh" --config "$CONFIG" --build "$BINARY_DIR"

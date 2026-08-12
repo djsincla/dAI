@@ -29,7 +29,7 @@
 #
 set -euo pipefail
 
-VERSION=""; APP_ID=""; INSTALLER_ID=""; NOTARY_PROFILE=""; SKIP_NOTARY=0
+VERSION=""; APP_ID=""; INSTALLER_ID=""; NOTARY_PROFILE=""; SKIP_NOTARY=0; UNSIGNED=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version)        VERSION="$2"; shift 2 ;;
@@ -37,12 +37,17 @@ while [[ $# -gt 0 ]]; do
     --installer-id)   INSTALLER_ID="$2"; shift 2 ;;
     --notary-profile) NOTARY_PROFILE="$2"; shift 2 ;;
     --skip-notary)    SKIP_NOTARY=1; shift ;;
+    # For checking the installer works, on a machine with no Developer ID.
+    # Produces something Gatekeeper will refuse, which is why the name says so.
+    --unsigned)       UNSIGNED=1; shift ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
 
 [[ -n "$VERSION" ]] || { echo "missing --version" >&2; exit 2; }
-[[ -n "$APP_ID" ]] || { echo "missing --app-id" >&2; exit 2; }
+if [[ $UNSIGNED -eq 0 ]]; then
+  [[ -n "$APP_ID" ]] || { echo "missing --app-id (or --unsigned to test locally)" >&2; exit 2; }
+fi
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$HERE/.."
@@ -50,7 +55,7 @@ STAGING="$HERE/.staging"
 OUT="$HERE/dist"
 
 # Check the identities exist before spending two minutes on a release build.
-if ! security find-identity -v -p codesigning | grep -qF "$APP_ID"; then
+if [[ $UNSIGNED -eq 0 ]] && ! security find-identity -v -p codesigning | grep -qF "$APP_ID"; then
   echo "no such signing identity: $APP_ID" >&2
   echo "available:" >&2
   security find-identity -v -p codesigning >&2
@@ -81,6 +86,12 @@ done
 cp "$HERE/com.dai.agent.plist.in" "$HERE/com.dai.menubar.plist.in" \
    "$HERE/install.sh" "$HERE/uninstall.sh" "$STAGING/usr/local/libexec/dai/"
 
+# The package carries its own version, so install.sh can stamp it into the
+# daemon's environment without being told. A build that cannot name itself
+# reports as "dev" on every machine and the fleet view stops being able to
+# answer what is deployed.
+echo "$VERSION" > "$STAGING/usr/local/libexec/dai/VERSION"
+
 # The menu bar app ships in the same package. Shipping the daemon without it
 # would put work on someone's machine with no way for them to see or stop it,
 # which is the one thing this design cannot afford to get wrong.
@@ -92,22 +103,35 @@ echo "==> signing binary"
 # The hardened runtime is required for notarisation. No entitlements: the
 # Secure Enclave key is reached through CryptoKit, which needs none, and that
 # was the point of choosing it over the keychain.
+if [[ $UNSIGNED -eq 1 ]]; then
+  echo "==> NOT signing: this package is for testing the installer and nothing else"
+else
 codesign --force --timestamp --options runtime \
          --sign "$APP_ID" "$STAGING/usr/local/libexec/dai/dai-agent"
 codesign --verify --strict --verbose=2 "$STAGING/usr/local/libexec/dai/dai-agent"
 codesign --force --timestamp --options runtime --sign "$APP_ID" "$STAGING/Applications/dAI.app"
 codesign --verify --strict --verbose=2 "$STAGING/Applications/dAI.app"
+fi
 
 echo "==> building package"
 mkdir -p "$OUT"
 PKG="$OUT/dai-agent-$VERSION.pkg"
+# An unsigned package is named so it cannot be mistaken for one that ships.
+if [[ $UNSIGNED -eq 1 ]]; then PKG="$OUT/dai-agent-$VERSION-unsigned.pkg"; SKIP_NOTARY=1; fi
+# --scripts is what makes this an installation rather than a file drop. Without
+# it the package laid the binary and the app down and stopped: no service
+# account, no rendered plists, nothing running. The postinstall calls install.sh,
+# so an MDM push and a person at the machine take the same path.
 pkgbuild --root "$STAGING" \
          --identifier com.dai.agent \
          --version "$VERSION" \
          --install-location / \
+         --scripts "$HERE/scripts" \
          "$OUT/dai-agent-unsigned.pkg"
 
-if [[ -n "$INSTALLER_ID" ]]; then
+if [[ $UNSIGNED -eq 1 ]]; then
+  mv "$OUT/dai-agent-unsigned.pkg" "$PKG"
+elif [[ -n "$INSTALLER_ID" ]]; then
   productsign --sign "$INSTALLER_ID" "$OUT/dai-agent-unsigned.pkg" "$PKG"
   rm -f "$OUT/dai-agent-unsigned.pkg"
 else

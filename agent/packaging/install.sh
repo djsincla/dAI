@@ -16,6 +16,13 @@
 #                     --ca server-ca.crt \
 #                     --model mlx-community/Llama-3.2-3B-Instruct-4bit
 #
+# Or, for an install nobody is standing at, the same settings from a file:
+#
+#   sudo ./install.sh --config "/Library/Application Support/dAI/config.json"
+#
+# which is how the .pkg installs itself. One package serves every site; the file
+# is what differs, and MDM delivers it.
+#
 set -euo pipefail
 
 BINARY_DIR=/usr/local/libexec/dai
@@ -28,7 +35,7 @@ MENUBAR_APP=/Applications/dAI.app
 MENUBAR_PLIST=/Library/LaunchAgents/com.dai.menubar.plist
 LABEL=com.dai.agent
 
-URL=""; TOKEN=""; CA=""; MODEL=""; ANE="-"; WAIT=600; SVC_USER="_dai"; PROMOTE=300; GPU_MODEL_CACHE=""
+URL=""; TOKEN=""; CA=""; MODEL=""; ANE="-"; CONFIG=""; WAIT=600; SVC_USER="_dai"; PROMOTE=300; GPU_MODEL_CACHE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --url)   URL="$2"; shift 2 ;;
@@ -44,9 +51,44 @@ while [[ $# -gt 0 ]]; do
     --promote) PROMOTE="$2"; shift 2 ;;
     --gpu-model-cache) GPU_MODEL_CACHE="$2"; shift 2 ;;
     --build) BUILD_OVERRIDE="$2"; shift 2 ;;
+    # Where an unattended install gets its site settings. Everything in the file
+    # can also be given as a flag, and a flag wins - somebody standing at the
+    # machine is correcting the file, not being overruled by it.
+    --config) CONFIG="$2"; shift 2 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
+
+# Site settings from a file, for the installs nobody is present at.
+#
+# Read with plutil, which is part of macOS and reads JSON. jq is not installed
+# on a stock Mac and python3 is only there if somebody installed the developer
+# tools, so either would turn "push this package" into "first, on every
+# machine...".
+if [[ -n "$CONFIG" ]]; then
+  [[ -f "$CONFIG" ]] || { echo "no configuration at $CONFIG" >&2; exit 1; }
+  cfg() { plutil -extract "$1" raw -o - "$CONFIG" 2>/dev/null || true; }
+
+  URL="${URL:-$(cfg url)}"
+  TOKEN="${TOKEN:-$(cfg joinToken)}"
+  # Defaults to a certificate beside the configuration, which is how MDM will
+  # deliver the pair: two files into one directory.
+  CA="${CA:-$(cfg caPath)}"
+  [[ -n "$CA" ]] || CA="$(dirname "$CONFIG")/server-ca.crt"
+  MODEL="${MODEL:-$(cfg model)}"
+
+  # Written as `if` rather than `[[ ... ]] && ...`, which is a trap this file has
+  # already fallen into once. Under `set -e` a failed AND-list as a whole
+  # statement ends the script - so an optional setting that happened to be
+  # absent would exit the installer silently, with no message and a success-
+  # looking early return.
+  CFG_ANE="$(cfg aneModel)"
+  if [[ -n "$CFG_ANE" && "$ANE" == "-" ]]; then ANE="$CFG_ANE"; fi
+  CFG_PROMOTE="$(cfg promoteSeconds)"
+  if [[ -n "$CFG_PROMOTE" ]]; then PROMOTE="$CFG_PROMOTE"; fi
+  CFG_CACHE="$(cfg gpuModelCache)"
+  if [[ -n "$CFG_CACHE" ]]; then GPU_MODEL_CACHE="$CFG_CACHE"; fi
+fi
 
 [[ $EUID -eq 0 ]] || { echo "must run as root: sudo $0 ..." >&2; exit 1; }
 # Written the long way because macOS ships bash 3.2, where ${var,,} and
@@ -57,6 +99,13 @@ done
 [[ -f "$CA" ]] || { echo "server CA not found: $CA" >&2; exit 1; }
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+
+# What this build is called. Written beside the binary by build-pkg.sh, so the
+# package carries its own version rather than the installer being told one -
+# an operator running this by hand should not have to know, and an MDM cannot
+# be asked.
+VERSION="dev"
+if [[ -f "$HERE/VERSION" ]]; then VERSION="$(tr -d '[:space:]' < "$HERE/VERSION")"; fi
 # --build points at binaries built elsewhere, which is the normal case for
 # every machine except the one that compiled them. Without it this script only
 # worked on the build host, which is not what installing means.
@@ -191,6 +240,7 @@ sed -e "s|@BINARY@|$BINARY_DIR/dai-agent|g" \
     -e "s|@USER@|$SVC_USER|g" \
     -e "s|@MODEL_DIR@|$STATE_DIR|g" \
     -e "s|@PROMOTE@|$PROMOTE|g" \
+    -e "s|@VERSION@|$VERSION|g" \
     "$HERE/com.dai.agent.plist.in" > "$PLIST"
 chown root:wheel "$PLIST"
 chmod 644 "$PLIST"

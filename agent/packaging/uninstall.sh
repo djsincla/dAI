@@ -22,6 +22,7 @@ UPDATER_LABEL=com.dai.updater
 PENDING=/var/db/dai/pending-upgrade.json
 ROLLBACK=/var/db/dai/dai-agent.rollback
 
+CONFIG_DIR="/Library/Application Support/dAI"
 PURGE=0
 SVC_USER="_dai"
 [[ "${1:-}" == "--purge" ]] && PURGE=1
@@ -83,6 +84,12 @@ pkill -f 'dAI.app/Contents/MacOS/dai-menubar' 2>/dev/null || true
 if [[ $PURGE -eq 1 ]]; then
   echo "==> removing identity (this node will need re-enrolling and re-approving)"
   rm -rf "$STATE_DIR" "$LOG_DIR"
+  # The site configuration goes too. It carries a join token, which is a
+  # credential for joining this fleet: leaving it on a machine that has been
+  # given back is leaving a way in on somebody else's laptop. Kept without
+  # --purge, on the same reasoning as the identity - an uninstall that is really
+  # a reinstall should not need MDM to deliver it again.
+  rm -rf "$CONFIG_DIR"
   # The installer creates this account, so uninstalling should take it away
   # again. Leaving service accounts behind after the thing they served is gone
   # is how machines accumulate users nobody can account for.

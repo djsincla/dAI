@@ -1,0 +1,10 @@
+{
+  "//": "The shipped build. tsconfig.json covers src and test so a typecheck sees both, which makes the package root their common ancestor and emits dist/src/... - and every runtime asset path is relative to the compiled file, so openapi/, ui/ and db/ then resolve one directory too deep. Building from src alone keeps the compiled layout identical to the source layout, which is what lets the bundle ship those directories beside dist/ with no code changes.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src/**/*"],
+  "exclude": ["test/**/*"]
+}

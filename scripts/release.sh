@@ -26,15 +26,60 @@ for arg in "$@"; do [[ "$arg" == "--unsigned" ]] && UNSIGNED=1; done
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$ROOT/dist/$VERSION"
 
+LOGS="$(mktemp -d)"
+
+# Run a suite with its output kept and a clock on it.
+#
+# Both of those are here because of the same afternoon. The output used to go to
+# /dev/null, so when a suite wedged there was nothing to look at - and it did
+# wedge, for one hour and fifty-four minutes, on a Foundation deadlock that a
+# stack sample found in a minute and a silent build could never have shown. A
+# test run that stops making progress is a failure, not a slow pass, and a
+# release script has to be able to tell the difference.
+#
+# TIMEOUT is generous: the agent suite takes 45 seconds and the control plane's
+# about 90. Anything past ten minutes is not slow, it is stuck.
+TIMEOUT="${DAI_TEST_TIMEOUT:-600}"
+run_suite() {
+  local name="$1" dir="$2"; shift 2
+  local log="$LOGS/$name.log"
+  ( cd "$dir" && "$@" >"$log" 2>&1 ) &
+  local pid=$! waited=0
+  while kill -0 "$pid" 2>/dev/null && [[ $waited -lt $TIMEOUT ]]; do
+    sleep 5; waited=$((waited + 5))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "$name tests stopped making progress after ${waited}s; not building a release" >&2
+    echo "  log: $log" >&2
+    echo "  last lines:" >&2
+    tail -15 "$log" >&2
+    # A sample, while the process is still there to sample. This is the artifact
+    # that identifies a hang, and it is gone the moment the process is killed.
+    local host
+    host="$(pgrep -f 'swiftpm-testing-helper|vitest' | head -1 || true)"
+    if [[ -n "$host" ]]; then
+      sample "$host" 5 -mayDie -f "$LOGS/$name-hang.sample" >/dev/null 2>&1 || true
+      echo "  stack sample: $LOGS/$name-hang.sample" >&2
+    fi
+    kill "$pid" 2>/dev/null || true
+    pkill -f swiftpm-testing-helper 2>/dev/null || true
+    exit 1
+  fi
+  wait "$pid" || {
+    echo "$name tests failed; not building a release" >&2
+    tail -30 "$log" >&2
+    exit 1
+  }
+}
+
 echo "==> tests"
 # Both suites, because a release is both halves. The control plane's suite drops
 # and recreates a schema, so it is pointed at its own database rather than
 # whatever DATABASE_URL happens to be - the same reason the test helper refuses
 # to take it from there.
-(cd "$ROOT/control-plane" && TEST_DATABASE_URL="${TEST_DATABASE_URL:-postgres://dai:dai@localhost:5433/dai_test}" npm test >/dev/null) \
-  || { echo "control plane tests failed; not building a release" >&2; exit 1; }
-(cd "$ROOT/agent" && swift test >/dev/null 2>&1) \
-  || { echo "agent tests failed; not building a release" >&2; exit 1; }
+run_suite "control plane" "$ROOT/control-plane" \
+  env TEST_DATABASE_URL="${TEST_DATABASE_URL:-postgres://dai:dai@localhost:5433/dai_test}" npm test
+run_suite "agent" "$ROOT/agent" swift test
 echo "    both suites green"
 
 echo "==> agent package"

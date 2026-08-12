@@ -92,7 +92,19 @@ public actor Worker {
     /// One transfer at a time. Without this the loop would launch another every
     /// pass while the first was still running, and a slow link would end up
     /// fetching the same model a dozen times over.
-    private var modelSyncRunning = false
+    /// When the running reconciliation pass began, or nil if none is running.
+    ///
+    /// A timestamp rather than a boolean, because a boolean is what broke. The
+    /// flag was set before a detached transfer and cleared when it finished, and
+    /// nothing in that path has a timeout: one transfer that hung left the flag
+    /// set for good, so the node never attempted another pass and never said
+    /// why. On this fleet a machine sat like that for twelve hours, heartbeating
+    /// normally, silently not fetching a model it had been assigned.
+    private var modelSyncStartedAt: Date?
+    /// How long a pass may run before another is allowed to start. Generous:
+    /// this bounds a stuck pass, and a legitimate one can be tens of gigabytes
+    /// over a LAN.
+    private let modelSyncStuckAfter: TimeInterval = 3600
     /// Reported on the next beat; nil until a pass has finished.
     private var pendingSyncFaults: [String: String]?
 
@@ -188,8 +200,30 @@ public actor Worker {
     /// judgement this loop has already made rather than reading the machine a
     /// second time. Two answers to "is somebody there" is how a machine ends up
     /// polite in one place and rude in another.
+    /// Whether a pass that started at `startedAt` has been running long enough
+    /// to be considered wedged.
+    ///
+    /// Pulled out as a function with no clock of its own so the decision can be
+    /// tested, which the boolean it replaced could not be. nil means no pass is
+    /// running, and the answer is that nothing is stuck.
+    static func passIsStuck(startedAt: Date?, now: Date, after: TimeInterval) -> Bool {
+        guard let startedAt else { return false }
+        return now.timeIntervalSince(startedAt) >= after
+    }
+
     private func syncModelsIfDue(_ reading: PresenceMonitor.Reading) async {
-        guard let modelSync, !modelSyncRunning else { return }
+        guard let modelSync else { return }
+        if let started = modelSyncStartedAt {
+            let running = Date().timeIntervalSince(started)
+            guard Self.passIsStuck(startedAt: started, now: Date(),
+                                   after: modelSyncStuckAfter) else { return }
+            // Said out loud rather than waited on forever. A pass this old is
+            // wedged on something with no timeout of its own, and the choice is
+            // between never syncing again and starting another; the transfers
+            // are idempotent and hash-checked, so another is safe.
+            log("model sync has been running \(Int(running))s; starting another")
+            pendingSyncFaults = ["*": "a previous pass has been running for \(Int(running))s"]
+        }
         let paused = pauseSwitch.read().paused
         let free = !paused && (isCluster || reading.policy.gpu)
 
@@ -198,7 +232,7 @@ public actor Worker {
         // the scheduler drops the node for being silent and routes around the
         // machine that is busy doing what it was told. That is the same failure
         // this codebase already fixed once for serving, arriving by a new road.
-        modelSyncRunning = true
+        modelSyncStartedAt = Date()
         Task.detached { [weak self] in
             let outcome = await modelSync.syncIfDue(mayTransfer: free)
             await self?.finishModelSync(outcome)
@@ -206,7 +240,7 @@ public actor Worker {
     }
 
     private func finishModelSync(_ outcome: ModelSync.Outcome?) {
-        modelSyncRunning = false
+        modelSyncStartedAt = nil
         guard let outcome else { return }
         for id in outcome.fetched { log("fetched model \(id)") }
         for (id, why) in outcome.failed { log("model \(id) failed: \(why)") }

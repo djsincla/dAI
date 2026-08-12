@@ -47,6 +47,9 @@ control-plane/packaging/dist/
 # The bundled runtime, fetched from nodejs.org and checksum-verified at build
 # time. Cached so a rebuild is not a download; never committed.
 control-plane/packaging/.node-cache/
+# Release output: two packages, their checksums and a note. Built from a tag,
+# never committed - the packages are large and reproducible from the tag.
+/dist/
 
 # xcodebuild derived data (the GPU-capable build lives here)
 agent/.xcbuild/

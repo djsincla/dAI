@@ -33,6 +33,7 @@ describe('the generated launchd plist', () => {
     .replace(/@USER@/g, '_dai')
     .replace(/@MODEL_DIR@/g, '/var/db/dai')
     .replace(/@PROMOTE@/g, '300')
+    .replace(/@VERSION@/g, '1.2.3')
 
   it('leaves no placeholder unsubstituted', () => {
     // An unreplaced @NAME@ is a literal string in a live configuration, which
@@ -233,6 +234,7 @@ exit 0
     const rewritten = readFileSync(script, 'utf8')
       .replace(/^(BINARY_DIR|IDENTITY_DIR|STATE_DIR|LOG_DIR|PLIST|UPDATER_PLIST|PENDING|ROLLBACK)=/gm,
                `$1=${root}`)
+      .replace(/^CONFIG_DIR=.*$/m, `CONFIG_DIR="${root}/Library/Application Support/dAI"`)
       .replace(/\/Library\/LaunchAgents/g, `${root}/Library/LaunchAgents`)
       .replace(/\/Applications\/dAI\.app/g, `${root}/Applications/dAI.app`)
       .replace(/^\[\[ \$EUID -eq 0 \]\].*$/m, 'true')
@@ -326,5 +328,111 @@ exit 0
       expect(u.survives('Applications/dAI.app')).toBe(false)
       u.cleanup()
     }
+  })
+})
+
+/**
+ * Installing without anybody standing at the machine.
+ *
+ * The .pkg used to lay files down and stop - no service account, no rendered
+ * plists, nothing running - because pkgbuild was called without --scripts. Its
+ * own header called it the fleet-distribution path.
+ *
+ * The fix is that the package's postinstall calls install.sh, which now takes
+ * its site settings from a file MDM delivers rather than from arguments nobody
+ * is there to type. These check the reading of that file, black-box: run the
+ * real script and see how far it gets, since the message it stops on names what
+ * it managed to read.
+ */
+describe('install.sh --config', () => {
+  const script = join(process.cwd(), '..', 'agent', 'packaging', 'install.sh')
+
+  /** Runs the installer far enough to prove what it read, and no further. */
+  const run = (config: Record<string, unknown>, opts: { withCa?: boolean } = {}) => {
+    const root = mkdtempSync(join(tmpdir(), 'dai-config-'))
+    const path = join(root, 'config.json')
+    writeFileSync(path, JSON.stringify(config, null, 2))
+    if (opts.withCa !== false) writeFileSync(join(root, 'server-ca.crt'), 'CA')
+
+    // Root is the only thing stubbed. Everything else is the real script, so
+    // what is under test is the script rather than a copy of it.
+    const rewritten = readFileSync(script, 'utf8')
+      .replace(/^\[\[ \$EUID -eq 0 \]\].*$/m, 'true')
+    const runner = join(root, 'install.sh')
+    writeFileSync(runner, rewritten)
+    chmodSync(runner, 0o755)
+
+    // spawnSync rather than a throwing variant. A catch around the runner
+    // swallowed a ReferenceError in this very helper and reported it as "the
+    // script printed nothing", which sent me looking at the script. Returning
+    // status and output plainly leaves nothing to hide behind.
+    const r = spawnSync('/bin/bash', [runner, '--config', path], { encoding: 'utf8' })
+    return { status: r.status, output: `${r.stdout ?? ''}${r.stderr ?? ''}` }
+  }
+
+  it('reads the url, token and certificate from the file', () => {
+    // Getting as far as the build check means all three passed validation,
+    // which is the whole of what the file has to supply.
+    const r = run({ url: 'https://cp.example:8452', joinToken: 'jt-abc' })
+    expect(r.output).toContain('no build found')
+    expect(r.output).not.toContain('missing --url')
+    expect(r.output).not.toContain('missing --token')
+  })
+
+  it('finds the certificate beside the config when none is named', () => {
+    // How MDM will deliver the pair: two files into one directory. Requiring
+    // an absolute path in the file would make the payload machine-specific.
+    const r = run({ url: 'https://cp.example:8452', joinToken: 'jt-abc' })
+    expect(r.output).toContain('no build found')
+  })
+
+  it('says which setting is missing rather than failing vaguely', () => {
+    expect(run({ url: 'https://cp.example:8452' }).output).toContain('missing --token')
+    expect(run({ joinToken: 'jt-abc' }).output).toContain('missing --url')
+  })
+
+  it('refuses a certificate that is not there', () => {
+    // Rather than enrolling against a control plane it cannot verify.
+    const r = run({ url: 'https://cp.example:8452', joinToken: 'jt' }, { withCa: false })
+    expect(r.output).toContain('server CA not found')
+  })
+
+  it('refuses a configuration file that does not exist', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dai-config-'))
+    const rewritten = readFileSync(script, 'utf8')
+      .replace(/^\[\[ \$EUID -eq 0 \]\].*$/m, 'true')
+    const runner = join(root, 'install.sh')
+    writeFileSync(runner, rewritten)
+    chmodSync(runner, 0o755)
+    const r = spawnSync('/bin/bash', [runner, '--config', join(root, 'absent.json')],
+      { encoding: 'utf8' })
+    expect(r.status).not.toBe(0)
+    expect(`${r.stdout ?? ''}${r.stderr ?? ''}`).toContain('no configuration at')
+  })
+})
+
+describe('the package postinstall', () => {
+  const script = join(process.cwd(), '..', 'agent', 'packaging', 'scripts', 'postinstall')
+
+  it('succeeds and starts nothing when no fleet has been named', () => {
+    // A daemon started with no control plane sits in a reconnect loop that
+    // reads as a network fault on every machine at once. Failing the package
+    // would be worse: the files are fine, and MDM may deliver the config as a
+    // separate payload seconds later.
+    const root = mkdtempSync(join(tmpdir(), 'dai-postinstall-'))
+    const rewritten = readFileSync(script, 'utf8')
+      .replace(/^BINARY_DIR=.*$/m, `BINARY_DIR=${root}/usr/local/libexec/dai`)
+      .replace(/^CONFIG_DIR=.*$/m, `CONFIG_DIR="${root}/Library/Application Support/dAI"`)
+      .replace(/^LOG=.*$/m, `LOG=${root}/install.log`)
+    const runner = join(root, 'postinstall')
+    writeFileSync(runner, rewritten)
+    chmodSync(runner, 0o755)
+
+    const r = spawnSync('/bin/bash', [runner], { encoding: 'utf8' })
+    expect(r.status).toBe(0)
+    const out = `${r.stdout ?? ''}${r.stderr ?? ''}`
+    expect(out).toContain('installed and not running')
+    // And it says exactly what to do about it, with the command to run.
+    expect(out).toContain('install.sh --config')
   })
 })

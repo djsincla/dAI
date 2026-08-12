@@ -75,6 +75,15 @@
       daemon cannot be pointed at an identity by environment alone without
       this.
     -->
+    <!--
+      What this build is called, read at start by AgentVersion. A release has
+      to be able to say what it deployed, and a binary that cannot name itself
+      leaves an operator comparing file sizes over ssh - which is how two
+      machines once spent a day on a build everybody believed had been
+      replaced.
+    -->
+    <key>DAI_AGENT_VERSION</key>
+    <string>@VERSION@</string>
     <key>DAI_IDENTITY_DIR</key>
     <string>@IDENTITY_DIR@</string>
     <!--

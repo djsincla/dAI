@@ -7,26 +7,35 @@
 --   nodes.capability_profiles as a map rather than a scalar, because the same
 --   two machines differed 7.5% on a 1.5B model and 26.3% on a 7B.
 
+-- Every statement in this file must be safe to run against a database that
+-- already has it. This is the only path a deployment has to an upgrade: the
+-- installer applies the whole file, so anything that errors on a second run
+-- leaves a half-migrated database and an installer that reports failure.
+--
+-- That means IF NOT EXISTS on tables, columns and indexes, and a DO block
+-- asking pg_catalog for anything with no such form - constraints, and any
+-- change that drops or rewrites. The plural-tiers migration near the end is
+-- the worked example of the harder case.
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
     id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     email       text NOT NULL UNIQUE,
     created_at  timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE groups (
+CREATE TABLE IF NOT EXISTS groups (
     id    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     name  text NOT NULL UNIQUE
 );
 
-CREATE TABLE group_members (
+CREATE TABLE IF NOT EXISTS group_members (
     group_id uuid NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
     user_id  uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     PRIMARY KEY (group_id, user_id)
 );
 
-CREATE TABLE pools (
+CREATE TABLE IF NOT EXISTS pools (
     id        uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     name      text NOT NULL UNIQUE,
     tier      text NOT NULL CHECK (tier IN ('harvest', 'cluster')),
@@ -39,14 +48,14 @@ CREATE TABLE pools (
 
 -- Pool-scoped role bindings. A group's role differs per pool, so membership is
 -- not global.
-CREATE TABLE role_bindings (
+CREATE TABLE IF NOT EXISTS role_bindings (
     group_id uuid NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
     pool_id  uuid NOT NULL REFERENCES pools(id)  ON DELETE CASCADE,
     role     text NOT NULL CHECK (role IN ('viewer', 'operator', 'admin')),
     PRIMARY KEY (group_id, pool_id)
 );
 
-CREATE TABLE nodes (
+CREATE TABLE IF NOT EXISTS nodes (
     id                    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     hostname              text NOT NULL,
     chip                  text,
@@ -139,9 +148,9 @@ CREATE TABLE nodes (
     created_at            timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX nodes_state_idx ON nodes(state);
+CREATE INDEX IF NOT EXISTS nodes_state_idx ON nodes(state);
 
-CREATE TABLE jobs (
+CREATE TABLE IF NOT EXISTS jobs (
     id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     pool_id     uuid NOT NULL REFERENCES pools(id) ON DELETE CASCADE,
     kind        text NOT NULL CHECK (kind IN ('embed','generate','render')),
@@ -165,7 +174,7 @@ CREATE TABLE jobs (
     created_at  timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE work_units (
+CREATE TABLE IF NOT EXISTS work_units (
     id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     job_id            uuid NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
     kind              text NOT NULL CHECK (kind IN ('embed','generate','render')),
@@ -191,16 +200,16 @@ CREATE TABLE work_units (
 );
 
 -- The dispatch query: pending units of a servable kind, in position order.
-CREATE INDEX work_units_dispatch_idx
+CREATE INDEX IF NOT EXISTS work_units_dispatch_idx
     ON work_units (kind, state, position)
     WHERE state = 'pending';
 
 -- The reaper query: leases past their expiry.
-CREATE INDEX work_units_lease_idx
+CREATE INDEX IF NOT EXISTS work_units_lease_idx
     ON work_units (lease_expires_at)
     WHERE state = 'leased';
 
-CREATE TABLE join_tokens (
+CREATE TABLE IF NOT EXISTS join_tokens (
     token       text PRIMARY KEY,
     pool_id     uuid REFERENCES pools(id) ON DELETE SET NULL,
     expires_at  timestamptz,
@@ -209,7 +218,7 @@ CREATE TABLE join_tokens (
 
 -- Owner-readable regardless of role bindings: without it every unrelated
 -- slowdown gets blamed on the agent and there is no way to disprove it.
-CREATE TABLE activity_log (
+CREATE TABLE IF NOT EXISTS activity_log (
     id          bigserial PRIMARY KEY,
     node_id     uuid NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
     at          timestamptz NOT NULL DEFAULT now(),
@@ -217,7 +226,7 @@ CREATE TABLE activity_log (
     detail      jsonb NOT NULL DEFAULT '{}'::jsonb
 );
 
-CREATE INDEX activity_log_node_idx ON activity_log(node_id, at DESC);
+CREATE INDEX IF NOT EXISTS activity_log_node_idx ON activity_log(node_id, at DESC);
 
 -- Presence history, written on heartbeat.
 --
@@ -229,7 +238,7 @@ CREATE INDEX activity_log_node_idx ON activity_log(node_id, at DESC);
 -- Also answers the two questions a wrangler actually has about a node: can I
 -- count on it tonight (the idle pattern), and how often does it interrupt
 -- (yields per week, which is the early warning that a policy is too aggressive).
-CREATE TABLE presence_samples (
+CREATE TABLE IF NOT EXISTS presence_samples (
     node_id        uuid NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
     at             timestamptz NOT NULL DEFAULT now(),
     presence_state text NOT NULL,
@@ -237,7 +246,7 @@ CREATE TABLE presence_samples (
     PRIMARY KEY (node_id, at)
 );
 
-CREATE INDEX presence_samples_at_idx ON presence_samples(at DESC);
+CREATE INDEX IF NOT EXISTS presence_samples_at_idx ON presence_samples(at DESC);
 
 -- The model catalogue: what weights exist, and what they are.
 --
@@ -392,8 +401,17 @@ CREATE TABLE IF NOT EXISTS agent_builds (
 -- either owning it alone.
 ALTER TABLE pools ADD COLUMN IF NOT EXISTS agent_channel text NOT NULL DEFAULT 'external';
 ALTER TABLE pools ADD COLUMN IF NOT EXISTS desired_agent_version text;
-ALTER TABLE pools ADD CONSTRAINT pools_agent_channel_check
-    CHECK (agent_channel IN ('managed', 'external'));
+-- Postgres has no IF NOT EXISTS for a constraint, so this is asked rather than
+-- assumed. Re-applying the schema has to be a no-op: it is how an upgrade
+-- reaches a database that already has data in it.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'pools_agent_channel_check')
+  THEN
+    ALTER TABLE pools ADD CONSTRAINT pools_agent_channel_check
+      CHECK (agent_channel IN ('managed', 'external'));
+  END IF;
+END $$;
 
 -- Upgrades attempted, and how they ended.
 --

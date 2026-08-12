@@ -111,3 +111,4 @@ describe('a backup of a fleet', () => {
     expect(existsSync(join(process.cwd(), 'certs', superseded[0]!, 'ca.key'))).toBe(true)
   })
 })
+

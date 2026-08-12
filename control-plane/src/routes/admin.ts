@@ -4,6 +4,7 @@ import {
 } from '../lib/attachments.js'
 import { resolve as resolveOpenJD, frameOf, type JobTemplate } from '../lib/openjd.js'
 import { repositoryRoot, safePath, verifyModel } from '../lib/repository.js'
+import { COMPLETE_ENOUGH, holdsModel } from '../lib/possession.js'
 import { existsSync } from 'node:fs'
 import { Router } from 'express'
 import { type Db, tx } from '../lib/db.js'
@@ -768,13 +769,21 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
               count(DISTINCT f.path)::int AS file_count,
               coalesce(array_agg(DISTINCT pm.pool_id)
                        FILTER (WHERE pm.pool_id IS NOT NULL), '{}') AS assigned_pools,
+              -- Having the model, not having started to fetch it. The node
+              -- reports gibibytes and the catalogue records bytes; a partial
+              -- transfer reports the key from its first block, and counting
+              -- that made the fleet claim distribution was complete at six
+              -- percent.
               (SELECT count(*)::int FROM nodes n
-                WHERE n.state = 'active' AND n.stored_models ? m.id) AS nodes_holding
+                WHERE n.state = 'active'
+                  AND (n.stored_models ->> m.id)::numeric * 1073741824
+                      >= m.size_bytes::numeric * $1) AS nodes_holding
          FROM models m
          LEFT JOIN model_files f ON f.model_id = m.id
          LEFT JOIN pool_models pm ON pm.model_id = m.id
         GROUP BY m.id
         ORDER BY m.id`,
+      [COMPLETE_ENOUGH],
     )
     res.json(await Promise.all(rows.map((m) => modelRow(db, m))))
   })
@@ -962,7 +971,7 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
       files: files.map((f) => ({
         path: f.path, sizeBytes: Number(f.size_bytes), sha256: f.sha256,
       })),
-      placement: await placementOf(db, id),
+      placement: await placementOf(db, id, rows[0].size_bytes),
       // Who told the fleet to hold this, and when. The assignment row alone
       // could not answer that: it is mutable, so unassigning erased the record
       // of ever having assigned it.
@@ -1404,7 +1413,7 @@ async function jobSummary(db: Db, jobId: string) {
  * nobody assigned is as interesting as one missing a model it should have, and
  * showing only the second makes hand-staged weights invisible.
  */
-async function placementOf(db: Db, modelId: string) {
+async function placementOf(db: Db, modelId: string, sizeBytes?: unknown) {
   const { rows: pools } = await db.query(
     `SELECT p.id, p.tier, p.membership FROM pools p
        JOIN pool_models pm ON pm.pool_id = p.id WHERE pm.model_id = $1`, [modelId])
@@ -1418,7 +1427,9 @@ async function placementOf(db: Db, modelId: string) {
     // On disk, not in memory. `resident_models` empties whenever a model is
     // released, so using it here reported a machine holding 18GB of weights as
     // holding nothing and would have had an operator redistribute them.
-    held: Object.prototype.hasOwnProperty.call(n.stored_models ?? {}, modelId),
+    // Complete, not merely begun. See holdsModel: the key appears as soon as a
+    // transfer writes its first block.
+    held: holdsModel((n.stored_models ?? {})[modelId], sizeBytes),
     loaded: Object.prototype.hasOwnProperty.call(n.resident_models ?? {}, modelId),
   }))
 }
@@ -1426,7 +1437,9 @@ async function placementOf(db: Db, modelId: string) {
 /** One catalogue row, with the two counts that matter computed the same way. */
 async function modelRow(db: Db, m: Record<string, unknown>) {
   const pools = (m.assigned_pools as string[]) ?? []
-  const placement = pools.length > 0 ? await placementOf(db, m.id as string) : []
+  const placement = pools.length > 0
+    ? await placementOf(db, m.id as string, m.size_bytes)
+    : []
   return {
     id: m.id as string,
     runtime: m.runtime as string,

@@ -269,9 +269,56 @@ def who_answered(completion: dict) -> str:
     people's desks, "which desk" is not diagnostic detail - it is the product.
     """
     extra = completion.get("dai") or {}
-    node = extra.get("node", "unknown node")
+    node = extra.get("node")
+    if not node:
+        # Deliberately not "unknown node", which reads like a minor gap. Only
+        # the control plane's router can fill this block in, so its absence
+        # means the answer's origin is unverified - and on a machine that is
+        # both control plane and node, unverified is exactly the case worth
+        # noticing.
+        return "PROVENANCE MISSING (control plane did not say which node answered)"
     presence = extra.get("presenceState")
     return f"{node} ({presence})" if presence else node
+
+
+def provenance(gateway: "Gateway", completion: dict) -> str:
+    """Evidence that this answer came through the gateway, not from here.
+
+    The question this answers is a real one on a single-machine deployment,
+    where the control plane, the node and the caller are the same computer and
+    a local shortcut would look identical to a fleet round trip.
+
+    Three facts, none of which this script can fabricate:
+
+    - the URL it spoke to, and whether that TLS certificate verified against the
+      control plane's own authority;
+    - the node the control plane's router selected, and that machine's presence
+      state, which only the router knows;
+    - the prompt and completion token counts, which are produced by the
+      answering node's tokeniser rather than counted here.
+    """
+    extra = completion.get("dai") or {}
+    usage = completion.get("usage") or {}
+    prompt_tokens = usage.get("prompt_tokens", usage.get("input_tokens"))
+    completion_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
+
+    lines = [
+        f"  gateway    {gateway.base_url}",
+        f"  TLS        {gateway.describe_tls()}",
+        f"  routed to  {who_answered(completion)}",
+    ]
+    if extra.get("seconds") is not None:
+        lines.append(f"  node time  {extra['seconds']}s")
+    if prompt_tokens is not None:
+        lines.append(f"  tokens     {prompt_tokens} in, {completion_tokens} out"
+                     " (counted by the answering node)")
+    if extra.get("cappedByPolicy"):
+        lines.append(f"  capped     to {extra.get('maxTokensApplied')} tokens by that"
+                     " machine's presence policy")
+    if not extra.get("node"):
+        lines.append("  WARNING    this control plane did not return a provenance block;"
+                     " update it to confirm which machine answered")
+    return "\n".join(lines)
 
 
 def pick_model(gateway: Gateway, preferred: str | None = None) -> str:

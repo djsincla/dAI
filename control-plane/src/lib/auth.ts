@@ -75,6 +75,52 @@ function fingerprintOf(req: Request): string | null {
   return null
 }
 
+/**
+ * Which node states may use the agent surface, and why each one may or may not.
+ *
+ * An allowlist rather than a list of rejections, because the rejection list is
+ * the thing that quietly goes stale. This started as a single check for
+ * `pending` and then `superseded` was added to the schema for re-enrolment - a
+ * state nobody thought about here, so a retired identity kept authenticating.
+ * On this fleet that ran for two days: a machine re-enrolled, its old daemon
+ * kept the old certificate, and the control plane accepted every heartbeat
+ * while the console displayed the newer row, which was dead. The fleet said
+ * ABSENT about a machine somebody was sitting at, which is the one thing this
+ * system may not get wrong.
+ *
+ * With a map, adding a state to the schema and not to this table fails closed
+ * and says so, instead of silently granting access.
+ */
+const AGENT_ACCESS: Record<string, { allowed: boolean; detail: string }> = {
+  // Working normally.
+  active: { allowed: true, detail: '' },
+
+  // Administratively paused, and it must keep talking. A paused node still
+  // heartbeats, still reports presence, and is resumed by an admin acting on
+  // the record those heartbeats maintain. Refusing it here would make pausing
+  // a one way door.
+  paused: { allowed: true, detail: '' },
+
+  // Marked offline for missing heartbeats. Coming back is the entire point.
+  offline: { allowed: true, detail: '' },
+
+  // Enrolled, not approved. It has a queue position and nothing else.
+  pending: { allowed: false, detail: 'node not approved' },
+
+  // Cordoned, which is set with revoked_at when an identity is withdrawn. The
+  // revocation check above catches it first; this is here so the two cannot
+  // drift apart.
+  cordoned: { allowed: false, detail: 'node cordoned' },
+
+  // Replaced by a later enrolment of the same hardware. The certificate is
+  // genuine and was really issued, which is exactly why this needs saying: it
+  // verifies, so nothing else would stop it.
+  superseded: {
+    allowed: false,
+    detail: 'this identity is superseded: the machine re-enrolled and this record was replaced; re-enroll',
+  },
+}
+
 /** mTLS: the client certificate identifies the node. */
 export function agentAuth(db: Db) {
   return async (req: Request, res: Response, next: NextFunction) => {
@@ -109,8 +155,15 @@ export function agentAuth(db: Db) {
       res.status(401).json({ error: 'unauthorized', detail: 'certificate expired; re-enroll' })
       return
     }
-    if (node.state === 'pending') {
-      res.status(401).json({ error: 'unauthorized', detail: 'node not approved' })
+    const access = AGENT_ACCESS[node.state]
+    if (!access || !access.allowed) {
+      res.status(401).json({
+        error: 'unauthorized',
+        // An unlisted state is a schema change nobody brought here. Refusing it
+        // is right, and naming it is what turns a mystery 401 into a one line
+        // fix in this file.
+        detail: access?.detail ?? `node state '${node.state}' may not use the agent API`,
+      })
       return
     }
     req.node = node

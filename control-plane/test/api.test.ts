@@ -90,6 +90,54 @@ describe('agent surface', () => {
     expect(r.status).toBe(401)
   })
 
+  it('refuses a node whose identity has been superseded', async () => {
+    // The failure this whole allowlist exists for. Re-enrolment retires the
+    // earlier row for the same hardware, but the daemon holding the earlier
+    // certificate does not stop on its own, and that certificate still
+    // verifies. Without a state check it authenticates forever, and the fleet
+    // shows the newer row - which is the one that is not reporting.
+    await db.query(
+      `INSERT INTO nodes (hostname, state, cert_fingerprint)
+       VALUES ('old-identity','superseded','fp-superseded')`)
+    const r = await fetch(`${base}/agent/v1/policy`, { headers: asNode('fp-superseded') })
+    expect(r.status).toBe(401)
+    expect((await r.json()).detail).toMatch(/re-enroll/)
+  })
+
+  it('refuses a node whose state is not one this file knows about', async () => {
+    // Fails closed. A state added to the schema and not to the allowlist must
+    // lose access rather than silently keep it, because the opposite is how
+    // 'superseded' went unnoticed.
+    await db.query(
+      `UPDATE nodes SET state='offline' WHERE cert_fingerprint='fp-superseded'`)
+    await db.query(
+      `ALTER TABLE nodes DROP CONSTRAINT IF EXISTS nodes_state_check`)
+    await db.query(
+      `INSERT INTO nodes (hostname, state, cert_fingerprint)
+       VALUES ('from-the-future','quarantined','fp-future')`)
+    const r = await fetch(`${base}/agent/v1/policy`, { headers: asNode('fp-future') })
+    expect(r.status).toBe(401)
+    expect((await r.json()).detail).toMatch(/quarantined/)
+  })
+
+  it('still admits a paused node, so that pausing is not a one way door', async () => {
+    // A paused node keeps heartbeating; an admin resumes it by acting on the
+    // record those heartbeats maintain. Locking it out here would strand it.
+    await db.query(
+      `INSERT INTO nodes (hostname, state, cert_fingerprint)
+       VALUES ('resting','paused','fp-paused')`)
+    const r = await fetch(`${base}/agent/v1/policy`, { headers: asNode('fp-paused') })
+    expect(r.status).toBe(200)
+  })
+
+  it('still admits a node marked offline, so it can come back', async () => {
+    await db.query(
+      `INSERT INTO nodes (hostname, state, cert_fingerprint)
+       VALUES ('returning','offline','fp-offline')`)
+    const r = await fetch(`${base}/agent/v1/policy`, { headers: asNode('fp-offline') })
+    expect(r.status).toBe(200)
+  })
+
   it('serves the policy table to an approved node', async () => {
     const r = await fetch(`${base}/agent/v1/policy`, { headers: asNode(fx.fingerprint) })
     expect(r.status).toBe(200)

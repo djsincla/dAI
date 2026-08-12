@@ -147,14 +147,24 @@ fi
 
 echo "==> installing to $BINARY_DIR"
 install -d -m 755 "$BINARY_DIR"
-install -m 755 "$BUILD/dai-agent" "$BINARY_DIR/dai-agent"
-# The resource bundles are looked up next to the executable, so they travel with
-# it or the process dies on first use rather than at launch.
-for bundle in "$BUILD"/*.bundle; do
-  [[ -e "$bundle" ]] || continue
-  rm -rf "$BINARY_DIR/$(basename "$bundle")"
-  cp -R "$bundle" "$BINARY_DIR/"
-done
+
+# When the package has already laid the binaries down, --build points at the
+# place they were laid, and copying a file onto itself is an error rather than a
+# no-op: `install` says "are the same file" and stops. That is the ordinary case
+# for a .pkg and it failed the whole installation.
+if [[ "$(cd "$BUILD" && pwd)" == "$(cd "$BINARY_DIR" && pwd)" ]]; then
+  echo "    already in place"
+  chmod 755 "$BINARY_DIR/dai-agent"
+else
+  install -m 755 "$BUILD/dai-agent" "$BINARY_DIR/dai-agent"
+  # The resource bundles are looked up next to the executable, so they travel
+  # with it or the process dies on first use rather than at launch.
+  for bundle in "$BUILD"/*.bundle; do
+    [[ -e "$bundle" ]] || continue
+    rm -rf "$BINARY_DIR/$(basename "$bundle")"
+    cp -R "$bundle" "$BINARY_DIR/"
+  done
+fi
 
 install -d -m 700 "$STATE_DIR" "$IDENTITY_DIR"
 install -d -m 755 "$LOG_DIR"
@@ -268,10 +278,15 @@ fi
 # without it. But a machine running this with no way for its owner to see or
 # stop it is the arrangement the whole programme depends on not being, so the
 # absence is called out rather than passed over.
-if [[ -d "$BUILD/dAI.app" ]]; then
+# The app is either here to be copied, or already at its destination because the
+# package put it there. Testing only the first left a packaged install with the
+# app on disk and no LaunchAgent to start it - installed, and never running.
+if [[ -d "$BUILD/dAI.app" || -d "$MENUBAR_APP" ]]; then
   echo "==> installing the menu bar app"
-  rm -rf "$MENUBAR_APP"
-  cp -R "$BUILD/dAI.app" "$MENUBAR_APP"
+  if [[ -d "$BUILD/dAI.app" && "$BUILD/dAI.app" != "$MENUBAR_APP" ]]; then
+    rm -rf "$MENUBAR_APP"
+    cp -R "$BUILD/dAI.app" "$MENUBAR_APP"
+  fi
   sed -e "s|@APP@|$MENUBAR_APP|g" "$HERE/com.dai.menubar.plist.in" > "$MENUBAR_PLIST"
   chown root:wheel "$MENUBAR_PLIST"; chmod 644 "$MENUBAR_PLIST"
   # Loaded into the console user's session rather than system, since a

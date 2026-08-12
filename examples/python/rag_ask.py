@@ -30,7 +30,8 @@ import os
 import sys
 
 import rag_embed
-from dai_gateway import Gateway, GatewayError, NoCapacity, pick_model, text_of, who_answered
+from dai_gateway import (Gateway, GatewayError, NoCapacity, pick_model, provenance,
+                         text_of, who_answered)
 from rag_store import Store
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -108,6 +109,8 @@ def main() -> int:
             print(f"         {body[:400]}{'...' if len(body) > 400 else ''}\n")
 
     if args.retrieve_only:
+        print("\n--retrieve-only: this ran entirely on this machine. No request was"
+              " made to the gateway and no model was involved.")
         return 0
 
     # ---- generate, on the fleet ------------------------------------------
@@ -142,8 +145,9 @@ def main() -> int:
     for chunk in dict.fromkeys(c["citation"] for c in chunks):
         url = next(c["url"] for c in chunks if c["citation"] == chunk)
         print(f"  {chunk:<16} {url}")
-    print(f"\nanswered by {who_answered(completion)}")
-    print("The statute is the authority; this is a reading aid, not advice.")
+    print(f"\n--- where this answer came from -------------------------------")
+    print(provenance(gateway, completion))
+    print("\nThe statute is the authority; this is a reading aid, not advice.")
     return 0
 
 

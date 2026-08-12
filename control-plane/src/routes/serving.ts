@@ -600,6 +600,24 @@ export function servingRoutes(db: Db, broker: Broker): Router {
       stop_reason: stopReason,
       stop_sequence: null,
       usage,
+      // The same block `/v1/chat/completions` returns, and it was missing here
+      // for no better reason than that the two response shapes were written at
+      // different times. A caller on the Anthropic surface could not see which
+      // machine had answered, which on this fleet is not a detail: it is the
+      // difference between an answer that came off a named machine somebody
+      // owns and one that could have come from anywhere.
+      //
+      // It matters most on the machine that is both control plane and node.
+      // There, an answer served locally and an answer that never left the
+      // process look identical from outside, and this block is what tells them
+      // apart - it can only be filled in by the router that picked the node.
+      dai: {
+        node: choice.hostname,
+        presenceState: choice.presence_state,
+        seconds: Math.round((Date.now() - started) / 10) / 100,
+        maxTokensApplied: maxTokens,
+        cappedByPolicy: maxTokens < requested,
+      },
     })
   })
 

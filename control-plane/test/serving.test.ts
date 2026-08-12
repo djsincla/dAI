@@ -170,6 +170,38 @@ describe('serving over HTTP', () => {
     node.stop()
   })
 
+  it('says which machine answered on the Anthropic surface too', async () => {
+    // The provenance block was on /v1/chat/completions and not here, so a
+    // caller using the Anthropic shape could not tell which machine had served
+    // them. That matters most where the control plane and the node are the same
+    // box: an answer routed to the local node and an answer that never left the
+    // process look the same from outside, and only the router can fill this in.
+    // The model has to be resident before it can be asked for: unlike
+    // /v1/chat/completions, this surface requires a model and looks it up in
+    // the catalogue, which is built from what nodes report holding.
+    await fetch(`${base}/agent/v1/heartbeat`, {
+      method: 'POST', headers: asNode(fx.fingerprint),
+      body: JSON.stringify({ presenceState: 'LOCKED', residentModels: { 'qwen-7b': 4.0 } }),
+    })
+    const node = attachNode(() => ({
+      text: 'ready', promptTokens: 3, completionTokens: 1,
+    }))
+    await new Promise((r) => setTimeout(r, 150))
+
+    const r = await fetch(`${base}/v1/messages`, {
+      method: 'POST', headers: asUser(fx.operatorToken),
+      body: JSON.stringify({
+        model: 'qwen-7b', messages: [{ role: 'user', content: 'hi' }], max_tokens: 32,
+      }),
+    })
+    const body = await r.json()
+    expect(r.status).toBe(200)
+    expect(body.dai.node).toBe('rotorua')
+    expect(body.dai).toHaveProperty('presenceState')
+    expect(body.dai).toHaveProperty('cappedByPolicy')
+    node.stop()
+  })
+
   it('refuses while the machine is in use, even with the node connected', async () => {
     await setPresence(db, fx.nodeId, 'ACTIVE')
     const node = attachNode(() => ({ text: 'x', promptTokens: 1, completionTokens: 1 }))

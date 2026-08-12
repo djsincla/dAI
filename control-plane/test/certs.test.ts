@@ -430,7 +430,10 @@ describe('enrollment and issuance over HTTP', () => {
     const node = await approvedNode()
     await db.query(`UPDATE nodes SET state='superseded' WHERE id=$1`, [node.nodeId])
     const r = await renew(fingerprintOfPem(node.certPem), csrForExistingKey(node.dir))
-    expect(r.status).toBe(403)
+    // 401 rather than the route's own 403: a superseded identity is now refused
+    // at authentication, for every agent endpoint rather than this one. The
+    // route keeps its check, which still answers for paused and offline nodes.
+    expect(r.status).toBe(401)
     expect((await r.json()).detail).toMatch(/superseded/)
     rmSync(node.dir, { recursive: true, force: true })
   })

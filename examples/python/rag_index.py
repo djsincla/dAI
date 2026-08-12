@@ -103,8 +103,12 @@ def main() -> int:
             heading = f"{section['citation']}"
             if where:
                 heading += f" - {where}"
-            if len(pieces) > 1:
-                heading += f" (part {number + 1} of {len(pieces)})"
+            # The part marker is deliberately NOT in the heading the model sees.
+            # It was, and the model dutifully cited "WIC 4512, part 2 of 9,
+            # paragraph 1(A)" - a reference that looks like law and does not
+            # exist, because how this pipeline happened to cut a long section is
+            # not a fact about the statute. The part number is still kept in the
+            # metadata, where the retrieval display uses it and the model cannot.
             rows.append({
                 "citation": section["citation"],
                 "section": section["section"],

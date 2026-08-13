@@ -91,11 +91,13 @@ widen.
 
 **TLS is unaffected.** One certificate covers every port on the same host.
 
-Still open: **deleting a group has to close its listener**, and the port should
-not be reused immediately by the next group created, or a client left pointing at
-the old URL silently starts talking to a different group. There is no delete
-route today, so allocation takes the lowest free port; the day one is added, the
-port has to be held back rather than handed straight on.
+**Deleting a group closes its listener and retires its socket.** The port goes
+into `retired_sockets` and allocation skips it, so a client left pointing at the
+old URL cannot quietly start talking to a different group's machines. Retired
+ports are reused only when the range has nothing else left, oldest first: a range
+full of retirements is a fleet that cannot create a group at all, which is worse
+than a stale URL somebody has had weeks to notice. The caller is told when a port
+is a reuse.
 
 ## What the interface has to show and do
 
@@ -152,6 +154,29 @@ from a control plane that has fallen over.
 
 Absent means enabled, so nothing that predates the column stands itself down by
 being read, and an upgrade cannot take a fleet out of service.
+
+## Deleting a group
+
+**Built.** `DELETE /admin/v1/pools/{id}?confirm=true`, and a delete control on
+the group's card.
+
+Everything scoped to the group goes with it: its jobs and their work units, which
+models it was pushing, and every role anybody holds on it. Its machines are
+freed, because membership lives on the group's own row - there is nothing to tidy
+up on them.
+
+Refused without `confirm`, and the refusal is the useful part. It names the jobs,
+the assignments, the roles, how many machines would be freed and which port is
+retired, and then points at the reversible alternative, because taking the
+machines back is usually what somebody actually wants:
+
+> deleting overnight-harvest also deletes 1 job and their work, 1 model
+> assignment, every role anybody holds on it, and none of it comes back. 1
+> machine would be freed, and port 8460 retired rather than reused. To take its
+> machines back without losing any of this, stand it down instead.
+
+The console shows that sentence in its confirmation rather than inventing a
+generic one: the control plane knows what is at stake and the browser does not.
 
 ## The socket is routing, not permission
 

@@ -729,3 +729,6 @@ th.sortable.desc::after { content: ' \2193'; opacity: 1; color: var(--accent); }
   font-weight: 400;
   font-size: 12px;
 }
+
+/* The one control on a group card that cannot be undone. */
+.link.danger { color: var(--bad, #d9534f); }

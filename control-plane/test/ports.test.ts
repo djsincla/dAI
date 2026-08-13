@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { capacity, DEFAULT_RANGE, nextFree, rangeFrom } from '../src/lib/ports.js'
+import { allocate, capacity, DEFAULT_RANGE, nextFree, rangeFrom } from '../src/lib/ports.js'
 
 /**
  * Which socket a group gets.
@@ -62,5 +62,36 @@ describe('where the range comes from', () => {
     expect(() => rangeFrom('9010-9000')).toThrow(/not a usable range/)
     expect(() => rangeFrom('0-10')).toThrow(/not a usable range/)
     expect(() => rangeFrom('60000-70000')).toThrow(/not a usable range/)
+  })
+})
+
+describe('allocating around sockets that have been retired', () => {
+  const range = { from: 9000, to: 9002 }
+  const retired = (port: number, at: string) => ({ port, at })
+
+  it('skips a retired port while anything else is free', () => {
+    // A client left pointing at a deleted group's URL must not quietly start
+    // talking to a different group's machines.
+    expect(allocate([9000], [retired(9001, '2026-01-01')], range))
+      .toEqual({ port: 9002, reused: false })
+  })
+
+  it('reuses the longest-retired one when the range is otherwise full', () => {
+    // A range that has filled with retirements is a fleet that cannot make a
+    // group at all, which is worse than a stale URL somebody has had weeks to
+    // notice - but the caller is told it is a reuse.
+    const out = allocate([9000], [retired(9002, '2026-03-01'), retired(9001, '2026-01-01')], range)
+    expect(out).toEqual({ port: 9001, reused: true })
+  })
+
+  it('says no when every port is held by a live group', () => {
+    expect(allocate([9000, 9001, 9002], [], range)).toBe(null)
+  })
+
+  it('ignores retirements from outside the range', () => {
+    // A port retired before somebody moved the range is not this range's
+    // business, and treating it as reusable would hand out a port that is not
+    // in the range at all.
+    expect(allocate([9000, 9001, 9002], [retired(8500, '2026-01-01')], range)).toBe(null)
   })
 })

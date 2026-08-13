@@ -69,3 +69,35 @@ export function nextFree(taken: Iterable<number>, range: PortRange = DEFAULT_RAN
 export function capacity(range: PortRange): number {
   return range.to - range.from + 1
 }
+
+/**
+ * The port to give a new group, given what is held and what has been retired.
+ *
+ * Retired sockets are held back rather than handed on: a client left pointing at
+ * a deleted group's URL would otherwise start talking to a different group's
+ * machines without anything having changed at its end, which is the one failure
+ * a port-per-group exists to make impossible.
+ *
+ * They are reused when the range has nothing else left, oldest first. A range
+ * that has filled with retirements is a fleet that cannot create a group at all,
+ * and that is worse than a stale URL somebody has had weeks to notice - but it
+ * is worth saying out loud, which is why the answer says which it is.
+ */
+export function allocate(
+  held: Iterable<number>,
+  retired: { port: number; at: string | number | Date }[],
+  range: PortRange = DEFAULT_RANGE,
+): { port: number; reused: boolean } | null {
+  const heldSet = [...held]
+  const retiredPorts = retired.map((r) => r.port)
+  const fresh = nextFree([...heldSet, ...retiredPorts], range)
+  if (fresh !== null) return { port: fresh, reused: false }
+
+  // Nothing unretired left. Take the one that has been out of service longest,
+  // which is the one least likely to still be in somebody's configuration.
+  const oldest = [...retired]
+    .filter((r) => r.port >= range.from && r.port <= range.to)
+    .sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime())[0]
+  if (!oldest || heldSet.includes(oldest.port)) return null
+  return { port: oldest.port, reused: true }
+}

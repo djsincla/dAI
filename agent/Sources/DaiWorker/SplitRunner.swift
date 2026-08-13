@@ -156,6 +156,31 @@ public actor SplitRunner {
     }
 
     /// Generate, with both machines stepping in lockstep.
+    /// What a caller outside this actor gets back: an answer, and whether this
+    /// rank is the one that has it.
+    public struct Completed: Sendable {
+        public let outcome: Outcome
+        /// True on the rank holding the output head, which is the only one with
+        /// text worth reporting.
+        public let isHead: Bool
+        public let layers: Range<Int>
+    }
+
+    /// Load and generate without handing `Loaded` across an actor boundary.
+    ///
+    /// `Loaded` carries the model and tokenizer, neither of which is Sendable
+    /// and neither of which should be: they are large, mutable, and belong to
+    /// the actor that built them. The by-hand path gets away with taking them
+    /// out because it runs at top level with no isolation to cross. A loop that
+    /// is an actor cannot, so the two steps stay inside and only the answer
+    /// leaves.
+    public func run(directory: URL, prompt: String, maxTokens: Int) async throws -> Completed {
+        let loaded = try await load(directory: directory)
+        let outcome = try generate(loaded, prompt: prompt, maxTokens: maxTokens)
+        return Completed(outcome: outcome, isHead: loaded.split.isLast,
+                         layers: loaded.split.startIndex ..< loaded.split.endIndex)
+    }
+
     public func generate(_ loaded: Loaded, prompt: String, maxTokens: Int) throws -> Outcome {
         let split = loaded.split
         let promptTokens = try loaded.tokenizer.applyChatTemplate(

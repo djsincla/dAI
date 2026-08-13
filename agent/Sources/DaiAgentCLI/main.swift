@@ -423,8 +423,16 @@ case "work":
         // installing the daemon quietly turned serving off, which is how a
         // machine ended up harvesting all day while reporting no chat model.
         if gpu != nil {
+            // The credentials a split needs, loaded here because this is where
+            // enrolment put them. The peer CA is the node CA: the other end of
+            // a split is a node, and pinning the server CA fails the handshake
+            // with "unknown CA", which reads as a broken network.
+            let peerCA = try? String(
+                contentsOf: dir.appendingPathComponent("node-ca.crt"), encoding: .utf8)
+            let splitCredentials = peerCA.map { (identity: identity, peerCAPEM: $0) }
             let channel = ReverseChannel(controlPlane: cp, gpu: gpu,
-                                         status: status, promoteAfter: promote)
+                                         status: status, promoteAfter: promote,
+                                         splitIdentity: splitCredentials)
             if let servedPolicy = try? await cp.fetchPolicy() {
                 await channel.setPolicy(mergePolicy(local: defaultPolicy, served: servedPolicy))
             }

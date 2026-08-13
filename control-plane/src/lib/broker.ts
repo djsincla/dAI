@@ -160,6 +160,61 @@ export class Broker {
     })
   }
 
+  /**
+   * Dispatch to every rank of a gang, and hold them together.
+   *
+   * A split model runs across N machines in lockstep, so the ranks are started
+   * at once and the request is finished by whichever of them holds the output
+   * head. The others do their share and return nothing anybody reads.
+   *
+   * When any rank fails, the whole request fails. That is the decision taken
+   * deliberately over holding the survivors or resuming elsewhere: resuming
+   * needs the lost rank's KV cache, which is not transferable, and holding
+   * costs memory on machines doing nothing while betting a peer returns. On a
+   * tier defined as never-preempted this should not happen, and machinery for
+   * recovering from it would be admitting the tier does not work.
+   *
+   * So it fails loudly. The reason names the rank that went, every member is
+   * released rather than only the one that failed, and the failure is logged
+   * against all of them - a gang that broke is not one slow request, and a
+   * fleet that reports it as one will go on breaking quietly.
+   */
+  async dispatchGang(
+    members: { nodeId: string; hostname: string; rank: number }[],
+    kind: string,
+    modelHash: string | null,
+    body: (rank: number) => unknown,
+    signal?: AbortSignal,
+  ): Promise<{ ok: true; body: unknown } | { ok: false; error: string }> {
+    // Every rank starts before any is awaited. Awaiting one at a time would
+    // deadlock: rank 0 listens and does not finish until rank 1 has dialled it,
+    // and rank 1 is not dispatched until rank 0 returns.
+    const started = members.map((m) => ({
+      member: m,
+      result: this.dispatch(m.nodeId, kind, modelHash, body(m.rank), signal),
+    }))
+
+    const settled = await Promise.all(started.map(async (s) => ({
+      member: s.member,
+      outcome: await s.result,
+    })))
+
+    const failed = settled.filter((s) => !s.outcome.ok)
+    if (failed.length > 0) {
+      const why = failed
+        .map((f) => `rank ${f.member.rank} (${f.member.hostname}): `
+          + `${(f.outcome as { error: string }).error}`)
+        .join('; ')
+      console.log(`[serving] gang of ${members.length} broke and was released - ${why}`)
+      return { ok: false, error: `the gang did not complete - ${why}` }
+    }
+
+    // Rank 0 holds the last layers and the output head, so it is the one with
+    // an answer. The others report having done their share.
+    const head = settled.find((s) => s.member.rank === 0) ?? settled[0]!
+    return { ok: true, body: (head.outcome as { body: unknown }).body }
+  }
+
   /** A node returns a completion, or reports that it could not produce one. */
   complete(dispatchId: string, nodeId: string, result: { body?: unknown; error?: string }): boolean {
     const entry = this.pending.get(dispatchId)

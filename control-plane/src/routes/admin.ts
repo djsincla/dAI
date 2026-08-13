@@ -5,7 +5,7 @@ import {
 import { resolve as resolveOpenJD, frameOf, type JobTemplate } from '../lib/openjd.js'
 import { repositoryRoot, safePath, verifyModel } from '../lib/repository.js'
 import { COMPLETE_ENOUGH, holdsModel } from '../lib/possession.js'
-import { coupledWith, violations, type Group } from '../lib/groupRules.js'
+import { coupledWith, effectiveModel, violations, type Group } from '../lib/groupRules.js'
 import { runnability, shapeOf, whyGroupCannotHost } from '../lib/shape.js'
 import { costOfServing, suspensions } from '../lib/suspension.js'
 import { capacity, nextFree, rangeFrom } from '../lib/ports.js'
@@ -546,7 +546,7 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
   r.get('/pools', async (_req, res) => {
     const { rows } = await db.query(
       `SELECT id, name, tier, schedule, preempt, priority,
-              agent_channel, desired_agent_version, serving_model_id, serving_port
+              agent_channel, desired_agent_version, serving_model_id, serving_port, enabled
          FROM pools ORDER BY name`,
     )
     res.json(rows.map((p) => ({
@@ -561,6 +561,10 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
       // operator has to go and look up in a database is one they will get
       // wrong. Null for a group created before groups had sockets.
       servingPort: p.serving_port === null ? null : Number(p.serving_port),
+      // Whether this group is asserting any of the above. A disabled group is
+      // configuration at rest: everything here is still true of it and none of
+      // it is in force.
+      enabled: p.enabled !== false,
     })))
   })
 
@@ -639,6 +643,57 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
       }
       throw e
     }
+  })
+
+  /**
+   * Stand a group down, or bring it back.
+   *
+   * A disabled group keeps everything it was configured with and asserts none
+   * of it: it decides nothing about what its machines serve, suspends nobody,
+   * hands out no work, and refuses on its own socket. Its machines, its model
+   * and its port are all still there.
+   *
+   * That is what makes it different from deleting. A cluster group overrides
+   * the harvest group it shares machines with, so the way to hand those
+   * machines back - and let the harvest group's own model take effect - is to
+   * stand the cluster group down for the evening, not to dismantle it and
+   * rebuild it from memory tomorrow.
+   */
+  r.put('/pools/:poolId/enabled', async (req, res) => {
+    const { poolId } = req.params as { poolId: string }
+    const wanted = (req.body as { enabled?: boolean })?.enabled
+    if (typeof wanted !== 'boolean') {
+      res.status(400).json({ error: 'bad_request', detail: 'enabled must be true or false' })
+      return
+    }
+    if (!(await requireRole(db, req.user!.id, poolId, 'admin'))) {
+      res.status(403).json({ error: 'forbidden', detail: 'admin role required on this pool' })
+      return
+    }
+    const { rows } = await db.query(
+      `UPDATE pools SET enabled = $2 WHERE id = $1 RETURNING name, enabled`, [poolId, wanted])
+    const pool = rows[0] as { name: string; enabled: boolean } | undefined
+    if (!pool) { res.status(404).json({ error: 'not_found', detail: 'no such group' }); return }
+    await audit(db, req.user!.id, wanted ? 'pool.enable' : 'pool.disable', pool.name, {})
+
+    // What the fleet will do about it, said rather than left to be noticed. A
+    // disabled cluster group hands its machines back, and the model they take
+    // up next is whatever their harvest group asks for - which is usually the
+    // reason somebody pressed this.
+    const { rows: pools } = await db.query(
+      `SELECT id, name, tier, membership, serving_model_id, enabled FROM pools`)
+    const groups = (pools as any[]).map((p) => ({
+      ...p, servingModelId: p.serving_model_id ?? null,
+    })) as unknown as Group[]
+    const { rows: nodes } = await db.query(
+      `SELECT id, hostname, tier, chip, memory_gb FROM nodes WHERE state = 'active'`)
+    const affected = (nodes as never[])
+      .filter((n: never) => poolsFor(n, [pools.find((p) => p.id === poolId)] as never).length > 0)
+      .map((n: { hostname: string }) => ({
+        hostname: n.hostname,
+        nowServes: effectiveModel(n as never, groups),
+      }))
+    res.json({ name: pool.name, enabled: pool.enabled, machines: affected })
   })
 
   /**

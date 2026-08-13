@@ -28,6 +28,19 @@ export interface Group extends PoolSpec {
   name: string
   /** The one model this group's machines run. Null until somebody says. */
   servingModelId: string | null
+  /**
+   * Whether this group asserts anything at all.
+   *
+   * A disabled group keeps its machines, its model and its socket, and acts on
+   * none of them. Absent means enabled, so a caller that has not been taught
+   * about this yet behaves as it always did.
+   */
+  enabled?: boolean
+}
+
+/** Groups that are asserting something. The rest are configuration at rest. */
+export function active(groups: Group[]): Group[] {
+  return groups.filter((g) => g.enabled !== false)
 }
 
 export interface Violation {
@@ -38,7 +51,10 @@ export interface Violation {
 /** Which groups a machine falls into, by tier. */
 export function groupsFor(node: NodeFacts, groups: Group[]): Map<string, Group[]> {
   const byTier = new Map<string, Group[]>()
-  for (const g of poolsFor(node, groups) as Group[]) {
+  // Disabled groups are not claims, so a machine in one and one other is not a
+  // machine in two: standing a group down has to actually free its machines,
+  // including from the rule that says how many groups they may be in.
+  for (const g of poolsFor(node, active(groups)) as Group[]) {
     byTier.set(g.tier, [...(byTier.get(g.tier) ?? []), g])
   }
   return byTier
@@ -147,7 +163,8 @@ export function coupledWith(group: Group, nodes: NodeFacts[], groups: Group[]): 
  * same as "serve nothing": nobody has said.
  */
 export function effectiveModel(node: NodeFacts, groups: Group[]): string | null {
-  const mine = (poolsFor(node, groups) as Group[]).filter((g) => g.servingModelId !== null)
+  const mine = (poolsFor(node, active(groups)) as Group[])
+    .filter((g) => g.servingModelId !== null)
   const cluster = mine.find((g) => g.tier === 'cluster')
   return (cluster ?? mine[0])?.servingModelId ?? null
 }
@@ -165,7 +182,7 @@ export function overrides(nodes: NodeFacts[], groups: Group[]): {
 }[] {
   const out = []
   for (const node of nodes) {
-    const mine = poolsFor(node, groups) as Group[]
+    const mine = poolsFor(node, active(groups)) as Group[]
     const cluster = mine.find((g) => g.tier === 'cluster' && g.servingModelId !== null)
     if (!cluster) continue
     for (const h of mine.filter((g) => g.tier === 'harvest'

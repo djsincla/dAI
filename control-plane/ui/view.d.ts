@@ -92,7 +92,7 @@ export function rolloutState(row: any): { state: string; label: string }
 export function upgradeOutcome(row: any): { state: string; label: string }
 
 export function groupMode(pool: any): 'list' | 'rule'
-export function groupMismatches(pool: any, nodes: any[], models: any[]): any[]
+export function groupMismatches(pool: any, nodes: any[], models: any[], allGroups?: any[]): any[]
 export function groupWarning(mismatches: any[]): { level: string; label: string; reasons: string[] } | null
 export function groupMachines(nodes: any[], pools: any[], matcher: (n: any, p: any) => boolean): {
   groups: { pool: any; mode: string; nodes: any[] }[]

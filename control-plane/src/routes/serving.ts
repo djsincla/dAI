@@ -166,6 +166,28 @@ export function groupOf(req: Request): string | null {
 
 export function servingRoutes(db: Db, broker: Broker): Router {
   const r = Router()
+
+  // A disabled group answers nothing on its own socket.
+  //
+  // Refused rather than left to fail as "no capacity": the group is standing
+  // down deliberately and for a reason somebody chose, and a caller told the
+  // fleet is busy would wait for capacity that is not coming back on its own.
+  // The listener stays bound, because a connection refused at the socket is
+  // indistinguishable from a control plane that has fallen over.
+  r.use(async (req, res, next) => {
+    const group = groupOf(req)
+    if (!group) { next(); return }
+    const { rows } = await db.query(`SELECT name, enabled FROM pools WHERE id = $1`, [group])
+    const pool = rows[0] as { name: string; enabled: boolean } | undefined
+    if (pool && pool.enabled === false) {
+      res.status(503).json({ error: {
+        message: `the ${pool.name} group is disabled and is serving nothing; `
+          + 'its machines have been handed back to whatever else they belong to',
+        type: 'no_capacity', code: 'group-disabled' } })
+      return
+    }
+    next()
+  })
   r.use(userAuth(db))
 
   /**

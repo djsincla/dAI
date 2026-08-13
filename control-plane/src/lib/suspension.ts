@@ -1,5 +1,5 @@
 import { poolsFor, type NodeFacts } from './pools.js'
-import type { Group } from './groupRules.js'
+import { active, type Group } from './groupRules.js'
 
 /**
  * A machine holding part of a split model is not available to its harvest group.
@@ -50,7 +50,9 @@ export type MachineCount = (modelId: string) => number
  */
 export function suspensionFor(node: NodeFacts, groups: Group[],
                               machinesFor: MachineCount): Suspension | null {
-  const mine = poolsFor(node, groups) as Group[]
+  // A disabled group holds nobody. Standing a cluster group down is how its
+  // machines are handed back to harvest without dismantling it.
+  const mine = poolsFor(node, active(groups)) as Group[]
   const cluster = mine.find(
     (g) => g.tier === 'cluster' && g.servingModelId !== null
       && machinesFor(g.servingModelId) > 1)
@@ -93,7 +95,8 @@ export function costOfServing(modelId: string, machines: number,
                               members: NodeFacts[], groups: Group[]): string {
   if (machines <= 1) return ''
   const affected = members
-    .map((n) => ({ n, harvest: (poolsFor(n, groups) as Group[]).filter((g) => g.tier === 'harvest') }))
+    .map((n) => ({ n, harvest: (poolsFor(n, active(groups)) as Group[])
+      .filter((g) => g.tier === 'harvest') }))
     .filter((m) => m.harvest.length > 0)
   if (affected.length === 0) return ''
 

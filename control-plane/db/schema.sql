@@ -170,6 +170,15 @@ CREATE TABLE IF NOT EXISTS nodes (
     -- Empty means the last pass had nothing to report, which is not the same as
     -- never having run - last_model_sync answers that.
     model_sync_faults     jsonb NOT NULL DEFAULT '{}'::jsonb,
+    -- Where a peer should dial this machine for pipeline traffic.
+    --
+    -- Declared by the node, not observed from its connection. A split runs over
+    -- whatever link the machines share, and that is deliberately not always the
+    -- one they use to reach here: E7's pipeline ran over a Thunderbolt bridge
+    -- while both nodes talked to the control plane over the ordinary LAN.
+    -- Handing a dialer the source address of a heartbeat would send it down the
+    -- slow path, or somewhere the peer cannot reach at all.
+    pipeline_address      text,
     last_model_sync       timestamptz,
     created_at            timestamptz NOT NULL DEFAULT now()
 );
@@ -444,6 +453,7 @@ ALTER TABLE pools ADD COLUMN IF NOT EXISTS desired_agent_version text;
 -- Postgres has no IF NOT EXISTS for a constraint, so this is asked rather than
 -- assumed. Re-applying the schema has to be a no-op: it is how an upgrade
 -- reaches a database that already has data in it.
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS pipeline_address text;
 ALTER TABLE models ADD COLUMN IF NOT EXISTS machines integer NOT NULL DEFAULT 1;
 ALTER TABLE models ADD COLUMN IF NOT EXISTS min_memory_gb numeric;
 DO $$

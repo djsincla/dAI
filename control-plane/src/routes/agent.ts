@@ -378,6 +378,7 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
       // model id -> why this node does not hold it. Sent only after a sync pass
       // has run, so absent means "nothing new to say" rather than "all well".
       syncFaults?: Record<string, string>
+      pipelineAddress?: string
     }
     const node = req.node!
 
@@ -426,6 +427,7 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
               -- cleared its faults just by heartbeating. A pass that succeeded
               -- sends an empty object, which does clear them.
               model_sync_faults = COALESCE($12::jsonb, model_sync_faults),
+              pipeline_address = COALESCE($13, pipeline_address),
               last_model_sync = CASE WHEN $12::jsonb IS NULL
                                      THEN last_model_sync ELSE now() END
         WHERE id = $6`,
@@ -438,7 +440,8 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
              b.models.map((m) => [m.name, m.contextLength]))),
        b.storedModels ? JSON.stringify(b.storedModels) : null,
        b.agentVersion ?? null, b.agentFingerprint ?? null,
-       b.syncFaults === undefined ? null : JSON.stringify(b.syncFaults) ],
+       b.syncFaults === undefined ? null : JSON.stringify(b.syncFaults),
+       b.pipelineAddress ?? null ],
     )
     // Presence history feeds the capacity graph, which cannot be drawn from
     // current state alone.

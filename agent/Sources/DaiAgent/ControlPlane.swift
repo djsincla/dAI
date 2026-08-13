@@ -685,7 +685,8 @@ public actor ControlPlane {
                           residentModels: [String: Double] = [:],
                           storedModels: [String: Double]? = nil,
                           modelInfo: [String: Int] = [:],
-                          syncFaults: [String: String]? = nil) async throws {
+                          syncFaults: [String: String]? = nil,
+                          pipelineAddress: String? = nil) async throws {
         var body: [String: JSONValue] = [
             "presenceState": .string(state.rawValue),
             // Replaced rather than merged: a model released on a yield is no
@@ -733,6 +734,11 @@ public actor ControlPlane {
         if let syncFaults {
             body["syncFaults"] = .object(syncFaults.mapValues { .string($0) })
         }
+        // Where a peer should dial this machine for pipeline traffic, which is
+        // not where the control plane sees it connecting from. A split runs over
+        // whatever link the machines share, and E7's ran over a Thunderbolt
+        // bridge while both nodes reached the control plane over the LAN.
+        if let pipelineAddress { body["pipelineAddress"] = .string(pipelineAddress) }
         if let onACPower { body["onAcPower"] = .bool(onACPower) }
         if let thermalOK { body["thermalOk"] = .bool(thermalOK) }
         if !capability.isEmpty {

@@ -30,6 +30,7 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
       `SELECT id, hostname, chip, memory_gb, metal_working_set_gb, tier, tiers, state,
               owner_user_id, presence_state, last_heartbeat, capability_profiles,
               model_sync_faults, last_model_sync, agent_version, agent_fingerprint,
+              pipeline_address,
               user_paused, user_paused_at, resident_models, model_context
          -- Superseded records are history, not fleet. They are the previous
          -- enrollment of a machine that is still here under a newer identity,
@@ -60,6 +61,9 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
       // different binaries were in service.
       agentVersion: n.agent_version ?? null,
       agentFingerprint: n.agent_fingerprint ?? null,
+      // Where a peer dials this machine for a split, which is not where the
+      // control plane sees it connect from.
+      pipelineAddress: n.pipeline_address ?? null,
       presenceState: n.presence_state,
       userPaused: n.user_paused ?? false,
       userPausedAt: n.user_paused_at ? new Date(n.user_paused_at).toISOString() : null,

@@ -2426,6 +2426,13 @@ components:
             sha256 of the running executable. A version string is a claim; this
             is evidence, and it is what proves the binary on disk is the one the
             control plane believes it deployed.
+        pipelineAddress:
+          type: string
+          description: >
+            Where a peer should dial this machine for pipeline traffic, declared
+            by the node rather than observed from its connection. A split runs
+            over whatever link the machines share, and that is deliberately not
+            always the one they use to reach the control plane.
         syncFaults:
           type: object
           additionalProperties: { type: string }
@@ -2581,6 +2588,10 @@ components:
           description: >
             Why this machine is not holding what it was assigned, as it last
             reported. Empty on a healthy node.
+        pipelineAddress:
+          type: string
+          nullable: true
+          description: Where a peer dials this machine for a split.
         agentVersion:
           type: string
           nullable: true

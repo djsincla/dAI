@@ -123,24 +123,81 @@ checked today.
 Role bindings are already group-scoped, so this is a lookup that exists rather
 than a mechanism to invent.
 
-## Open: what a machine in both groups serves
+## What a machine in both groups serves
 
-A machine in a harvest group and a cluster group is told to *hold* both groups'
-models. It can only *serve* one: the served model is a single argument in that
-machine's launchd plist.
+**Two groups that share a machine must serve the same model.**
 
-So a node can be assigned two models and serve one, with nothing recording which
-- and the fleet would have no way to answer "why is this machine not serving the
-model I assigned it". Three possible answers, none obviously right:
+That removes the ambiguity rather than resolving it case by case: a machine can
+only load one model, so the two groups it belongs to are not allowed to disagree
+about which. What the tier distinguishes is then no longer *capability* but
+*availability* - identical weights, identical answers, different promises:
 
-- The cluster group's model is the one served, and the harvest group's is held
-  for batch work only. Simple, and makes cluster membership mean "this is what
-  you serve".
-- Holding and serving become separate assignments, so a group can say "hold
-  this" without saying "serve this".
-- A machine may serve one model per group, on that group's socket, which is the
-  most useful and needs the agent to load two models at once - a memory question
-  before it is a scheduling one.
+| socket | promise |
+|---|---|
+| cluster | never preempted, no completion cap |
+| harvest | may answer 503 the moment somebody touches a keyboard; `maxCompletionTokens` applies |
 
-This wants deciding before the socket work, because it determines what a request
-arriving on a group's socket is entitled to expect.
+A caller chooses its service level by which URL it points at, which is a better
+separation than the alternative where the tier accidentally decided which model
+you got.
+
+### It needs a serving model to be a thing
+
+`pool_models` lets a group hold many models, so "the same model" has no subject
+today. The gate only works if a group gains a single, distinguished **serving
+model**, separate from the set it holds:
+
+- **held**, many per group, unconstrained, assigned exactly as the push drawer
+  already does
+- **serving**, one per group, and the thing that must match across any two
+  groups sharing a machine
+
+That also settles the hold-versus-load distinction, and it matches the machine,
+which can only serve one model whatever it is holding.
+
+### The constraint is transitive
+
+    machine A in cluster-1, harvest-1
+    machine B in cluster-1, harvest-2
+
+`cluster-1` must agree with `harvest-1` through A and with `harvest-2` through
+B, so `harvest-1` and `harvest-2` are forced to agree with each other though they
+share no machine and nobody said so.
+
+Invisible with two machines, a web with twenty. Reject at assignment naming the
+specific machine and the other group - *rotorua is also in harvest-1, which
+serves Qwen3-30B* - so the coupling is seen as it is created rather than
+discovered later.
+
+What this trades away, deliberately: a machine can no longer lend batch capacity
+for a small model to a harvest group while serving a large one to a cluster
+group.
+
+## A split model suspends its machines from harvesting
+
+**A machine holding a rank of a split model is not available to its harvest
+group for as long as it holds it.**
+
+This is the two-tier decision arriving at its conclusion rather than a new rule.
+A gang-scheduled pipeline cannot be preempted: if one rank yields because
+somebody touched a keyboard, the whole job dies and every other machine's model
+load is wasted. Harvest membership means precisely that the machine may be taken
+away. A machine cannot promise both.
+
+It is also why the same-model gate does not apply here. A harvest group cannot
+serve half a model, so there is nothing for the two groups to agree on, and
+suspension is the only coherent state.
+
+Consequences:
+
+- **Suspended, not removed.** The machine returns to its harvest group when the
+  split model is unloaded. Removing it would lose the operator's intent.
+- **The fleet loses that capacity, and should say so.** An N-way split takes N
+  workstations out of harvesting. A machine sitting idle in a harvest group
+  needs to read as *suspended: rank 0 of Qwen2.5-72B in cluster-1*, not as a
+  machine that is merely quiet.
+- **The cost belongs at assignment time.** Assigning a split model to a cluster
+  group should say what it will do before it does it - *this will suspend 2
+  machines from harvest-1* - because the operator is trading harvest capacity
+  for a model that would not otherwise run at all, and that is a decision rather
+  than a side effect.

@@ -76,6 +76,37 @@ old URL silently starts talking to a different group.
 
 **TLS is unaffected.** One certificate covers every port on the same host.
 
+## What the interface has to show and do
+
+**Assigning a model to a group already works.** The Models view has a
+"Push to workstations" drawer that lists every group with its tier and pushes or
+stops pushing per group - `PUT` and `DELETE` on
+`/admin/v1/pools/{poolId}/models/{modelId}`. Its own wording is precise about
+what that means: *declares that every machine in the pool should hold these
+weights*. So per-group **holding** is done.
+
+What is not done is the distinction that matters once a machine can be in two
+groups: holding is not loading. See the open question at the end.
+
+**The port has to be visible.** A socket per group is only useful if somebody
+can find out which socket, so the number a group is allocated at creation has to
+appear:
+
+- On the group itself, beside its tier. `card(g.pool.name, "<tier> tier, <mode>",
+  ...)` in the groups view is where it belongs, because that is the line
+  somebody reads to understand what a group is.
+- At creation, in the response and in the confirmation, since the whole point of
+  allocating at creation is that the operator learns it then rather than looking
+  it up later.
+- In the push drawer, as the URL to point a client at. Somebody assigning a
+  model to a group is one step away from wanting to use it, and
+  `https://host:PORT/v1` is the thing they need next.
+
+A bound socket and an allocated-but-not-listening one must be told apart in the
+interface, for the reason given above: a group whose models are assigned, whose
+machines are holding them, and which nothing answers should not look like a
+working group.
+
 ## The socket is routing, not permission
 
 The rule that has to hold, stated plainly because it is easy to lose:

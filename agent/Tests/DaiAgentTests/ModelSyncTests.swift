@@ -304,3 +304,124 @@ struct StuckPassTests {
                                    now: now, after: hour) == true)
     }
 }
+
+/// The metadata the loader needs to open what the fleet delivered.
+///
+/// The runtime loads with offline mode on, deliberately: a node must never
+/// fetch weights from the internet. In that mode swift-transformers resolves
+/// every file through a sidecar its own downloader writes - and we do not use
+/// its downloader, because the whole point is that weights arrive from the
+/// control plane, hashed and verified. So models transferred by the fleet were
+/// correct, complete, and unloadable, and the error named a shard rather than
+/// the missing metadata:
+///
+///     offlineModeError("Metadata not available for model-00004-of-00004.safetensors")
+struct LoadMetadataTests {
+    private func tempBase() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("dai-meta-\(UUID().uuidString)")
+    }
+
+    private func sha(_ data: Data) -> String {
+        var h = SHA256(); h.update(data: data)
+        return h.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func model(_ id: String, files: [(String, Data)]) -> ControlPlane.AssignedModel {
+        ControlPlane.AssignedModel(
+            id: id, runtime: "mlx", kind: "generate",
+            files: files.map { name, data in
+                ControlPlane.ModelFile(path: name, sizeBytes: data.count, sha256: sha(data))
+            })
+    }
+
+    /// Where HubApi looks: <repo>/.cache/huggingface/download/<path>.metadata
+    private func sidecar(_ base: URL, _ id: String, _ file: String) -> URL {
+        var dir = base.appendingPathComponent("models")
+        for part in id.split(separator: "/") { dir = dir.appendingPathComponent(String(part)) }
+        return dir.appendingPathComponent(".cache").appendingPathComponent("huggingface")
+            .appendingPathComponent("download").appendingPathComponent(file + ".metadata")
+    }
+
+    @Test("a fetched model gets the sidecar the loader reads")
+    func writesMetadataOnFetch() async throws {
+        let base = tempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let weights = Data("weights".utf8)
+
+        let cp = FakeControlPlane()
+        await cp.setAssigned([model("org/model", files: [("a.safetensors", weights)])])
+        await cp.setContents(["org/model/a.safetensors": weights])
+
+        let sync = ModelSync(controlPlane: cp, base: base,
+                             status: StatusPublisher(path: base.appendingPathComponent("s").path))
+        let outcome = await sync.sync(mayTransfer: true)
+        #expect(outcome.fetched == ["org/model"])
+
+        let path = sidecar(base, "org/model", "a.safetensors")
+        #expect(FileManager.default.fileExists(atPath: path.path))
+
+        // Three lines, in the order HubApi.readDownloadMetadata parses them:
+        // commit hash, etag, timestamp. The etag is the sha256, because offline
+        // resolution re-hashes any file whose etag looks like one - so this has
+        // to be the real hash or the check it feeds is worthless.
+        let lines = try String(contentsOf: path, encoding: .utf8)
+            .components(separatedBy: .newlines)
+        #expect(lines.count >= 3)
+        #expect(lines[1] == sha(weights))
+        #expect(Double(lines[2]) != nil)
+    }
+
+    @Test("a model held from before is repaired without fetching it again")
+    func repairsWithoutTransfer() async throws {
+        // The upgrade path, and the reason completeness does not simply require
+        // the sidecar: a node holding seventeen gigabytes correctly must not
+        // re-download them to gain a file of three lines.
+        let base = tempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let weights = Data("weights".utf8)
+        let m = model("org/model", files: [("a.safetensors", weights)])
+
+        // Lay the bytes down the way an older agent left them: no sidecar.
+        var dir = base.appendingPathComponent("models")
+        for part in "org/model".split(separator: "/") {
+            dir = dir.appendingPathComponent(String(part))
+        }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try weights.write(to: dir.appendingPathComponent("a.safetensors"))
+
+        let cp = FakeControlPlane()
+        await cp.setAssigned([m])
+        // Deliberately empty: any transfer at all would fail, which is how this
+        // proves the repair did not fetch.
+        await cp.setContents([:])
+
+        let sync = ModelSync(controlPlane: cp, base: base,
+                             status: StatusPublisher(path: base.appendingPathComponent("s").path))
+        let outcome = await sync.sync(mayTransfer: true)
+
+        #expect(outcome.repaired == ["org/model"])
+        #expect(outcome.fetched.isEmpty)
+        #expect(outcome.failed.isEmpty)
+        #expect(FileManager.default.fileExists(
+            atPath: sidecar(base, "org/model", "a.safetensors").path))
+    }
+
+    @Test("a model already holding its metadata is left alone")
+    func doesNotRepairTwice() async throws {
+        let base = tempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let weights = Data("weights".utf8)
+
+        let cp = FakeControlPlane()
+        await cp.setAssigned([model("org/model", files: [("a.safetensors", weights)])])
+        await cp.setContents(["org/model/a.safetensors": weights])
+        let sync = ModelSync(controlPlane: cp, base: base,
+                             status: StatusPublisher(path: base.appendingPathComponent("s").path))
+        _ = await sync.sync(mayTransfer: true)
+
+        let second = await sync.sync(mayTransfer: true)
+        #expect(second.repaired.isEmpty)
+        #expect(second.alreadyHeld == ["org/model"])
+    }
+}

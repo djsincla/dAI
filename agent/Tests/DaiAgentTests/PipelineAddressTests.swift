@@ -34,6 +34,39 @@ struct PipelineAddressTests {
         #expect(PipelineAddress.rank("en0") < PipelineAddress.rank("wat0"))
     }
 
+    @Test("a cabled bridge beats a virtual one")
+    func jumboFramesWin() {
+        // Real hardware found this immediately. rotorua has four bridges:
+        // bridge0 is the Thunderbolt link and bridge100/101/102 are
+        // virtualisation networks no peer can reach. Preferring the first
+        // bridge returned was right there by accident, and MTU is the property
+        // that actually separates them - Thunderbolt runs 9000, a virtual
+        // switch runs 1500.
+        let found = [("bridge100", "192.168.64.1"), ("bridge0", "192.168.99.1"),
+                     ("en0", "192.168.4.24")]
+        let mtu = ["bridge0": 9000, "bridge100": 1500, "en0": 1500]
+        #expect(PipelineAddress.ordered(found, mtu: mtu).first?.address == "192.168.99.1")
+    }
+
+    @Test("a bridge still beats Ethernet when nothing has jumbo frames")
+    func kindBeforeSize() {
+        let found = [("en0", "192.168.4.24"), ("bridge0", "192.168.99.1")]
+        let mtu = ["bridge0": 1500, "en0": 1500]
+        #expect(PipelineAddress.ordered(found, mtu: mtu).first?.address == "192.168.99.1")
+    }
+
+    @Test("the order does not depend on which interface was seen first")
+    func stableOrder() {
+        // The bug this replaces: getifaddrs order deciding what a machine
+        // advertises.
+        let mtu = ["bridge0": 9000, "bridge100": 1500]
+        let a = PipelineAddress.ordered(
+            [("bridge0", "1.1.1.1"), ("bridge100", "2.2.2.2")], mtu: mtu)
+        let b = PipelineAddress.ordered(
+            [("bridge100", "2.2.2.2"), ("bridge0", "1.1.1.1")], mtu: mtu)
+        #expect(a.map(\.address) == b.map(\.address))
+    }
+
     @Test("this machine advertises something a peer could dial")
     func findsSomething() {
         // Not asserting a particular address - it differs per machine - but a

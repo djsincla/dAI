@@ -1802,6 +1802,67 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '401': { $ref: '#/components/responses/Unauthorized' }
 
+  /admin/v1/pools/{poolId}/enabled:
+    parameters:
+      - name: poolId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      tags: [admin]
+      summary: Stand a group down, or bring it back
+      description: >
+        A disabled group keeps everything it was configured with and asserts
+        none of it: it decides nothing about what its machines serve, suspends
+        nobody from another group, hands out no work, and refuses on its own
+        socket. Its machines, its model and its port are all still there.
+
+        That is the difference from deleting it. A cluster group overrides the
+        harvest group it shares machines with, so the way to hand those machines
+        back - and let the harvest group's own model take effect - is to stand
+        the cluster group down, not to dismantle it and rebuild it from memory.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled: { type: boolean }
+      responses:
+        '200':
+          description: >
+            The new state, and which machines it affects. What those machines
+            serve next is usually the reason somebody pressed this, so it is
+            answered rather than left to be noticed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [name, enabled, machines]
+                properties:
+                  name: { type: string }
+                  enabled: { type: boolean }
+                  machines:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        hostname: { type: string }
+                        nowServes:
+                          type: string
+                          nullable: true
+                          description: >
+                            What this machine will take up now, given every
+                            group that is still asserting something. Null means
+                            nothing is deciding, which is not an instruction to
+                            unload.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
   /admin/v1/pools/{poolId}/socket:
     parameters:
       - name: poolId

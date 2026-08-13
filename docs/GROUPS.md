@@ -128,6 +128,31 @@ interface, for the reason given above: a group whose models are assigned, whose
 machines are holding them, and which nothing answers should not look like a
 working group.
 
+## Standing a group down
+
+**Built.** `PUT /admin/v1/pools/{id}/enabled` with `{enabled: false}`, and a
+"stand it down" control on the group's card.
+
+A disabled group keeps everything it was configured with and asserts none of it:
+it decides nothing about what its machines serve, suspends nobody from another
+group, hands out no work, is not counted when asking how many groups of a tier a
+machine is in, and refuses on its own socket with `group-disabled` rather than
+looking busy. Its machines, its model and its port are all still there.
+
+That is the difference from deleting it, and the reason it exists. A cluster
+group overrides the harvest group it shares machines with, so the way to hand
+those machines back for an evening - and let the harvest group's own model take
+effect - is to stand the cluster group down, not to dismantle it and rebuild it
+from memory tomorrow.
+
+The response says which machines are affected and what each will serve now,
+because that is the thing the operator actually wanted to know. The socket stays
+bound while disabled: a connection refused at the socket is indistinguishable
+from a control plane that has fallen over.
+
+Absent means enabled, so nothing that predates the column stands itself down by
+being read, and an upgrade cannot take a fleet out of service.
+
 ## The socket is routing, not permission
 
 The rule that has to hold, stated plainly because it is easy to lose:

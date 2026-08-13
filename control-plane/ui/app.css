@@ -718,3 +718,14 @@ th.sortable.desc::after { content: ' \2193'; opacity: 1; color: var(--accent); }
   color: var(--warn, #b8860b);
   border-color: color-mix(in srgb, var(--warn, #b8860b) 40%, transparent);
 }
+
+/* A group that has been stood down. Everything it has is still there and none
+   of it is in force, so the card reads as configuration rather than as capacity
+   that has gone missing. */
+.panel.group.stood-down { opacity: .62; }
+.panel.group.stood-down .panel-head h2::after {
+  content: ' (stood down)';
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 12px;
+}

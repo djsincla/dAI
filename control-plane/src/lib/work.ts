@@ -78,8 +78,11 @@ export async function leaseWork(
   // ids. Writing the same rule again as a SQL predicate would be two
   // implementations of one policy, and the copy that drifts is the one deciding
   // whether gang work lands on a preemptible machine.
+  // Disabled groups hand out no work. The configuration is kept and asserts
+  // nothing, which is the difference between standing a group down and deleting
+  // it.
   const { rows: allPools } = await db.query(
-    `SELECT id, name, tier, membership, serving_model_id FROM pools`)
+    `SELECT id, name, tier, membership, serving_model_id FROM pools WHERE enabled`)
   const mine = poolsFor(node, allPools as PoolSpec[])
   if (mine.length === 0) return { reason: 'no-pool' }
 

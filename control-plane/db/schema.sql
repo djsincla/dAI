@@ -65,7 +65,19 @@ CREATE TABLE IF NOT EXISTS pools (
     --
     -- Null for a group that predates this, which is reachable on the shared
     -- serving port and nowhere else until somebody gives it one.
-    serving_port int UNIQUE
+    serving_port int UNIQUE,
+    -- Whether this group makes any claim on its machines.
+    --
+    -- A disabled group keeps everything it was configured with and asserts none
+    -- of it: it decides nothing about what its machines serve, suspends nobody
+    -- from another group, hands out no work, and answers nothing on its socket.
+    --
+    -- That is what makes it useful rather than a slower delete. A cluster group
+    -- overrides the harvest group it shares machines with, so the way to hand
+    -- those machines back - and let the harvest group's own configuration take
+    -- effect - is to stand the cluster group down for a while, not to dismantle
+    -- it and rebuild it later from memory.
+    enabled boolean NOT NULL DEFAULT true
 );
 
 -- Pool-scoped role bindings. A group's role differs per pool, so membership is
@@ -484,6 +496,10 @@ ALTER TABLE nodes ADD COLUMN IF NOT EXISTS renew_requested_at timestamptz;
 -- handing a running group a new listener during a schema upgrade would bind
 -- sockets nobody asked for on a machine nobody was watching.
 ALTER TABLE pools ADD COLUMN IF NOT EXISTS serving_port int;
+-- Defaults to true, so every group that existed before this goes on asserting
+-- what it always did. An upgrade that quietly stood groups down would be an
+-- upgrade that took a fleet out of service.
+ALTER TABLE pools ADD COLUMN IF NOT EXISTS enabled boolean NOT NULL DEFAULT true;
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'pools_serving_port_key')

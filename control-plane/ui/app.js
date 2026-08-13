@@ -959,8 +959,8 @@ function renderGroups(nodes, pools, models) {
 
   const { groups, ungrouped } = groupMachines(nodes, pools, matchesGroup)
 
-  const card = (title, subtitle, members, poolId, warning, extra = '') => `
-    <section class="panel group" ${poolId ? `data-drop="${escape(poolId)}"` : ''}>
+  const card = (title, subtitle, members, poolId, warning, extra = '', off = false) => `
+    <section class="panel group${off ? ' stood-down' : ''}" ${poolId ? `data-drop="${escape(poolId)}"` : ''}>
       <div class="panel-head">
         <h2>${escape(title)}</h2>
         ${warning ? `<span class="triangle ${warning.level}"
@@ -997,8 +997,18 @@ function renderGroups(nodes, pools, models) {
       <button class="link" data-socket="${escape(g.pool.id)}"
               title="Give this group a port of its own, so clients can address it directly"
               >give it a socket</button>`
-    return card(g.pool.name, `${g.pool.tier} tier, ${mode}${at}`, g.nodes, g.pool.id,
-                warning, socket)
+    // Standing a group down keeps everything it has and asserts none of it,
+    // which is how its machines are handed back without dismantling the group.
+    const off = g.pool.enabled === false
+    const stand = `<button class="link" data-enabled="${escape(g.pool.id)}"
+              data-to="${off ? 'true' : 'false'}"
+              title="${off
+                ? 'Bring this group back: it starts deciding what its machines serve again'
+                : 'Stand this group down: it keeps its machines, model and socket, and asserts none of them'}"
+              >${off ? 'bring it back' : 'stand it down'}</button>`
+    const state = off ? 'stood down, ' : ''
+    return card(g.pool.name, `${state}${g.pool.tier} tier, ${mode}${at}`, g.nodes, g.pool.id,
+                warning, socket + stand, off)
   }).join('') + (ungrouped.length > 0
     ? card('In no group', 'not scheduled by any pool, and holding no assigned models',
       ungrouped, null, null)
@@ -1007,6 +1017,24 @@ function renderGroups(nodes, pools, models) {
   // Groups made before sockets existed. Asked for rather than backfilled: the
   // schema will not open ports nobody requested during an upgrade, so somebody
   // has to say so once per group.
+  box.querySelectorAll('[data-enabled]').forEach((btn) =>
+    btn.addEventListener('click', async (ev) => {
+      ev.stopPropagation()
+      btn.disabled = true
+      try {
+        const to = btn.dataset.to === 'true'
+        const said = await api(`/pools/${btn.dataset.enabled}/enabled`,
+                               { method: 'PUT', body: JSON.stringify({ enabled: to }) })
+        // What the machines do next, which is the reason somebody pressed it.
+        const moved = (said.machines ?? [])
+          .map((m) => `${m.hostname} now serves ${
+            m.nowServes ? m.nowServes.split('/').pop() : 'nothing'}`)
+          .join('; ')
+        toast(`${said.name} ${to ? 'is back' : 'stood down'}${moved ? `: ${moved}` : ''}`)
+        refresh()
+      } catch (err) { btn.disabled = false; toast(err.message, true) }
+    }))
+
   box.querySelectorAll('[data-socket]').forEach((btn) =>
     btn.addEventListener('click', async (ev) => {
       ev.stopPropagation()

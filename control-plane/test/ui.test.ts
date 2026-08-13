@@ -10,7 +10,7 @@ import {
   TIERS, describeTier, inBothTiers, tierMachines, tiersAfter, tiersOf,
   attentionItems, capacityOf, copyState, distributionOf, humanBytes, importCost,
   bucketFor, certificateStanding, clampWindow, effectiveModelFor, groupMismatches,
-  suspensionNote, describeWindow, groupMachines, groupMismatches,
+  suspensionNote, describeWindow, groupMachines,
   groupMode, groupWarning, importProgress, isStale, isSynthetic, kindsFor,
   machinesThatCouldHold, matchesQuery, MAX_WINDOW_S, MIN_WINDOW_S, nextSort,
   pauseAction, progressOf, runsGpu, servingFor, sortRows, windowFromDrag,

@@ -489,7 +489,7 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
     // survives contact with a single machine.
     const { rows: pools } = await db.query(
       `SELECT id, name, tier, membership, serving_model_id FROM pools
-        WHERE serving_model_id IS NOT NULL`)
+        WHERE serving_model_id IS NOT NULL AND enabled`)
     const servingModel = effectiveModel(node as never, (pools as any[]).map((p) => ({
       ...p, servingModelId: p.serving_model_id as string,
     })) as never)

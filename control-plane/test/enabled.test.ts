@@ -1,0 +1,172 @@
+import type { Server } from 'node:http'
+import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest'
+import type { Db } from '../src/lib/db.js'
+import { type Fixtures, appFor, freshDb, seed, setPresence } from './helpers.js'
+import { active, effectiveModel, type Group } from '../src/lib/groupRules.js'
+import { suspensionFor } from '../src/lib/suspension.js'
+
+/**
+ * Standing a group down.
+ *
+ * A disabled group keeps its machines, its model and its socket, and asserts
+ * none of them. That is the whole difference from deleting it: a cluster group
+ * overrides the harvest group it shares machines with, so the way to hand those
+ * machines back for an evening - and let the harvest group's own model take
+ * effect - is to stand the cluster group down, not to dismantle it and rebuild
+ * it from memory tomorrow.
+ */
+const node = (hostname: string) => ({
+  id: hostname, hostname, tier: 'cluster', chip: 'Apple M2 Max', memory_gb: 64,
+})
+const group = (name: string, tier: string, servingModelId: string | null,
+               enabled = true): Group =>
+  ({ id: name, name, tier, membership: {}, servingModelId, enabled } as unknown as Group)
+
+describe('a group that has been stood down', () => {
+  it('stops deciding what its machines serve', () => {
+    const harvest = group('overnight', 'harvest', 'qwen3-30b')
+    const cluster = group('split-cluster', 'cluster', 'qwen2.5-14b', false)
+    // The point of the feature: with the cluster group disabled the harvest
+    // group's own model is what the machine takes up.
+    expect(effectiveModel(node('rotorua'), [harvest, cluster])).toBe('qwen3-30b')
+  })
+
+  it('goes back to deciding when it is brought back', () => {
+    const harvest = group('overnight', 'harvest', 'qwen3-30b')
+    const cluster = group('split-cluster', 'cluster', 'qwen2.5-14b', true)
+    expect(effectiveModel(node('rotorua'), [harvest, cluster])).toBe('qwen2.5-14b')
+  })
+
+  it('suspends nobody', () => {
+    // A disabled cluster group is not running a split, so its machines are not
+    // holding half of one and are available to harvest again.
+    const groups = [group('overnight', 'harvest', null),
+                    group('split-cluster', 'cluster', 'big-72b', false)]
+    expect(suspensionFor(node('rotorua'), groups, () => 2)).toBe(null)
+  })
+
+  it('is not counted when asking how many groups a machine is in', () => {
+    // Standing a group down has to actually free its machines, including from
+    // the rule about how many groups of a tier they may be in.
+    expect(active([group('a', 'cluster', null, false),
+                   group('b', 'cluster', null)]).map((g) => g.name)).toEqual(['b'])
+  })
+
+  it('treats a group that has never heard of this as enabled', () => {
+    // Absent means enabled, so nothing that predates the column stands itself
+    // down by being read.
+    const legacy = { id: 'x', name: 'x', tier: 'harvest', membership: {},
+                     servingModelId: 'm' } as unknown as Group
+    expect(active([legacy])).toHaveLength(1)
+  })
+})
+
+let db: Db
+let fx: Fixtures
+let server: Server
+let base: string
+
+beforeEach(async () => {
+  // Its own range: these bind real sockets, and a control plane running on the
+  // same machine holds the bottom of the default one for its own groups.
+  process.env.DAI_GROUP_PORT_RANGE = '9500-9539'
+  db = await freshDb()
+  fx = await seed(db)
+  const app = appFor(db)
+  server = await new Promise<Server>((resolve) => {
+    const s = app.listen(0, () => resolve(s))
+  })
+  base = `http://127.0.0.1:${(server.address() as any).port}`
+  await db.query(`UPDATE role_bindings SET role = 'admin' WHERE pool_id = $1`, [fx.poolId])
+})
+afterEach(async () => {
+  await new Promise<void>((resolve) => server.close(() => resolve()))
+  delete process.env.DAI_GROUP_PORT_RANGE
+})
+afterAll(async () => { await db?.end() })
+
+const asNode = (fp: string) => ({ 'x-node-fingerprint': fp, 'content-type': 'application/json' })
+const asUser = (id: string) => ({ authorization: `Bearer ${id}`, 'content-type': 'application/json' })
+
+describe('standing a group down over HTTP', () => {
+  const disable = (poolId: string, enabled: boolean) =>
+    fetch(`${base}/admin/v1/pools/${poolId}/enabled`, {
+      method: 'PUT', headers: asUser(fx.operatorToken),
+      body: JSON.stringify({ enabled }),
+    })
+
+  it('says which machines it affects and what they will serve instead', async () => {
+    // The operator pressed this to get machines back; what those machines do
+    // next is the thing they actually wanted to know.
+    await db.query(
+      `INSERT INTO models (id, runtime, kind, size_bytes) VALUES ('org/harvest','mlx','generate',1)
+       ON CONFLICT DO NOTHING`)
+    await db.query(`UPDATE pools SET serving_model_id = 'org/harvest' WHERE id = $1`, [fx.poolId])
+
+    const r = await disable(fx.poolId, false)
+    const body = await r.json() as any
+    expect(r.status).toBe(200)
+    expect(body.enabled).toBe(false)
+    expect(body.machines[0].hostname).toBe('rotorua')
+    // Nothing is left deciding, so the machine is told nothing rather than told
+    // to keep serving what a stood-down group asked for.
+    expect(body.machines[0].nowServes).toBe(null)
+  })
+
+  it('stops handing out work, and starts again when brought back', async () => {
+    await setPresence(db, fx.nodeId, 'ABSENT')
+    const job = async () => {
+      const r = await fetch(`${base}/admin/v1/jobs`, {
+        method: 'POST', headers: asUser(fx.operatorToken),
+        body: JSON.stringify({ poolId: fx.poolId, kind: 'embed', items: [{ text: 'hi' }] }),
+      })
+      expect(r.status).toBe(201)
+    }
+    const ask = async () => (await fetch(`${base}/agent/v1/work?kinds=embed`,
+      { headers: asNode(fx.fingerprint) })).json() as any
+
+    await job()
+    expect(await ask()).toHaveProperty('unitId')
+
+    await job()
+    await disable(fx.poolId, false)
+    // No pool will have this machine while its only group is standing down.
+    expect(await ask()).toEqual({ reason: 'no-pool' })
+
+    await disable(fx.poolId, true)
+    expect(await ask()).toHaveProperty('unitId')
+  })
+
+  it('refuses on its own socket rather than looking busy', async () => {
+    // A caller told the fleet is busy waits for capacity that is not coming
+    // back on its own. The listener stays bound, because a refused connection
+    // is indistinguishable from a control plane that has fallen over.
+    const made = await (await fetch(`${base}/admin/v1/pools`, {
+      method: 'POST', headers: asUser(fx.ownerToken),
+      body: JSON.stringify({ name: 'standing-down' }),
+    })).json() as any
+    await db.query(`UPDATE pools SET enabled = false WHERE id = $1`, [made.id])
+
+    const port = made.servingPort as number
+    const app = appFor(db)
+    const listener = await new Promise<Server>((resolve) => {
+      const s = app.listen(port, () => resolve(s))
+    })
+    const r = await fetch(`http://127.0.0.1:${port}/v1/models`,
+                          { headers: asUser(fx.ownerToken) })
+    const body = await r.json() as any
+    await new Promise<void>((resolve) => listener.close(() => resolve()))
+
+    expect(r.status).toBe(503)
+    expect(body.error.code).toBe('group-disabled')
+    expect(body.error.message).toContain('standing-down')
+  })
+
+  it('refuses a value that is not a decision', async () => {
+    const r = await fetch(`${base}/admin/v1/pools/${fx.poolId}/enabled`, {
+      method: 'PUT', headers: asUser(fx.operatorToken),
+      body: JSON.stringify({ enabled: 'maybe' }),
+    })
+    expect(r.status).toBe(400)
+  })
+})

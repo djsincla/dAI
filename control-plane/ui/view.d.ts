@@ -130,3 +130,4 @@ export function certificateStanding(node: any, now?: number): {
   canAsk: boolean
   detail: string
 }
+export function suspensionNote(node: any): string | null

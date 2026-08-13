@@ -9,7 +9,7 @@ import {
 import {
   TIERS, describeTier, inBothTiers, tierMachines, tiersAfter, tiersOf,
   attentionItems, capacityOf, copyState, distributionOf, humanBytes, importCost,
-  bucketFor, certificateStanding, clampWindow, describeWindow, groupMachines, groupMismatches,
+  bucketFor, certificateStanding, clampWindow, suspensionNote, describeWindow, groupMachines, groupMismatches,
   groupMode, groupWarning, importProgress, isStale, isSynthetic, kindsFor,
   machinesThatCouldHold, matchesQuery, MAX_WINDOW_S, MIN_WINDOW_S, nextSort,
   pauseAction, progressOf, runsGpu, servingFor, sortRows, windowFromDrag,
@@ -971,5 +971,52 @@ describe('what the fleet view says about a certificate', () => {
     // Still offerable: not knowing when a certificate expires is a reason to
     // renew it, not a reason to withhold the only control that would.
     expect(c.canAsk).toBe(true)
+  })
+})
+
+/**
+ * A machine that is idle because it is holding half a model.
+ *
+ * It is active, unpaused, healthy and taking no work, which is what a machine
+ * with nothing to do looks like. The fleet view has to tell them apart, because
+ * one of them is a problem and the other is the system working.
+ */
+describe('what the fleet view says about a suspended machine', () => {
+  const held = (over: Record<string, unknown> = {}) => ({
+    id: 'n1', hostname: 'rotorua', state: 'active', tier: 'cluster',
+    presenceState: 'ABSENT', userPaused: false, models: [], serving: false, inFlight: 0,
+    suspended: {
+      modelId: 'mlx-community/Qwen2.5-72B-Instruct-4bit', machines: 2,
+      by: 'split-cluster', from: ['overnight-harvest'],
+    },
+    ...over,
+  }) as any
+
+  it('offers it no work, however healthy it looks', () => {
+    // Locked, on power, nothing wrong with it - and still not available. Listing
+    // what it could run would read as capacity the scheduler is failing to use.
+    expect(kindsFor(held({ presenceState: 'LOCKED' }))).toEqual([])
+  })
+
+  it('says what it is holding, for whom, and what lost it', () => {
+    const note = suspensionNote(held())
+    expect(note).toContain('Qwen2.5-72B-Instruct-4bit')
+    expect(note).toContain('across 2 machines')
+    expect(note).toContain('split-cluster')
+    // The group that gave the machine up is named, because that is the capacity
+    // an operator is missing and the place they will go looking.
+    expect(note).toContain('overnight-harvest')
+  })
+
+  it('still says so for a machine in no harvest group', () => {
+    // Nothing is lost, so nothing is named - but the machine is still explained.
+    const note = suspensionNote(held({ suspended: {
+      modelId: 'big-72b', machines: 2, by: 'split-cluster', from: [] } }))
+    expect(note).toContain('big-72b')
+    expect(note).not.toContain('not available to')
+  })
+
+  it('says nothing about a machine that is simply idle', () => {
+    expect(suspensionNote(held({ suspended: null }))).toBe(null)
   })
 })

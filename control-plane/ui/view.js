@@ -34,6 +34,11 @@ export function runsGpu(node) {
  */
 export function kindsFor(node) {
   if (node.state !== 'active' || node.userPaused) return []
+  // A machine holding part of a split model is not available to harvest, so it
+  // is offered nothing here however healthy it looks. Showing the kinds it
+  // could run would make it read as spare capacity the scheduler is failing to
+  // use, which is the opposite of what is happening.
+  if (node.suspended) return []
   // No render. The work kind exists in the schema and the scheduler understands
   // it, but no agent implements it and none advertises it, so listing it here
   // told a reader the fleet could do something it cannot. The fleet view has to
@@ -1006,4 +1011,26 @@ export function certificateStanding(node, now = Date.now()) {
       : expired ? 'expired; this machine has to be re-enrolled'
         : `${days} days`,
   }
+}
+
+/**
+ * Why a machine is idle, when the reason is not idleness.
+ *
+ * A machine holding part of a split model looks exactly like a quiet one: it is
+ * active, unpaused, healthy, and taking no work. The difference is that it is
+ * doing precisely what it was told to, and there is nothing to fix - so the
+ * fleet view has to say which, or an operator spends the evening looking for a
+ * fault that does not exist.
+ *
+ * Returns null for every machine that is genuinely just idle, which is nearly
+ * all of them.
+ */
+export function suspensionNote(node) {
+  const s = node.suspended
+  if (!s) return null
+  const model = String(s.modelId).split('/').pop()
+  const from = (s.from ?? []).length > 0
+    ? ` (not available to ${s.from.join(' or ')})`
+    : ''
+  return `holding part of ${model} across ${s.machines} machines for ${s.by}${from}`
 }

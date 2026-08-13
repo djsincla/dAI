@@ -709,3 +709,12 @@ th.sortable.desc::after { content: ' \2193'; opacity: 1; color: var(--accent); }
   color: var(--warn-fg);
   font-variant-numeric: tabular-nums;
 }
+
+/* A machine held out of harvesting because its cluster group is serving a split
+   model. Amber rather than red: nothing is wrong, but the capacity is gone and
+   the fleet view should not read as though it were available. */
+.kind.suspended {
+  background: color-mix(in srgb, var(--warn, #b8860b) 18%, transparent);
+  color: var(--warn, #b8860b);
+  border-color: color-mix(in srgb, var(--warn, #b8860b) 40%, transparent);
+}

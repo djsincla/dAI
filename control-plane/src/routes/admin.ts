@@ -324,7 +324,7 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
               owner_user_id, presence_state, on_ac_power, thermal_ok,
               last_heartbeat, capability_profiles, allowed_cidrs,
               user_paused, user_paused_at, agent_version, agent_fingerprint,
-              model_sync_faults, last_model_sync
+              model_sync_faults, last_model_sync, cert_not_after, renew_requested_at
          FROM nodes WHERE id = $1`, [nodeId])
     if (rows.length === 0) { res.status(404).json({ error: 'not_found' }); return }
     const n = rows[0] as any
@@ -354,6 +354,14 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
       // every node reported the same placeholder.
       agentVersion: n.agent_version ?? null,
       agentFingerprint: n.agent_fingerprint ?? null,
+      // When this node's certificate stops working, and whether somebody has
+      // already asked for a new one. Both are here because the renewal control
+      // is useless without them: a button with no expiry beside it invites
+      // pressing it to find out, and one that does not show an outstanding
+      // request invites pressing it again every time the page is opened.
+      certNotAfter: n.cert_not_after ? new Date(n.cert_not_after).toISOString() : null,
+      renewRequestedAt: n.renew_requested_at
+        ? new Date(n.renew_requested_at).toISOString() : null,
       syncFaults: n.model_sync_faults ?? {},
       lastModelSync: n.last_model_sync,
       memoryGb: n.memory_gb === null ? null : Number(n.memory_gb),

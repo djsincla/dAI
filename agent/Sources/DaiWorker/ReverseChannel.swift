@@ -20,7 +20,7 @@ import Foundation
 /// honest about what it can serve and to release the model the moment its
 /// presence state stops permitting GPU work.
 public actor ReverseChannel {
-    private let controlPlane: any ControlPlaneClient
+    private var controlPlane: any ControlPlaneClient
     private let gpu: MLXRuntime?
     private let source: SignalSource
     private let monitor: PresenceMonitor
@@ -54,7 +54,7 @@ public actor ReverseChannel {
     /// The other end of a split is a node, and pinning the wrong root fails the
     /// handshake with "unknown CA" - which reads as a broken network rather
     /// than the wrong trust anchor.
-    private let splitIdentity: (identity: NodeIdentity, peerCAPEM: String)?
+    private var splitIdentity: (identity: NodeIdentity, peerCAPEM: String)?
 
     public init(controlPlane: any ControlPlaneClient, gpu: MLXRuntime?,
                 source: SignalSource = MacSignalSource(),
@@ -75,6 +75,41 @@ public actor ReverseChannel {
 
     public func setCluster(_ isCluster: Bool) {
         self.isCluster = isCluster
+    }
+
+    /// Start presenting a renewed certificate.
+    ///
+    /// The batch loop owns renewal and this one does not, but they are two
+    /// loops in one process holding two references to the same identity. The
+    /// first renewal on real hardware showed what that costs: the batch loop
+    /// swapped its client and carried on, and this loop went on presenting the
+    /// certificate the control plane had just retired, reconnecting every five
+    /// seconds to be told "unknown certificate" - for as long as the process
+    /// lived, since nothing here ever reloads.
+    ///
+    /// Both credentials, because renewal replaces both. The node certificate is
+    /// also what this machine joins a split with, and a node acquires its node
+    /// CA by renewing - so a machine that could not join a split before the
+    /// renewal can afterwards, and only if it is told.
+    public func adopt(controlPlane: any ControlPlaneClient,
+                      splitIdentity: (identity: NodeIdentity, peerCAPEM: String)?) {
+        self.controlPlane = controlPlane
+        // Kept rather than cleared when the new one is nil. Losing the ability
+        // to join a split because a reload failed is worse than running on the
+        // previous credential, which is still valid until it expires.
+        if let splitIdentity { self.splitIdentity = splitIdentity }
+        log("now presenting the renewed certificate")
+    }
+
+    /// What this loop is presenting, and what it would join a split with.
+    ///
+    /// Reachable only from a test. The loop touches its client nowhere a test
+    /// can see without a GPU on the machine - it refuses to connect at all when
+    /// there is none - so proving that a renewal actually landed here needs a
+    /// way to ask.
+    func presenting() -> (client: any ControlPlaneClient,
+                          split: (identity: NodeIdentity, peerCAPEM: String)?) {
+        (controlPlane, splitIdentity)
     }
 
     private func log(_ message: String) {

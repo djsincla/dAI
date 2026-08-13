@@ -122,3 +122,11 @@ export function surfaceOf(path: string): string
 export function resolveRef(spec: any, schema: any, seen?: Set<any>): any
 export function responseSize(bytes: number): string
 export function statusTone(status: number): string
+export function certificateStanding(node: any, now?: number): {
+  days: number | null
+  expired: boolean
+  asked: string | null
+  state: 'unknown' | 'expired' | 'expiring' | 'valid'
+  canAsk: boolean
+  detail: string
+}

@@ -245,6 +245,43 @@ struct RenewOnRequestTests {
         #expect(await renewer.askedCount() > 0, "the loop should have renewed on request")
     }
 
+    /// The bug the first real renewal caused.
+    ///
+    /// Two loops share one process and one certificate. The batch loop renews
+    /// and swaps its own client; the serving loop went on presenting the
+    /// certificate that had just been retired, and was refused every five
+    /// seconds until somebody restarted the daemon. A renewal that breaks
+    /// serving is worse than no renewal.
+    @Test("a renewal is handed to whatever else is holding the old certificate")
+    func renewalIsHandedOn() async throws {
+        let replacement = FakeControlPlane()
+        let renewer = RenewalLoopTests.Fixed(replacement: replacement, due: false)
+        let cp = FakeControlPlane()
+        await cp.setDirectives(.init(renewRequested: true))
+
+        let told = Handover()
+        let worker = Worker(controlPlane: cp, source: FixedSignals.present(),
+                            renewer: renewer,
+                            onRenewed: { client in await told.set(client) },
+                            promoteAfter: 0)
+        await worker.run(maxSeconds: 1.5)
+
+        // Identity rather than a count: handing on the wrong client would leave
+        // the other loop exactly as broken as handing on nothing.
+        #expect(await told.isSame(as: replacement),
+                "the other loop should have been given the new client")
+    }
+
+    /// Records what the worker handed on, since a closure cannot hold state.
+    actor Handover {
+        private var client: (any ControlPlaneClient)?
+        func set(_ c: any ControlPlaneClient) { client = c }
+        func isSame(as other: AnyObject) -> Bool {
+            guard let client = client as AnyObject? else { return false }
+            return client === other
+        }
+    }
+
     @Test("no request leaves the clock in charge")
     func unaskedUsesTheClock() async throws {
         let renewer = RenewalLoopTests.Fixed(replacement: FakeControlPlane(), due: false)

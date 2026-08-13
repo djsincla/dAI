@@ -966,3 +966,44 @@ export function statusTone(status) {
   if (status >= 500) return 'bad'
   return 'flat'
 }
+
+/**
+ * Where a node's certificate stands, and whether asking for a new one is worth
+ * offering.
+ *
+ * The renewal control cannot be a plain button. A node's key lives in the
+ * Secure Enclave and signs only inside the launchd daemon, so the request rides
+ * the heartbeat the node already sends: nothing happens the moment it is
+ * pressed, and a node that is asleep acts on it when it next reports in. That
+ * makes two states worth distinguishing from "no".
+ *
+ * **Already asked.** The flag is set and cleared by the node, not by a timer,
+ * so a second press changes nothing. Showing when it was asked says the request
+ * is standing rather than lost, which is the difference between waiting and
+ * pressing the button again every time the drawer is opened.
+ *
+ * **Expired.** An expired certificate cannot authenticate, so the node cannot
+ * heartbeat, so it can never be told to renew. Offering the control there is
+ * offering something that provably will not work - that machine needs
+ * re-enrolling, and saying so is the only useful answer.
+ */
+export function certificateStanding(node, now = Date.now()) {
+  const at = node.certNotAfter ? Date.parse(node.certNotAfter) : NaN
+  const known = Number.isFinite(at)
+  const days = known ? Math.floor((at - now) / 86_400_000) : null
+  const expired = known && at <= now
+  const asked = node.renewRequestedAt ?? null
+  return {
+    days,
+    expired,
+    asked,
+    // Warned rather than merely counted: renewal happens on its own at two
+    // thirds of life, so a certificate inside a week of expiry means the
+    // automatic path has not run and somebody should look.
+    state: !known ? 'unknown' : expired ? 'expired' : days < 7 ? 'expiring' : 'valid',
+    canAsk: !asked && !expired,
+    detail: !known ? 'expiry unknown'
+      : expired ? 'expired; this machine has to be re-enrolled'
+        : `${days} days`,
+  }
+}

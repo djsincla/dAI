@@ -410,10 +410,33 @@ case "work":
             print("no renderer on this machine; render work will not be offered")
         }
 
+        // The serving loop, when there is one, so a renewal can be handed to it.
+        // Declared before the worker because the worker's renewal callback
+        // closes over it, and assigned below once the runtime is known.
+        let serving = ServingHandle()  // see the type below
+
         let worker = Worker(controlPlane: cp, gpu: gpu, ane: ane,
                             status: status, modelSync: modelSync,
                             renderer: renderer, scenes: scenes, attachments: attachments,
                             renewer: renewer,
+                            onRenewed: { replacement in
+                                // Read from disk rather than passed along: the
+                                // renewal has just written both files, and this
+                                // is the one place that knows where enrolment
+                                // put them. A node that had no node CA before
+                                // renewing has one now, which is the whole
+                                // reason an operator asks for a renewal.
+                                let identity = try? NodeIdentity.load(
+                                    certificate: dir.appendingPathComponent("node.crt"),
+                                    enclaveKey: Enroll.keyPath(dir))
+                                let peerCA = try? String(
+                                    contentsOf: dir.appendingPathComponent("node-ca.crt"),
+                                    encoding: .utf8)
+                                let credentials = (identity != nil && peerCA != nil)
+                                    ? (identity: identity!, peerCAPEM: peerCA!) : nil
+                                await serving.get()?.adopt(controlPlane: replacement,
+                                                           splitIdentity: credentials)
+                            },
                             promoteAfter: promote)
 
         // Batch and serving run side by side in one process, because a node
@@ -443,6 +466,7 @@ case "work":
                 await channel.setCluster(me.isCluster)
                 await worker.setCluster(me.isCluster)
             }
+            await serving.set(channel)
             Task { await channel.run(maxSeconds: seconds) }
         }
 
@@ -757,4 +781,18 @@ case "qos":
 default:
     print("usage: dai-agent [pause|resume|preflight|presence|verify-ane <model>|generate|enroll|status|timing|lease-probe|work|serve|qos]")
     exit(2)
+}
+
+
+/// A place to put the serving loop so the batch loop can reach it.
+///
+/// The two loops are built in the wrong order for a direct reference: the
+/// worker's renewal callback has to exist before the worker does, and the
+/// serving channel is only built afterwards and only on a machine with a GPU.
+/// An actor rather than a variable because the callback runs on whichever loop
+/// renewed, and this is shared mutable state between them.
+actor ServingHandle {
+    private var channel: ReverseChannel?
+    func set(_ channel: ReverseChannel) { self.channel = channel }
+    func get() -> ReverseChannel? { channel }
 }

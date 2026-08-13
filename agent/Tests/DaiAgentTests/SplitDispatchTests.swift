@@ -80,3 +80,34 @@ struct SplitDispatchTests {
         }
     }
 }
+
+/// Handing a renewed certificate to the loop that does not own renewal.
+///
+/// The serving loop holds its own client and its own split credentials, both
+/// loaded once when the daemon started. Renewal replaces both on disk, and
+/// without this the loop goes on presenting a certificate the control plane has
+/// retired - refused every five seconds, for as long as the process lives.
+struct ServingRenewalTests {
+    @Test("the serving loop starts presenting the new certificate")
+    func adoptsTheReplacement() async throws {
+        let first = FakeControlPlane(), second = FakeControlPlane()
+        let channel = ReverseChannel(controlPlane: first, gpu: nil)
+        #expect(await (channel.presenting().client as AnyObject) === first)
+
+        await channel.adopt(controlPlane: second,
+                            splitIdentity: (identity: NodeIdentity, peerCAPEM: String)?.none)
+        #expect(await (channel.presenting().client as AnyObject) === second)
+    }
+
+    @Test("a renewal that brought no credentials leaves the old ones in place")
+    func keepsCredentialsItCannotReplace() async throws {
+        // Nil means the reload failed, not that this machine has stopped being
+        // able to join a split. The previous credential is valid until it
+        // expires, and dropping it would take the node out of every gang for a
+        // reason nobody could see.
+        let channel = ReverseChannel(controlPlane: FakeControlPlane(), gpu: nil)
+        await channel.adopt(controlPlane: FakeControlPlane(),
+                            splitIdentity: (identity: NodeIdentity, peerCAPEM: String)?.none)
+        #expect(await channel.presenting().split == nil)
+    }
+}

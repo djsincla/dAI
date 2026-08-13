@@ -2750,6 +2750,28 @@ components:
             files:
               type: array
               items: { $ref: '#/components/schemas/ModelFile' }
+            runnableIn:
+              type: array
+              description: >
+                Which groups could actually run this model. Holding is a
+                property of a machine; running is a property of a group -
+                enough machines, each big enough, each holding the weights.
+
+
+                `pending` and `blocked` are separated deliberately: a group
+                still fetching needs only time, and one whose machines are too
+                small never will. A single "no" sends somebody to wait for what
+                is not coming, or to reassign what was about to work.
+              items:
+                type: object
+                required: [groupId, name, tier, machines, state]
+                properties:
+                  groupId: { type: string, format: uuid }
+                  name: { type: string }
+                  tier: { type: string, enum: [harvest, cluster] }
+                  machines: { type: integer }
+                  state: { type: string, enum: [ready, pending, blocked] }
+                  detail: { type: string, nullable: true }
             history:
               type: array
               description: >

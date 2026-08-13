@@ -18,7 +18,10 @@ import Testing
 /// These tests are therefore skipped under SwiftPM and run under xcodebuild,
 /// which does produce the bundle. Detected by looking for it rather than by
 /// trying a call, because there would be nothing to catch.
-private let metalAvailable: Bool = {
+///
+/// Not private: the split's failure tests need the same gate, and two copies of
+/// this would drift the moment one of them was fixed.
+let metalAvailable: Bool = {
     // Searched across the loaded bundles rather than next to argv[0]. Under
     // xctest argv[0] is the runner, not the build products directory, so the
     // obvious check skipped these tests everywhere including where they should

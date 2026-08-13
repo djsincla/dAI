@@ -57,6 +57,8 @@ let package = Package(
             dependencies: ["DaiAgent", "DaiWorker"]
         ),
         .executableTarget(name: "DaiMenuBar", dependencies: ["DaiAgent"]),
-        .testTarget(name: "DaiAgentTests", dependencies: ["DaiAgent", "DaiWorker"]),
+        .testTarget(name: "DaiAgentTests",
+                    dependencies: ["DaiAgent", "DaiWorker",
+                                   .product(name: "MLXLLM", package: "mlx-swift-examples")]),
     ]
 )

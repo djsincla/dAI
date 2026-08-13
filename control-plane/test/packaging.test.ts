@@ -676,3 +676,29 @@ describe('installing over an existing install', () => {
     expect(install).toMatch(/already in place/)
   })
 })
+
+/**
+ * Running the installed copy of install.sh by hand.
+ *
+ * The postinstall passes --build explicitly, so the packaged path always
+ * worked. A person running /usr/local/libexec/dai/install.sh themselves got the
+ * source-tree default instead and was told to run xcodebuild - on a machine
+ * that has no source tree. The binaries were sitting beside the script.
+ */
+describe('finding the binaries', () => {
+  const install = readFileSync(
+    join(process.cwd(), '..', 'agent', 'packaging', 'install.sh'), 'utf8')
+
+  it('looks beside itself before falling back to the source tree', () => {
+    const at = install.indexOf('BUILD_OVERRIDE:-')
+    // Asserted, because indexOf returning -1 makes slice() hand back the last
+    // character and every check below then passes against nothing.
+    expect(at, 'the build-path block moved or was renamed').toBeGreaterThan(0)
+    const block = install.slice(at, at + 400)
+    expect(block).toMatch(/-x "\$HERE\/dai-agent"/)
+    expect(block).toMatch(/BUILD="\$HERE"/)
+    // The override still wins, because a build host installing what it just
+    // compiled is the other real case.
+    expect(block.indexOf('BUILD_OVERRIDE')).toBeLessThan(block.indexOf('$HERE/dai-agent'))
+  })
+})

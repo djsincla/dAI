@@ -158,11 +158,27 @@ class Gateway:
             return payload
         message = self._message(payload) or f"HTTP {status}"
         if status == 503:
-            raise NoCapacity(status, payload,
-                f"No node can take this {what} right now: {message}\n"
-                "  This is the fleet working as intended. Harvest nodes yield to\n"
-                "  whoever is sitting at them, so during working hours there may\n"
-                "  genuinely be no capacity. Try again when the desks are empty.")
+            # 503 covers two different things and they need different reactions.
+            # A fleet with no free machine is working as designed and the answer
+            # is to come back later. A node that failed to load a model is
+            # broken and no amount of waiting fixes it - and printing the
+            # reassuring explanation over that error is how a real fault reads
+            # as normal operation for an hour.
+            capacity = any(phrase in (message or "").lower() for phrase in (
+                "no active nodes", "every node", "busy", "no capacity",
+                "user present", "in use",
+            ))
+            if capacity:
+                raise NoCapacity(status, payload,
+                    f"No node can take this {what} right now: {message}\n"
+                    "  This is the fleet working as intended. Harvest nodes yield to\n"
+                    "  whoever is sitting at them, so during working hours there may\n"
+                    "  genuinely be no capacity. Try again when the desks are empty.")
+            raise GatewayError(status, payload,
+                f"A node accepted this {what} and then failed it: {message}\n"
+                "  This is not a busy fleet; something is wrong on the machine\n"
+                "  that took the request. Check that node's log:\n"
+                "    /var/log/dai/agent.log")
         if status in (401, 403):
             raise GatewayError(status, payload,
                 f"The gateway refused the credential ({status}): {message}\n"

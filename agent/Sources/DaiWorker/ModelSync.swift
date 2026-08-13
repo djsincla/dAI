@@ -51,6 +51,9 @@ public actor ModelSync {
     public struct Outcome: Sendable, Equatable {
         public var fetched: [String] = []
         public var alreadyHeld: [String] = []
+        /// Held already, but missing the metadata the loader needs, and fixed
+        /// without a transfer.
+        public var repaired: [String] = []
         public var failed: [String: String] = [:]
         public var skipped: String?
     }
@@ -89,6 +92,21 @@ public actor ModelSync {
         for model in assigned {
             let dir = directory(for: model)
             if isComplete(model: model, in: dir) {
+                // The bytes are here. The sidecars may not be, on any node that
+                // fetched this model before they were written, and without them
+                // the runtime cannot load what the node correctly holds. Writing
+                // them costs nothing and needs no transfer, so it is repaired in
+                // place rather than by re-fetching gigabytes that are already
+                // right.
+                if !metadataComplete(model: model, in: dir) {
+                    do {
+                        for file in model.files { try writeMetadata(for: file, in: dir) }
+                        outcome.repaired.append(model.id)
+                    } catch {
+                        outcome.failed[model.id] = "could not write load metadata: \(error)"
+                        continue
+                    }
+                }
                 outcome.alreadyHeld.append(model.id)
                 continue
             }
@@ -120,6 +138,63 @@ public actor ModelSync {
     private func directory(for model: ControlPlane.AssignedModel) -> URL {
         model.id.split(separator: "/").reduce(base.appendingPathComponent("models")) {
             $0.appendingPathComponent(String($1))
+        }
+    }
+
+    /// Where swift-transformers looks for a file's download metadata.
+    ///
+    /// `<repo>/.cache/huggingface/download/<path>.metadata`, which is the layout
+    /// its own downloader writes.
+    private func metadataPath(for file: ControlPlane.ModelFile, in dir: URL) -> URL {
+        var url = dir.appendingPathComponent(".cache")
+            .appendingPathComponent("huggingface")
+            .appendingPathComponent("download")
+        for part in file.path.split(separator: "/") {
+            url = url.appendingPathComponent(String(part))
+        }
+        return url.appendingPathExtension("metadata")
+    }
+
+    /// Write the sidecar the loader reads when it is offline.
+    ///
+    /// Without this a model transferred by the fleet cannot be loaded by the
+    /// fleet. The runtime loads with `useOfflineMode` on - deliberately, so a
+    /// node never fetches weights from the internet - and in that mode
+    /// swift-transformers resolves every file through a metadata file its own
+    /// downloader writes. We do not use its downloader: the whole point is that
+    /// weights come from the control plane, hashed and verified. So the files
+    /// arrived correct, complete, and unloadable, and the error named a missing
+    /// shard rather than missing metadata:
+    ///
+    ///     offlineModeError("Metadata not available for model-00004-of-00004.safetensors")
+    ///
+    /// Three lines: commit hash, etag, timestamp. The etag is the sha256 for
+    /// LFS files, which is exactly what the catalogue already records and what
+    /// this actor already verified the bytes against. Offline resolution
+    /// re-hashes any file whose etag looks like a sha256 and refuses a
+    /// mismatch, so writing the catalogue's hash keeps that check meaningful
+    /// rather than defeating it.
+    private func writeMetadata(for file: ControlPlane.ModelFile, in dir: URL) throws {
+        let path = metadataPath(for: file, in: dir)
+        try FileManager.default.createDirectory(
+            at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
+        // The commit hash is not something a node can know: the catalogue holds
+        // weights, not git history. It is unused by offline resolution and is
+        // named rather than faked, so anybody reading one of these files can see
+        // where it came from.
+        let contents = "dai-catalogue\n\(file.sha256)\n\(Date().timeIntervalSince1970)\n"
+        try contents.write(to: path, atomically: true, encoding: .utf8)
+    }
+
+    /// Whether every file's sidecar is present.
+    ///
+    /// Separate from `isComplete` on purpose. A node that already holds a model
+    /// from before this existed has the bytes and not the metadata, and making
+    /// completeness depend on both would make every such node re-fetch
+    /// gigabytes it already has correctly.
+    private func metadataComplete(model: ControlPlane.AssignedModel, in dir: URL) -> Bool {
+        model.files.allSatisfy {
+            FileManager.default.fileExists(atPath: metadataPath(for: $0, in: dir).path)
         }
     }
 
@@ -158,6 +233,10 @@ public actor ModelSync {
             try? FileManager.default.removeItem(at: destination)
             try FileManager.default.moveItem(at: temp, to: destination)
         }
+
+        // After the bytes, never before: a sidecar beside an absent or unverified
+        // file would tell the loader a file is good when it is not there.
+        for file in model.files { try writeMetadata(for: file, in: dir) }
     }
 
     public enum Failure: Error, CustomStringConvertible {

@@ -243,6 +243,9 @@ public actor Worker {
         modelSyncStartedAt = nil
         guard let outcome else { return }
         for id in outcome.fetched { log("fetched model \(id)") }
+        for id in outcome.repaired {
+            log("wrote missing load metadata for \(id); it was held but not loadable")
+        }
         for (id, why) in outcome.failed { log("model \(id) failed: \(why)") }
 
         // Kept for the next heartbeat rather than only written to the log. A

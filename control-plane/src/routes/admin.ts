@@ -54,7 +54,7 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
     // told to, and an operator who cannot tell the difference goes looking for
     // a fault that is not there.
     const { rows: pools } = await db.query(
-      `SELECT id, name, tier, membership, serving_model_id FROM pools`)
+      `SELECT id, name, tier, membership, serving_model_id, enabled FROM pools`)
     const { rows: split } = await db.query(`SELECT id, machines FROM models WHERE machines > 1`)
     const machines = new Map((split as { id: string; machines: number }[])
       .map((m) => [m.id, Number(m.machines)]))
@@ -778,7 +778,7 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
     const modelId = (req.body as { modelId?: string | null })?.modelId ?? null
 
     const { rows: pools } = await db.query(
-      `SELECT id, name, tier, membership, serving_model_id FROM pools`)
+      `SELECT id, name, tier, membership, serving_model_id, enabled FROM pools`)
     const current = pools.find((p) => p.id === poolId)
     if (!current) { res.status(404).json({ error: 'not_found', detail: 'no such group' }); return }
 
@@ -869,7 +869,7 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
    */
   r.get('/pools/:poolId/coupled', async (req, res) => {
     const { rows: pools } = await db.query(
-      `SELECT id, name, tier, membership, serving_model_id FROM pools`)
+      `SELECT id, name, tier, membership, serving_model_id, enabled FROM pools`)
     const groups: Group[] = pools.map((p) => ({
       id: p.id, name: p.name, tier: p.tier, membership: p.membership,
       servingModelId: p.serving_model_id,

@@ -43,11 +43,17 @@ actor FakeControlPlane: ControlPlaneClient {
                    userPaused: Bool, capability: [String: Double],
                    residentModels: [String: Double], storedModels: [String: Double]?,
                    modelInfo: [String: Int], syncFaults: [String: String]?,
-                   pipelineAddress: String?) async throws {
+                   pipelineAddress: String?) async throws -> ControlPlane.Directives {
         heartbeats.append((state, userPaused, residentModels, modelInfo))
         if let storedModels { lastStoredModels = storedModels }
         if let syncFaults { lastSyncFaults = syncFaults }
+        return directives
     }
+
+    /// What this fake tells the node the control plane wants. Settable, because
+    /// the interesting path is a control plane asking for something.
+    private(set) var directives = ControlPlane.Directives()
+    func setDirectives(_ d: ControlPlane.Directives) { directives = d }
 
     func leaseWork(kinds: [WorkKind]) async throws -> ControlPlane.Lease? {
         leaseRequests.append(kinds)
@@ -233,7 +239,7 @@ actor FailingControlPlane: ControlPlaneClient {
                    residentModels: [String: Double], storedModels: [String: Double]?,
                    modelInfo: [String: Int], syncFaults: [String: String]?,
                    pipelineAddress: String?)
-        async throws { throw Unreachable() }
+        async throws -> ControlPlane.Directives { throw Unreachable() }
     func leaseWork(kinds: [WorkKind]) async throws -> ControlPlane.Lease? { throw Unreachable() }
     var lastLeaseReason: String? { nil }
     func report(unitId: String, completed: [WorkItem], unfinished: [WorkItem],

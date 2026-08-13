@@ -107,6 +107,8 @@ public actor Worker {
     private let modelSyncStuckAfter: TimeInterval = 3600
     /// Reported on the next beat; nil until a pass has finished.
     private var pendingSyncFaults: [String: String]?
+    /// Set by the control plane on a beat, acted on by the next loop turn.
+    private var renewRequested = false
 
     /// Holds the machine awake while it is on AC and nobody has paused it.
     /// Released when either stops being true, and when the process dies.
@@ -362,7 +364,14 @@ public actor Worker {
     /// the next heartbeat goes out on the certificate that was just retired.
     private func renewIfDue() async {
         guard let renewer else { return }
-        if let replacement = await renewer.renewIfDue(now: Date()) {
+        // Asked takes precedence over due. Somebody who requested a renewal
+        // wants it now, and the clock would say no for another twenty days.
+        let replacement = renewRequested
+            ? await renewer.renewNow(now: Date())
+            : await renewer.renewIfDue(now: Date())
+        if let replacement {
+            if renewRequested { log("renewed because the control plane asked") }
+            renewRequested = false
             controlPlane = replacement
             log("now presenting the renewed certificate")
         }
@@ -375,7 +384,7 @@ public actor Worker {
         let paused = pauseSwitch.read().paused
         do {
             log("heartbeat: \(reading.state.rawValue)\(paused ? " (user paused)" : "")")
-            try await controlPlane.heartbeat(
+            let directives = try await controlPlane.heartbeat(
                 state: reading.state,
                 onACPower: reading.signals.onACPower,
                 thermalOK: reading.signals.thermalOK,
@@ -384,6 +393,10 @@ public actor Worker {
                 residentModels: await residentModels(),
                 storedModels: StoredModels.scan(base: MLXRuntime.hubBase),
                 syncFaults: pendingSyncFaults)
+            // What the control plane wants from this node, which it can only
+            // say on a beat this node sent: a harvested machine dials out and
+            // never listens.
+            if directives.renewRequested { renewRequested = true }
             // Cleared only once the report has actually landed. A dropped
             // heartbeat is common and the reason a node is not holding its
             // models is exactly the sort of thing that would be lost by

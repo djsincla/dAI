@@ -160,6 +160,40 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /admin/v1/nodes/{nodeId}/renew:
+    parameters:
+      - name: nodeId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [admin]
+      summary: Ask a node to renew its certificate
+      description: >
+        Asked rather than done, because it cannot be done from anywhere else.
+        The Enclave key signs only inside the node's daemon, so running
+        `dai-agent renew` over ssh fails with "unable to sign digest" even as
+        root, and the daemon renews on its own only at two thirds of
+        certificate life.
+
+
+        202 rather than 204: the node has been asked, not renewed. The flag
+        rides down on its next heartbeat and is cleared when the new
+        certificate arrives.
+      responses:
+        '202':
+          description: The node has been asked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  hostname: { type: string }
+                  asked: { type: boolean }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
   /admin/v1/nodes/{nodeId}/revoke:
     post:
       tags: [admin]
@@ -476,7 +510,23 @@ paths:
           application/json:
             schema: { $ref: '#/components/schemas/Heartbeat' }
       responses:
-        '204': { description: Accepted }
+        '200':
+          description: >
+            Accepted, and what the control plane wants from this node. Answered
+            on the beat the node already sends, because there is no other way to
+            reach a machine that dials out and never listens.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [renewRequested]
+                properties:
+                  renewRequested:
+                    type: boolean
+                    description: >
+                      Renew the certificate now rather than waiting for two
+                      thirds of its life. The node must do this in-process: the
+                      Enclave key signs only inside its daemon.
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
 

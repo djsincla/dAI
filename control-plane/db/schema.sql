@@ -179,6 +179,20 @@ CREATE TABLE IF NOT EXISTS nodes (
     -- Handing a dialer the source address of a heartbeat would send it down the
     -- slow path, or somewhere the peer cannot reach at all.
     pipeline_address      text,
+    -- When somebody asked this node to renew its certificate.
+    --
+    -- The Enclave key only signs inside the launchd daemon: a session that is
+    -- not the daemon's has a locked keybag, so `dai-agent renew` by hand fails
+    -- with "unable to sign digest" from any ssh or sudo -u shell. The daemon
+    -- renews on its own at two thirds of certificate life, which leaves no way
+    -- to make a node rotate sooner - and a node that needs a new CA, or is
+    -- suspected compromised, cannot wait twenty days.
+    --
+    -- So it is asked rather than told: the flag rides down on the heartbeat and
+    -- the node renews in-process, where the Enclave will sign. Cleared when the
+    -- renewal actually arrives, so the record is of a request that was met
+    -- rather than one that was made.
+    renew_requested_at    timestamptz,
     last_model_sync       timestamptz,
     created_at            timestamptz NOT NULL DEFAULT now()
 );
@@ -454,6 +468,7 @@ ALTER TABLE pools ADD COLUMN IF NOT EXISTS desired_agent_version text;
 -- assumed. Re-applying the schema has to be a no-op: it is how an upgrade
 -- reaches a database that already has data in it.
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS pipeline_address text;
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS renew_requested_at timestamptz;
 ALTER TABLE models ADD COLUMN IF NOT EXISTS machines integer NOT NULL DEFAULT 1;
 ALTER TABLE models ADD COLUMN IF NOT EXISTS min_memory_gb numeric;
 DO $$

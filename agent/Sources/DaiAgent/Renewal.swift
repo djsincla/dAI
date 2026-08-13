@@ -75,6 +75,13 @@ public protocol CertificateRenewing: Sendable {
     /// the old one starts being told it is unknown. Handing back a new client
     /// is what closes that window.
     func renewIfDue(now: Date) async -> (any ControlPlaneClient)?
+
+    /// Renew because somebody asked, not because it is time.
+    ///
+    /// On the protocol rather than only the concrete type because the loop has
+    /// to call it, and because a fake that cannot be asked to renew would leave
+    /// the interesting path - a control plane requesting one - untestable.
+    func renewNow(now: Date) async -> (any ControlPlaneClient)?
 }
 
 /// Renews against a real control plane, writing the result where the daemon
@@ -116,7 +123,29 @@ public actor CertificateRenewer: CertificateRenewing {
               let window = try? Renewal.validity(certificatePEM: pem),
               Renewal.due(notBefore: window.notBefore, notAfter: window.notAfter, now: now)
         else { return nil }
+        return await renew(now: now)
+    }
 
+    /// Renew because somebody asked, rather than because it is time.
+    ///
+    /// The same work without the clock. Three things want this and none can
+    /// wait for two thirds of a certificate's life: a node enrolled before the
+    /// fleet had a node CA and cannot join a split without one, a certificate
+    /// suspected of having leaked, and a CA that has been replaced.
+    ///
+    /// It has to happen here rather than in a command somebody runs, because
+    /// the Enclave key signs only inside this process. A renewal attempted from
+    /// any other session fails with "unable to sign digest", which is what
+    /// `dai-agent renew` does over ssh even as root.
+    ///
+    /// The retry interval still applies. A control plane asking on every beat
+    /// must not turn into a node renewing every thirty seconds.
+    public func renewNow(now: Date = Date()) async -> (any ControlPlaneClient)? {
+        guard now >= nextAttempt else { return nil }
+        return await renew(now: now)
+    }
+
+    private func renew(now: Date) async -> (any ControlPlaneClient)? {
         nextAttempt = now.addingTimeInterval(Self.retryInterval)
 
         do {

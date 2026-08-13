@@ -1,5 +1,6 @@
 import type { Db } from './db.js'
 import { POLICY, type PresenceState, type WorkKind } from './policy.js'
+import { poolsFor } from './pools.js'
 
 /**
  * Node selection for interactive requests.
@@ -214,24 +215,34 @@ function resident(members: Candidate[], modelHash: string | null): number {
   return members.filter((m) => modelHash in (m.resident_models ?? {})).length
 }
 
-export function isRefusal(x: Candidate | Refusal): x is Refusal {
-  return 'refused' in x
+export function isRefusal(x: Candidate | Candidate[] | Refusal): x is Refusal {
+  // Arrays first: `'refused' in []` is false, but an array is never a refusal
+  // and saying so explicitly is cheaper than reasoning about it later.
+  return !Array.isArray(x) && 'refused' in x
 }
 
 /** Nodes that could plausibly take an interactive request right now. */
 export async function candidatesFor(db: Db, inFlight: Map<string, number>): Promise<Candidate[]> {
   const { rows } = await db.query(
-    `SELECT id, hostname, tier, presence_state, resident_models, capability_profiles
+    `SELECT id, hostname, tier, chip, memory_gb,
+            presence_state, resident_models, capability_profiles
        FROM nodes
       WHERE state = 'active'
         AND NOT user_paused
         AND (paused_until IS NULL OR paused_until < now())
         AND last_heartbeat > now() - interval '2 minutes'`,
   )
+  // Which cluster group each machine is in, computed rather than stored:
+  // membership is a rule, so the only way to know is to evaluate it. Only the
+  // cluster group matters here - a gang runs nowhere else.
+  const { rows: pools } = await db.query(
+    `SELECT id, tier, membership FROM pools WHERE tier = 'cluster'`)
+
   return (rows as any[]).map((n) => ({
     id: n.id,
     hostname: n.hostname,
     tier: n.tier as 'harvest' | 'cluster',
+    group_id: (poolsFor(n as never, pools as never)[0]?.id as string | undefined) ?? null,
     presence_state: n.presence_state,
     resident_models: n.resident_models ?? {},
     capability_profiles: n.capability_profiles ?? {},

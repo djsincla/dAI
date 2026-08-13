@@ -54,7 +54,10 @@ public actor Worker {
     /// should still harvest ANE work rather than refuse to start: three of the
     /// five presence states permit nothing but ANE work anyway, so the GPU
     /// runtime is not what most of the fleet's hours are made of.
-    private let gpu: MLXRuntime?
+    /// The GPU runtime, which is replaced when this machine's group changes
+    /// what it serves. A runtime is bound to one model at construction, so
+    /// switching means a new one - and both loops have to be handed it.
+    private var gpu: MLXRuntime?
     private let ane: ANERuntime?
 
     private var policy: [PresenceState: StatePolicy] = defaultPolicy
@@ -112,6 +115,9 @@ public actor Worker {
     /// Told when this node starts presenting a new certificate, so the other
     /// loop in this process can stop presenting the old one.
     private let onRenewed: (@Sendable (any ControlPlaneClient) async -> Void)?
+    /// Told when this machine starts serving a different model, so the loop
+    /// that answers requests stops holding the old runtime.
+    private let onServingModelChanged: (@Sendable (MLXRuntime, String) async -> Void)?
 
     /// Holds the machine awake while it is on AC and nobody has paused it.
     /// Released when either stops being true, and when the process dies.
@@ -136,10 +142,12 @@ public actor Worker {
                 attachments: AttachmentSync? = nil,
                 renewer: (any CertificateRenewing)? = nil,
                 onRenewed: (@Sendable (any ControlPlaneClient) async -> Void)? = nil,
+                onServingModelChanged: (@Sendable (MLXRuntime, String) async -> Void)? = nil,
                 sleepAssertion: SleepAssertion = SleepAssertion(),
                 promoteAfter: TimeInterval = idlePromoteSeconds) {
         self.renewer = renewer
         self.onRenewed = onRenewed
+        self.onServingModelChanged = onServingModelChanged
         self.renderer = renderer
         self.scenes = scenes
         self.attachments = attachments
@@ -367,6 +375,43 @@ public actor Worker {
     /// Awaited rather than detached, unlike a model transfer. Renewal is one
     /// small request, and the client it hands back has to be in place before
     /// the next heartbeat goes out on the certificate that was just retired.
+    /// Serve what this machine's group serves.
+    ///
+    /// The model belongs to the group rather than to the machine. Before this,
+    /// a node served whatever its daemon was started with - one argument in one
+    /// plist per box - so a group could say it served a 14B while its two
+    /// machines ran a 32B and a 30B between them, and nothing disagreed because
+    /// nothing was comparing them.
+    ///
+    /// Safe because this is an actor. A swap cannot land in the middle of a
+    /// generation: the work that uses the runtime is isolated to this actor too,
+    /// so the two are serialised by construction rather than by a lock somebody
+    /// has to remember.
+    ///
+    /// The old model's weights are released. Two runtimes holding two models is
+    /// how a machine with 64GB ends up unable to load either.
+    private func adoptServingModel(_ wanted: String?) async {
+        // Nil is "nobody has said", not "serve nothing". A group without a
+        // model is not an instruction to unload one.
+        guard let wanted, !wanted.isEmpty else { return }
+        // Only a machine that already runs one. Starting a runtime on a node
+        // that was configured without a GPU model is a different decision, made
+        // where the runtimes are built and where whether MLX works at all is
+        // known.
+        guard let current = gpu else { return }
+        guard await current.name != wanted else { return }
+
+        log("group serves \(wanted); this machine is running \(await current.name)")
+        if await current.isLoaded { _ = await current.unload() }
+        let replacement = MLXRuntime(modelId: wanted)
+        gpu = replacement
+        // The name travels with the runtime rather than being asked of it: the
+        // receiving loop is a different actor, and awaiting the new runtime just
+        // to log its name would be a hop for a string we already have.
+        await onServingModelChanged?(replacement, wanted)
+        log("now serving \(wanted)")
+    }
+
     private func renewIfDue() async {
         guard let renewer else { return }
         // Asked takes precedence over due. Somebody who requested a renewal
@@ -407,6 +452,7 @@ public actor Worker {
             // say on a beat this node sent: a harvested machine dials out and
             // never listens.
             if directives.renewRequested { renewRequested = true }
+            await adoptServingModel(directives.servingModel)
             // Cleared only once the report has actually landed. A dropped
             // heartbeat is common and the reason a node is not holding its
             // models is exactly the sort of thing that would be lost by

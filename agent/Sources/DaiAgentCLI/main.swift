@@ -437,6 +437,17 @@ case "work":
                                 await serving.get()?.adopt(controlPlane: replacement,
                                                            splitIdentity: credentials)
                             },
+                            onServingModelChanged: { runtime, named in
+                                // The group decides what this machine serves,
+                                // so both loops have to be holding the same
+                                // runtime. The batch loop swapped its own; this
+                                // hands the serving loop the very same one,
+                                // rather than a second runtime for the same
+                                // model - two of those would load the weights
+                                // twice on a machine that can hold them once.
+                                await serving.get()?.adopt(runtime: runtime,
+                                                           named: named)
+                            },
                             promoteAfter: promote)
 
         // Batch and serving run side by side in one process, because a node

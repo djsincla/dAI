@@ -767,7 +767,9 @@ public actor ControlPlane {
         // directives - the right answer, and the reason this is additive.
         let (_, data) = try await request("POST", "agent/v1/heartbeat", body: .object(body))
         let reply = (try? JSONDecoder().decode(JSONValue.self, from: data))?.objectValue ?? [:]
-        return Directives(renewRequested: reply["renewRequested"]?.boolValue ?? false)
+        return Directives(
+            renewRequested: reply["renewRequested"]?.boolValue ?? false,
+            servingModel: reply["servingModel"]?.stringValue)
     }
 
     /// What the control plane asked of this node on the last beat.
@@ -780,8 +782,21 @@ public actor ControlPlane {
         /// digest".
         public let renewRequested: Bool
 
-        public init(renewRequested: Bool = false) {
+        /// Which model this machine should be serving.
+        ///
+        /// A property of the group, not of the machine. A node's model used to
+        /// be the argument its daemon happened to be started with, set once per
+        /// box by hand - so a group could declare it served one model while its
+        /// machines ran two others, and nothing anywhere disagreed.
+        ///
+        /// Nil means nobody has said, which is not the same as "serve nothing":
+        /// a group that has not been given a model is not an instruction to
+        /// unload one.
+        public let servingModel: String?
+
+        public init(renewRequested: Bool = false, servingModel: String? = nil) {
             self.renewRequested = renewRequested
+            self.servingModel = servingModel
         }
     }
 

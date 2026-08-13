@@ -15,7 +15,7 @@
 import {
   attentionItems, capacityOf, copyState, distributionOf, humanBytes, importCost,
   bucketFor, certificateStanding, clampWindow, describeTier, describeWindow,
-  suspensionNote,
+  effectiveModelFor, suspensionNote,
   groupMachines, groupMismatches,
   inBothTiers, tierMachines, tiersAfter,
   groupMode, groupWarning, importProgress, isSynthetic, kindsFor,
@@ -982,7 +982,9 @@ function renderGroups(nodes, pools, models) {
     </section>`
 
   box.innerHTML = groups.map((g) => {
-    const warning = groupWarning(groupMismatches(g.pool, g.nodes, models))
+    // Every group, not just this one: a machine's model can be decided by a
+    // cluster group this card is not about.
+    const warning = groupWarning(groupMismatches(g.pool, g.nodes, models, pools))
     const mode = g.mode === 'list' ? 'hand-picked list' : 'a rule machines match'
     // The socket is on the card because it is the address somebody points an
     // application at. A group whose port lives only in the database is one an

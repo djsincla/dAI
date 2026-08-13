@@ -146,11 +146,27 @@ than a mechanism to invent.
 
 ## What a machine in both groups serves
 
-**Two groups that share a machine must serve the same model.**
+**The cluster group wins.**
 
-That removes the ambiguity rather than resolving it case by case: a machine can
-only load one model, so the two groups it belongs to are not allowed to disagree
-about which. What the tier distinguishes is then no longer *capability* but
+A machine can only load one model, so its two groups cannot both have their way.
+The first attempt at this refused the pair outright - two groups sharing a
+machine had to name the same model - and that turned out to make the order an
+operator did two legitimate things in decide whether they were allowed to:
+assigning a model to a cluster group failed because somebody had given a harvest
+group a different one weeks earlier.
+
+The tiers are not equal claims. A cluster group promises never to be preempted
+and is the only place a split model can run; a harvest group promises the
+opposite, that the machine may be taken away the moment somebody touches a
+keyboard. Only one of those survives on a single machine, and it is not the
+harvest one. So the disagreement is resolved rather than refused, and the
+harvest group's declaration is overridden on the machines it shares - which is
+reported (`overrides`), because a group whose model means nothing at the moment
+should not read as one whose model is in force.
+
+What is still refused is a disagreement nothing can resolve: two groups of the
+same tier naming different models. One-group-per-tier already makes that
+unreachable, so it is the check that would catch it if that rule were relaxed. What the tier distinguishes is then no longer *capability* but
 *availability* - identical weights, identical answers, different promises:
 
 | socket | promise |
@@ -161,6 +177,32 @@ about which. What the tier distinguishes is then no longer *capability* but
 A caller chooses its service level by which URL it points at, which is a better
 separation than the alternative where the tier accidentally decided which model
 you got.
+
+### The machine is told, rather than configured
+
+**Built.** The serving model reaches the machine on the heartbeat it already
+sends, and the agent swaps its runtime to match.
+
+Before this a node ran whatever its daemon was started with - the third argument
+in one plist per box, changed by hand with `set-served-model.sh`. So a group
+could declare it served a 14B while its two machines ran a 32B and a 30B between
+them, and nothing anywhere disagreed, because nothing was comparing them. This
+fleet was in exactly that state when somebody looked at the console.
+
+The swap is safe by construction rather than by a lock: the batch loop is an
+actor and the work that uses the runtime is isolated to it, so a swap cannot
+land in the middle of a generation. The old model's weights are released, and
+the *same* runtime is handed to the serving loop rather than a second one for
+the same model - two of those load the weights twice on a machine that can hold
+them once.
+
+Null means nobody has said, which is not an instruction to unload: a group that
+has not been given a model is not a claim about anything. A machine started
+without a GPU model stays without one; starting a runtime where none was
+configured is a decision for wherever MLX availability is known.
+
+The plist argument is now a bootstrap default - what the machine runs until its
+group tells it otherwise.
 
 ### It needs a serving model to be a thing
 

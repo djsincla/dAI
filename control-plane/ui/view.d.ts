@@ -131,3 +131,4 @@ export function certificateStanding(node: any, now?: number): {
   detail: string
 }
 export function suspensionNote(node: any): string | null
+export function effectiveModelFor(node: any, groups: any[]): string | null

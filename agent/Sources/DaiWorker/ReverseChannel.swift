@@ -22,7 +22,10 @@ import MLXLLM
 /// presence state stops permitting GPU work.
 public actor ReverseChannel {
     private var controlPlane: any ControlPlaneClient
-    private let gpu: MLXRuntime?
+    /// Replaced when this machine's group changes what it serves. The batch
+    /// loop owns that decision and hands the new runtime over, the same way it
+    /// hands over a renewed certificate.
+    private var gpu: MLXRuntime?
     private let source: SignalSource
     private let monitor: PresenceMonitor
     private let pauseSwitch = PauseSwitch()
@@ -100,6 +103,15 @@ public actor ReverseChannel {
         // previous credential, which is still valid until it expires.
         if let splitIdentity { self.splitIdentity = splitIdentity }
         log("now presenting the renewed certificate")
+    }
+
+    /// Serve a different model, because the group now serves a different model.
+    ///
+    /// Isolated to this actor, so it cannot land in the middle of a request:
+    /// `handle` runs here too, and the two are serialised by construction.
+    public func adopt(runtime: MLXRuntime, named: String) {
+        gpu = runtime
+        log("now serving \(named)")
     }
 
     /// What this loop is presenting, and what it would join a split with.

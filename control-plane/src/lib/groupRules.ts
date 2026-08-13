@@ -68,21 +68,23 @@ export function violations(nodes: NodeFacts[], groups: Group[]): Violation[] {
       }
     }
 
-    // Only groups that actually name a model can disagree. A group with none is
-    // not yet a claim about anything, and refusing it would make the order in
-    // which an operator does two legitimate things decide whether they are
-    // allowed.
-    const serving = [...byTier.values()].flat()
-      .filter((g) => g.servingModelId !== null)
-    const distinct = new Set(serving.map((g) => g.servingModelId))
-    if (distinct.size > 1) {
-      const said = serving
-        .map((g) => `${g.name} serves ${g.servingModelId}`)
-        .join('; ')
-      found.push({
-        rule: 'groups-must-agree',
-        detail: `${node.hostname} is in groups that disagree about what it runs: ${said}`,
-      })
+    // Disagreement between tiers is resolved rather than refused: the cluster
+    // group wins and the harvest group follows. See `effectiveModel`.
+    //
+    // What remains a violation is disagreement that nothing can resolve - two
+    // groups of the *same* tier naming different models. One-group-per-tier
+    // already makes that impossible, so this is the check that would catch it
+    // if that rule were ever relaxed, rather than a case anybody meets today.
+    for (const [tier, matched] of byTier) {
+      const serving = matched.filter((g) => g.servingModelId !== null)
+      const distinct = new Set(serving.map((g) => g.servingModelId))
+      if (distinct.size > 1) {
+        found.push({
+          rule: 'groups-must-agree',
+          detail: `${node.hostname} is in ${tier} groups that disagree about what it runs: `
+            + serving.map((g) => `${g.name} serves ${g.servingModelId}`).join('; '),
+        })
+      }
     }
   }
 
@@ -123,4 +125,57 @@ export function coupledWith(group: Group, nodes: NodeFacts[], groups: Group[]): 
 
   reached.delete(group.id)
   return [...reached].map((id) => byId.get(id)!).filter(Boolean)
+}
+
+/**
+ * What a machine actually runs, when its groups say different things.
+ *
+ * **A cluster group overrides a harvest one where they share a machine.**
+ *
+ * The two tiers are not equal claims. A cluster group promises never to be
+ * preempted and is the only place a split model can run; a harvest group
+ * promises the opposite - that the machine may be taken away the moment
+ * somebody touches a keyboard. When both want the same machine to run something,
+ * only one of those promises can be kept, and it is not the harvest one.
+ *
+ * This replaces refusing the pair outright. Refusal made the order an operator
+ * did two legitimate things in decide whether they were allowed to, and left a
+ * fleet where assigning a model to a cluster group failed because a harvest
+ * group had been given a different one weeks earlier by somebody else.
+ *
+ * Null when no group this machine is in has named a model, which is not the
+ * same as "serve nothing": nobody has said.
+ */
+export function effectiveModel(node: NodeFacts, groups: Group[]): string | null {
+  const mine = (poolsFor(node, groups) as Group[]).filter((g) => g.servingModelId !== null)
+  const cluster = mine.find((g) => g.tier === 'cluster')
+  return (cluster ?? mine[0])?.servingModelId ?? null
+}
+
+/**
+ * Which groups are having their model overridden on which machines.
+ *
+ * Not a fault - it is the rule working - but it has to be visible. A harvest
+ * group whose machines are all running a cluster group's model is a group whose
+ * own declaration means nothing at the moment, and an operator reading that
+ * group's model would otherwise be reading something untrue.
+ */
+export function overrides(nodes: NodeFacts[], groups: Group[]): {
+  hostname: string; harvest: string; runs: string; insteadOf: string; by: string
+}[] {
+  const out = []
+  for (const node of nodes) {
+    const mine = poolsFor(node, groups) as Group[]
+    const cluster = mine.find((g) => g.tier === 'cluster' && g.servingModelId !== null)
+    if (!cluster) continue
+    for (const h of mine.filter((g) => g.tier === 'harvest'
+                                  && g.servingModelId !== null
+                                  && g.servingModelId !== cluster.servingModelId)) {
+      out.push({
+        hostname: node.hostname, harvest: h.name, runs: cluster.servingModelId!,
+        insteadOf: h.servingModelId!, by: cluster.name,
+      })
+    }
+  }
+  return out
 }

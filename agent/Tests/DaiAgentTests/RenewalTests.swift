@@ -282,6 +282,30 @@ struct RenewOnRequestTests {
         }
     }
 
+    /// Every loop that holds a certificate, not just the one I remembered.
+    ///
+    /// This has now been wrong twice. The serving loop was missed first and
+    /// reconnected every five seconds to be told "unknown certificate"; the
+    /// model sync loop was missed next, and the fleet view reported the machine
+    /// as not holding what it was assigned rather than as one that had been
+    /// locked out of the fleet by a renewal it performed itself.
+    @Test("a renewal reaches every loop holding the old certificate")
+    func everyHolderIsTold() async throws {
+        let replacement = FakeControlPlane()
+        let renewer = RenewalLoopTests.Fixed(replacement: replacement, due: false)
+        let cp = FakeControlPlane()
+        await cp.setDirectives(.init(renewRequested: true))
+
+        let sync = ModelSync(controlPlane: cp, base: FileManager.default.temporaryDirectory,
+                             status: StatusPublisher())
+        let worker = Worker(controlPlane: cp, source: FixedSignals.present(),
+                            modelSync: sync, renewer: renewer, promoteAfter: 0)
+        await worker.run(maxSeconds: 1.5)
+
+        #expect(await (sync.presenting() as AnyObject) === replacement,
+                "the sync loop should have been handed the new client")
+    }
+
     @Test("no request leaves the clock in charge")
     func unaskedUsesTheClock() async throws {
         let renewer = RenewalLoopTests.Fixed(replacement: FakeControlPlane(), due: false)

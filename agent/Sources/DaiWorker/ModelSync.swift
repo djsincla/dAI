@@ -27,7 +27,7 @@ import Foundation
 /// range requests the server supports but the bookkeeping is not worth it
 /// until a link is slow enough to lose a 5GB transfer repeatedly.
 public actor ModelSync {
-    private let controlPlane: ControlPlaneClient
+    private var controlPlane: ControlPlaneClient
     private let base: URL
     private let status: StatusPublisher
     private var lastCheck: Date = .distantPast
@@ -46,6 +46,23 @@ public actor ModelSync {
         self.status = status
         self.interval = interval
     }
+
+    /// Start presenting a renewed certificate.
+    ///
+    /// Renewal retires the old certificate the moment the new one is issued, so
+    /// anything still holding the old one is refused with "unknown certificate"
+    /// - and this loop would go on being refused for the life of the process,
+    /// because nothing here ever reloads. That is not hypothetical: it is what
+    /// this loop did after the first renewal on real hardware, while the fleet
+    /// view reported the machine as simply not holding what it was assigned.
+    public func present(_ replacement: any ControlPlaneClient) {
+        controlPlane = replacement
+    }
+
+    /// What this loop is presenting. Reachable only from a test, which is the
+    /// point: the last two times a renewal was not handed on, nothing could
+    /// see it until a machine had been locked out of the fleet for hours.
+    func presenting() -> any ControlPlaneClient { controlPlane }
 
     /// What one pass decided, so a caller can report it without re-deriving it.
     public struct Outcome: Sendable, Equatable {

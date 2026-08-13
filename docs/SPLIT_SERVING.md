@@ -1,6 +1,6 @@
 # Serving a model that fits on no single machine
 
-A plan, not a description. Nothing here is built yet.
+A plan. Step 1 is built; the rest is not.
 
 ## Where this stands
 
@@ -76,20 +76,33 @@ the question usually starts.
 `selectNode` returns one candidate or a refusal. It needs to be able to return a
 *group*, reserved together or not at all.
 
-The design question that has to be answered first, because everything else
-follows from it: **what happens when one machine of a pair is lost mid-request.**
-Options, roughly in order of honesty:
+**Decided: when a rank is lost, fail the request, release every member, and say
+so loudly.**
 
-- Fail the request and release both. Simple, correct, and the whole completion
-  is lost.
-- Fail the request and keep both loaded, betting the peer returns. Costs memory
-  on a machine doing nothing.
-- Resume on a replacement. Needs the KV cache of the lost rank, which is not
-  transferable today and may never be worth making so.
+The alternatives were considered and rejected. Holding the survivors and betting
+the peer returns costs memory on machines doing nothing, for a bet nothing
+bounds. Resuming on a replacement needs the lost rank's KV cache, which is not
+transferable today and probably never worth making so.
 
-On a cluster pool this should be rare by construction - `preempt = 'never'` -
-which is an argument for taking the first option and being loud about it rather
-than building machinery for a case the tier exists to prevent.
+The argument for failing is not that it is easy. It is that on a tier whose
+definition is `preempt = 'never'`, this should not happen - and building recovery
+machinery for it would be admitting the tier does not work. If ranks are being
+lost, the answer is to find out why, which requires the failure to be loud rather
+than absorbed.
+
+Loud means: the request fails with a reason naming the machine that went, the
+event is recorded against every member rather than only the one that failed, and
+the fleet view shows a gang that broke rather than a request that was slow. A
+silently retried gang failure is how a cluster tier quietly becomes a harvest
+tier with extra steps.
+
+**Built** (`selectGang` in `router.ts`): every rank is admitted together or none
+is, only from cluster-tier machines, and only from within one group - machines in
+a group have agreed what they serve, machines in different groups have not.
+Ungrouped machines are not pooled with each other, because two machines nobody
+put together have not been declared to agree either. A group already holding the
+weights is preferred over one that would cold-load, since N cold loads is N times
+the delay rather than one.
 
 ### 2. Residency as a set
 

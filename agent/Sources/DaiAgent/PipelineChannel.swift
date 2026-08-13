@@ -137,6 +137,77 @@ public actor PipelineChannel {
                           serverName: serverName)
     }
 
+    /// How long to wait before the nth attempt at dialling a peer.
+    ///
+    /// A pure function of the attempt so the schedule can be read and tested
+    /// without waiting for it.
+    ///
+    /// Doubling from a fifth of a second and capped at two, because the two
+    /// cases it separates have very different durations. A rank that has not
+    /// finished binding its socket is milliseconds away; a rank that is never
+    /// coming is not coming at all. A fixed short interval hammers the second
+    /// case, and a fixed long one makes the first feel broken.
+    public static func backoff(attempt: Int) -> TimeInterval {
+        min(2.0, 0.2 * pow(2.0, Double(max(0, attempt))))
+    }
+
+    /// Dial a peer that may not be listening yet.
+    ///
+    /// Ranks find each other by dialling, and the dispatches that start them go
+    /// out at the same time - so the listener is frequently not up when the
+    /// first attempt arrives. That is ordinary and not a failure.
+    ///
+    /// Retrying here rather than coordinating through the control plane is
+    /// deliberate. A handshake would mean rank 0 reporting that it is listening
+    /// and the control plane then releasing rank 1, which puts the control plane
+    /// in the middle of every split and adds a round trip to a path that is
+    /// already latency-sensitive. A dial that keeps trying needs nobody, and the
+    /// two cases it has to tell apart - not up yet, never coming - are
+    /// distinguishable by giving up after a bounded time.
+    ///
+    /// `deadline` is that bound. Past it the peer is treated as absent, which is
+    /// what the caller wants to hear: a gang that cannot form should fail loudly
+    /// rather than wait, because every other rank is holding memory meanwhile.
+    public func connectWithRetry(
+        host: String, port: Int, identity: NodeIdentity, peerCAPEM: String,
+        serverName: String, deadline: TimeInterval = 30,
+    ) async throws {
+        try await connectWithRetry(
+            host: host, port: port,
+            tls: Self.clientContext(identity: identity, peerCAPEM: peerCAPEM),
+            serverName: serverName, deadline: deadline)
+    }
+
+    /// Retry against a context somebody else built.
+    ///
+    /// The same seam the plain `connect` has, and for the same reason: an
+    /// Enclave key cannot be created in a test process, so without this the
+    /// schedule would be untestable and only the arithmetic would be checked.
+    public func connectWithRetry(
+        host: String, port: Int, tls: NIOSSLContext,
+        serverName: String, deadline: TimeInterval = 30,
+        sleep: @Sendable (TimeInterval) async throws -> Void = {
+            try await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000))
+        },
+    ) async throws {
+        let started = Date()
+        var attempt = 0
+        while true {
+            do {
+                try await connect(host: host, port: port, tls: tls, serverName: serverName)
+                return
+            } catch {
+                let waited = Date().timeIntervalSince(started)
+                let next = Self.backoff(attempt: attempt)
+                // Checked against the deadline before sleeping, so the last
+                // thing that happens is an attempt rather than a wait.
+                guard waited + next < deadline else { throw error }
+                try await sleep(next)
+                attempt += 1
+            }
+        }
+    }
+
     public func connect(host: String, port: Int, tls: NIOSSLContext,
                         serverName: String) async throws {
         let inbox = self.inbox

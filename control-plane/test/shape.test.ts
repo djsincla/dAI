@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { RUNTIME_HEADROOM, shapeOf, whyGroupCannotHost } from '../src/lib/shape.js'
+import { RUNTIME_HEADROOM, runnability, shapeOf, whyGroupCannotHost } from '../src/lib/shape.js'
 
 /**
  * What a model needs, and whether a group can give it.
@@ -98,5 +98,58 @@ describe('whether a group can run it', () => {
     const pair = [m('a', 37.4), m('b', 37.4)]
     expect(whyGroupCannotHost(pair, whole)).not.toBeNull()
     expect(whyGroupCannotHost(pair, split)).toBeNull()
+  })
+})
+
+/**
+ * Now, later, or not as things stand.
+ *
+ * Three answers rather than two, because "cannot" and "not yet" call for
+ * different actions and look identical from a boolean. Reporting both as no is
+ * how somebody waits for what is not coming, or reassigns what was about to
+ * work.
+ */
+describe('whether a group can run it now', () => {
+  const m = (hostname: string, gb: number | null, holds = true) =>
+    ({ hostname, metalWorkingSetGb: gb, holds })
+
+  it('is ready when enough big machines hold the weights', () => {
+    const shape = shapeOf({ size_bytes: SEVENTY_TWO_B, machines: 2 })
+    expect(runnability([m('rotorua', 51.8), m('orca', 37.4)], shape))
+      .toEqual({ state: 'ready' })
+  })
+
+  it('is pending while a transfer is still running', () => {
+    // Nothing to do but wait. Distinguishing this from blocked is the point:
+    // the group is correct and the bytes are on their way.
+    const shape = shapeOf({ size_bytes: SEVENTY_TWO_B, machines: 2 })
+    const got = runnability([m('rotorua', 51.8), m('orca', 37.4, false)], shape)
+    expect(got.state).toBe('pending')
+    expect((got as { detail: string }).detail).toContain('1 of 2')
+  })
+
+  it('is blocked when the machines could never load it', () => {
+    // However long anybody waits. Somebody has to change the group, or the
+    // model's shape.
+    const shape = shapeOf({ size_bytes: SEVENTY_TWO_B, machines: 2 })
+    const got = runnability([m('rotorua', 51.8), m('mini', 8)], shape)
+    expect(got.state).toBe('blocked')
+    expect((got as { detail: string }).detail).toContain('mini')
+  })
+
+  it('prefers blocked over pending when both are true', () => {
+    // A group that is too small and also has not fetched the weights is not
+    // waiting for anything. Saying pending would send somebody away to wait.
+    const shape = shapeOf({ size_bytes: SEVENTY_TWO_B, machines: 2 })
+    expect(runnability([m('mini', 8, false), m('mini2', 8, false)], shape).state)
+      .toBe('blocked')
+  })
+
+  it('does not count a machine that holds the weights but cannot load them', () => {
+    // Holding is disk and loading is memory. A machine with the bytes and no
+    // room for them contributes nothing to whether the group can run it.
+    const shape = shapeOf({ size_bytes: SEVENTY_TWO_B, machines: 1 })
+    expect(runnability([m('mini', 8, true), m('rotorua', 51.8, false)], shape).state)
+      .toBe('pending')
   })
 })

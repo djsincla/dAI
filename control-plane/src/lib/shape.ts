@@ -60,19 +60,62 @@ export interface Machine {
   hostname: string
   /** What this machine can actually give the GPU, which is not its RAM. */
   metalWorkingSetGb: number | null
+  /** Whether the weights are on this machine's disk. */
+  holds?: boolean
+}
+
+export type Runnability =
+  /** Enough machines, big enough, holding the weights. */
+  | { state: 'ready' }
+  /** Will be able to once a transfer finishes. Nothing to do but wait. */
+  | { state: 'pending'; detail: string }
+  /** Never will, as the group stands. Somebody has to change something. */
+  | { state: 'blocked'; detail: string }
+
+/**
+ * Whether a group can run a model now, later, or not as it stands.
+ *
+ * Three answers rather than two, because "cannot" and "not yet" call for
+ * different actions and look identical from a boolean. A group whose machines
+ * are too small will never run the model however long anybody waits; a group
+ * still fetching the weights needs nothing but time. Reporting both as "no" is
+ * how an operator ends up waiting for something that is not coming, or
+ * reassigning something that was about to work.
+ *
+ * Holding is per machine and unchanged by splitting: a split model arrives
+ * whole everywhere and divides only what it loads. What splitting changes is
+ * this - the question of whether enough machines, together, can run it.
+ */
+export function runnability(machines: Machine[], shape: Shape): Runnability {
+  const blocked = whyGroupCannotHost(machines, shape)
+  if (blocked) return { state: 'blocked', detail: blocked }
+
+  const holding = machines.filter(
+    (m) => m.holds && m.metalWorkingSetGb !== null
+      && m.metalWorkingSetGb >= shape.perMachineGb)
+  if (holding.length < shape.machines) {
+    return {
+      state: 'pending',
+      detail: `${holding.length} of ${shape.machines} machines hold the weights`,
+    }
+  }
+  return { state: 'ready' }
 }
 
 /**
- * Why this group cannot run this model, or null if it can.
+ * Why this group could never run this model, or null if the shape fits.
  *
  * Answered at assignment rather than at dispatch. A model declared to need two
  * machines, assigned to a group with one, should be refused with a sentence
  * somebody can act on - not accepted and then discovered as a request that
  * hangs, weeks later, by whoever happens to send it.
  *
- * The reason names the shortfall rather than saying no: an operator who is told
- * "needs 2 machines, this group has 1" knows what to do next, and one told
- * "cannot host" does not.
+ * The reason names the shortfall rather than saying no: an operator told "needs
+ * 2 machines, this group has 1" knows what to do next, and one told "cannot
+ * host" does not.
+ *
+ * Says nothing about whether the weights have arrived - see `runnability`,
+ * which separates what will never work from what has not finished yet.
  */
 export function whyGroupCannotHost(machines: Machine[], shape: Shape): string | null {
   // A machine whose working set was never probed fails rather than passes.

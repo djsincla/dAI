@@ -6,7 +6,7 @@ import { resolve as resolveOpenJD, frameOf, type JobTemplate } from '../lib/open
 import { repositoryRoot, safePath, verifyModel } from '../lib/repository.js'
 import { COMPLETE_ENOUGH, holdsModel } from '../lib/possession.js'
 import { coupledWith, violations, type Group } from '../lib/groupRules.js'
-import { shapeOf, whyGroupCannotHost } from '../lib/shape.js'
+import { runnability, shapeOf, whyGroupCannotHost } from '../lib/shape.js'
 import { existsSync } from 'node:fs'
 import { Router } from 'express'
 import { type Db, tx } from '../lib/db.js'
@@ -1094,6 +1094,11 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
         path: f.path, sizeBytes: Number(f.size_bytes), sha256: f.sha256,
       })),
       placement: await placementOf(db, id, rows[0].size_bytes),
+      // Which groups could actually run this, and for those that cannot,
+      // whether that is a transfer still running or a group that never will.
+      // Holding is per machine; running is a property of a group, and until
+      // this existed nothing answered it.
+      runnableIn: await runnableGroups(db, rows[0]),
       // Who told the fleet to hold this, and when. The assignment row alone
       // could not answer that: it is mutable, so unassigning erased the record
       // of ever having assigned it.
@@ -1554,6 +1559,48 @@ async function placementOf(db: Db, modelId: string, sizeBytes?: unknown) {
     held: holdsModel((n.stored_models ?? {})[modelId], sizeBytes),
     loaded: Object.prototype.hasOwnProperty.call(n.resident_models ?? {}, modelId),
   }))
+}
+
+
+/**
+ * Which groups can run a model, and what is stopping the ones that cannot.
+ *
+ * Possession is per machine and reported per machine. Whether a model can
+ * actually be served is a question about a group: enough machines, each big
+ * enough, each holding the weights. A fleet that can only answer the first
+ * cannot tell an operator why a model they assigned is not being served.
+ */
+async function runnableGroups(db: Db, model: Record<string, unknown>) {
+  const shape = shapeOf(model as never)
+  const { rows: pools } = await db.query(
+    `SELECT id, name, tier, membership FROM pools ORDER BY name`)
+  const { rows: nodes } = await db.query(
+    `SELECT id, hostname, tier, chip, memory_gb, metal_working_set_gb, stored_models
+       FROM nodes WHERE state = 'active'`)
+
+  return pools.map((p) => {
+    const members = (nodes as never[])
+      .filter((n: never) => poolsFor(n, [p] as never).length > 0)
+      .map((n: {
+        hostname: string
+        metal_working_set_gb: string | null
+        stored_models: Record<string, number> | null
+      }) => ({
+        hostname: n.hostname,
+        metalWorkingSetGb: n.metal_working_set_gb === null
+          ? null : Number(n.metal_working_set_gb),
+        holds: holdsModel((n.stored_models ?? {})[model.id as string], model.size_bytes),
+      }))
+    const state = runnability(members, shape)
+    return {
+      groupId: p.id as string,
+      name: p.name as string,
+      tier: p.tier as string,
+      machines: members.length,
+      state: state.state,
+      detail: 'detail' in state ? state.detail : null,
+    }
+  })
 }
 
 /** One catalogue row, with the two counts that matter computed the same way. */

@@ -71,7 +71,10 @@ async function servableModels(db: Db, broker: Broker) {
  */
 async function gangFor(
   db: Db, modelId: string | null, connected: Candidate[],
-): Promise<{ refusal: Refusal } | { members: Candidate[] } | null> {
+): Promise<{ refusal: Refusal }
+         | { members: { nodeId: string; hostname: string; rank: number; address: string | null }[]
+             listenAt: string }
+         | null> {
   if (!modelId) return null
   const { rows } = await db.query(
     `SELECT size_bytes, machines, min_memory_gb FROM models WHERE id = $1`, [modelId])
@@ -82,7 +85,59 @@ async function gangFor(
 
   const gang = selectGang(connected, 'generate', modelId, shape.machines)
   if (isRefusal(gang)) return { refusal: gang }
-  return { members: gang }
+
+  // Where each machine can be reached for pipeline traffic. Declared by the
+  // node, not observed from its connection: the split runs over whatever link
+  // the machines share, which is deliberately not always the one they use to
+  // reach here.
+  const { rows: addrs } = await db.query(
+    `SELECT id, pipeline_address FROM nodes WHERE id = ANY($1::uuid[])`,
+    [gang.map((c) => c.id)])
+  const address = new Map(addrs.map((a) => [a.id as string, a.pipeline_address as string | null]))
+
+  // Rank 0 holds the last layers and the output head, and listens. Everything
+  // else dials it. A rank with no address cannot be dialled, so it cannot be
+  // rank 0 - and if no member has one, there is no gang to form.
+  const ordered = [...gang].sort((a, b) =>
+    Number(!!address.get(b.id)) - Number(!!address.get(a.id)))
+  if (!address.get(ordered[0]!.id)) {
+    return { refusal: {
+      refused: 'gang-short',
+      detail: 'no machine in this group has said where a peer should dial it; '
+        + 'set pipelineInterface on at least the machine holding the output head',
+    } }
+  }
+
+  return {
+    members: ordered.map((c, rank) => ({
+      nodeId: c.id, hostname: c.hostname, rank,
+      address: address.get(c.id) ?? null,
+    })),
+    listenAt: address.get(ordered[0]!.id)!,
+  }
+}
+
+/** The port ranks dial each other on. Fixed: one split runs per machine. */
+export const PIPELINE_PORT = 7710
+
+/** What each rank is told, which differs only by rank and where to dial. */
+export function splitBody(
+  rank: number, size: number, listenAt: string, model: string | null, base: unknown,
+): unknown {
+  return {
+    ...(base as Record<string, unknown>),
+    split: {
+      rank,
+      size,
+      model,
+      // Rank 0 listens; everything else dials it. Given to both so neither has
+      // to infer its job from its rank number, which is the kind of implicit
+      // agreement that survives until somebody renumbers.
+      role: rank === 0 ? 'listen' : 'dial',
+      port: PIPELINE_PORT,
+      peer: rank === 0 ? null : listenAt,
+    },
+  }
 }
 
 export function servingRoutes(db: Db, broker: Broker): Router {
@@ -171,20 +226,15 @@ export function servingRoutes(db: Db, broker: Broker): Router {
       } })
       return
     }
-    if (gang && 'members' in gang) {
-      // Admission works; the ranks cannot be started yet. Said plainly rather
-      // than dispatched to one machine, because a wrong answer is worse than a
-      // refusal and much harder to notice.
-      res.status(503).json({ error: {
-        message: `${modelHash} runs across ${gang.members.length} machines and a gang was `
-          + 'admitted, but this control plane cannot start the ranks yet',
-        type: 'no_capacity',
-        code: 'gang-not-dispatchable',
-      } })
-      return
-    }
 
-    const choice = selectNode(connected, 'generate', modelHash)
+    // A gang has already chosen its machines and rank 0 is the one that
+    // answers, so it stands in for the single node everywhere below. Running
+    // selectNode as well would pick a different machine and cap the completion
+    // by the presence of one that is not going to serve it.
+    const head = gang && 'members' in gang
+      ? connected.find((c) => c.id === gang.members[0]!.nodeId)!
+      : null
+    const choice = head ?? selectNode(connected, 'generate', modelHash)
     if (isRefusal(choice)) {
       // 503 rather than 500: this is capacity, not failure, and it is the
       // normal daytime answer for a fleet of machines people are using.
@@ -204,11 +254,12 @@ export function servingRoutes(db: Db, broker: Broker): Router {
     const maxTokens = Math.min(requested, policy.maxCompletionTokens)
 
     const started = Date.now()
-    const out = await broker.dispatch(choice.id, 'generate', modelHash, {
-      messages: body.messages,
-      max_tokens: maxTokens,
-      model: modelHash,
-    })
+    const request = { messages: body.messages, max_tokens: maxTokens, model: modelHash }
+    const out = gang && 'members' in gang
+      ? await broker.dispatchGang(
+          gang.members, 'generate', modelHash,
+          (rank) => splitBody(rank, gang.members.length, gang.listenAt, modelHash, request))
+      : await broker.dispatch(choice.id, 'generate', modelHash, request)
 
     if (!out.ok) {
       res.status(503).json({ error: {
@@ -271,26 +322,10 @@ export function servingRoutes(db: Db, broker: Broker): Router {
 
     const candidates = await candidatesFor(db, broker.inFlightCounts)
     const connected = candidates.filter((c) => broker.isConnected(c.id))
-    const gang = await gangFor(db, body.model ?? null, connected)
-    if (gang && 'refusal' in gang) {
-      res.status(503).json({
-        type: 'error',
-        error: { type: 'overloaded_error', message: gang.refusal.detail },
-      })
-      return
-    }
-    if (gang && 'members' in gang) {
-      res.status(503).json({
-        type: 'error',
-        error: {
-          type: 'overloaded_error',
-          message: `${body.model} runs across ${gang.members.length} machines and a gang was `
-            + 'admitted, but this control plane cannot start the ranks yet',
-        },
-      })
-      return
-    }
-
+    // No gang for counting. Every rank loads the same tokenizer and chat
+    // template from the same directory, so one machine can answer this for a
+    // split model - and asking two to do it would occupy the pipeline for a
+    // question that is meant to be cheap enough to ask before every turn.
     const choice = selectNode(connected, 'generate', body.model)
     if (isRefusal(choice)) {
       res.status(503).json({
@@ -367,7 +402,25 @@ export function servingRoutes(db: Db, broker: Broker): Router {
     const modelHash = body.model
     const candidates = await candidatesFor(db, broker.inFlightCounts)
     const connected = candidates.filter((c) => broker.isConnected(c.id))
-    const choice = selectNode(connected, 'generate', modelHash)
+
+    // A split model is not a big model. Routed as one it goes to a single
+    // machine, which loads something built from a reduced layer count and
+    // answers from half a network rather than failing.
+    const gang = await gangFor(db, modelHash, connected)
+    if (gang && 'refusal' in gang) {
+      res.status(503).json({
+        type: 'error',
+        error: { type: 'overloaded_error', message: gang.refusal.detail },
+      })
+      return
+    }
+    // Rank 0 holds the output head and is the machine that answers, so it
+    // stands in for the single node below: presence policy, the completion cap,
+    // and which machine the caller is told served them.
+    const head = gang && 'members' in gang
+      ? connected.find((c) => c.id === gang.members[0]!.nodeId)!
+      : null
+    const choice = head ?? selectNode(connected, 'generate', modelHash)
 
     if (isRefusal(choice)) {
       // Busy is not the same as gone, and saying the wrong one sends people
@@ -456,7 +509,7 @@ export function servingRoutes(db: Db, broker: Broker): Router {
     }
 
     const started = Date.now()
-    const out = await broker.dispatch(choice.id, 'generate', modelHash, {
+    const request = {
       messages,
       max_tokens: maxTokens,
       model: modelHash,
@@ -467,7 +520,13 @@ export function servingRoutes(db: Db, broker: Broker): Router {
       // reaching the model either way.
       tools: body.tools,
       tool_choice: body.tool_choice,
-    }, cancel.signal)
+    }
+    const out = gang && 'members' in gang
+      ? await broker.dispatchGang(
+          gang.members, 'generate', modelHash,
+          (rank) => splitBody(rank, gang.members.length, gang.listenAt, modelHash, request),
+          cancel.signal)
+      : await broker.dispatch(choice.id, 'generate', modelHash, request, cancel.signal)
 
     // Nobody is listening; saying so into a closed socket only produces a
     // second error in the log.

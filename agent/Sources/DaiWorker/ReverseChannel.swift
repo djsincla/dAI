@@ -41,15 +41,32 @@ public actor ReverseChannel {
     /// Set from the control plane's view of this node, not assumed.
     private var isCluster = false
 
+    /// The identity this machine joins a split with, and the CA it trusts its
+    /// peer against.
+    ///
+    /// Passed in rather than read from disk here. The credential belongs to the
+    /// process that enrolled and already holds it, and a worker that goes
+    /// looking for one would need to know where enrolment put it - which is the
+    /// CLI's business, not the loop's. Nil on a machine that cannot join a
+    /// split, which is reported rather than crashed on.
+    ///
+    /// The peer CA is the *node* CA, not the server CA used everywhere else.
+    /// The other end of a split is a node, and pinning the wrong root fails the
+    /// handshake with "unknown CA" - which reads as a broken network rather
+    /// than the wrong trust anchor.
+    private let splitIdentity: (identity: NodeIdentity, peerCAPEM: String)?
+
     public init(controlPlane: any ControlPlaneClient, gpu: MLXRuntime?,
                 source: SignalSource = MacSignalSource(),
                 status: StatusPublisher = StatusPublisher(),
-                promoteAfter: TimeInterval = idlePromoteSeconds) {
+                promoteAfter: TimeInterval = idlePromoteSeconds,
+                splitIdentity: (identity: NodeIdentity, peerCAPEM: String)? = nil) {
         self.status = status
         self.controlPlane = controlPlane
         self.gpu = gpu
         self.source = source
         self.monitor = PresenceMonitor(promoteAfter: promoteAfter)
+        self.splitIdentity = splitIdentity
     }
 
     public func setPolicy(_ policy: [PresenceState: StatePolicy]) {
@@ -169,6 +186,84 @@ public actor ReverseChannel {
             residentModels: resident, modelInfo: info)
     }
 
+    /// Be one rank of a split model.
+    ///
+    /// Rank 0 listens and holds the output head, so it is the one with an
+    /// answer to report. The others hold earlier layers, hand their hidden state
+    /// across, and report that they did their share - the control plane takes
+    /// rank 0's reply as the completion and needs the rest only to know they
+    /// did not fail.
+    ///
+    /// The dial retries, because the ranks are dispatched at the same instant
+    /// and the listener is frequently not up when the first attempt arrives.
+    /// That is ordinary rather than a failure; a peer that never comes is
+    /// separated from one that is slow by giving up after a bounded time.
+    private func runSplit(_ split: SplitDispatch,
+                          dispatch: ControlPlane.Dispatch) async {
+        let directory = MLXRuntime.modelDirectory
+            .appendingPathComponent(split.model)
+        guard FileManager.default.fileExists(atPath: directory.path) else {
+            try? await controlPlane.reportDispatch(
+                id: dispatch.id, text: nil,
+                error: "rank \(split.rank) does not hold \(split.model)")
+            return
+        }
+
+        guard let credentials = splitIdentity else {
+            try? await controlPlane.reportDispatch(
+                id: dispatch.id, text: nil,
+                error: "this machine has no enrolled identity to join a split with")
+            return
+        }
+        let identity = credentials.identity
+        let ca = credentials.peerCAPEM
+
+        await publish(mayServe().state, activity: "rank \(split.rank) of a split model")
+        let channel = PipelineChannel()
+        let started = Date()
+        do {
+            switch split.role {
+            case .listen:
+                _ = try await channel.listen(port: split.port,
+                                             identity: identity, peerCAPEM: ca)
+                log("rank \(split.rank) listening on \(split.port)")
+            case .dial:
+                try await channel.connectWithRetry(
+                    host: split.peer!, port: split.port, identity: identity,
+                    peerCAPEM: ca, serverName: split.peer!)
+                log("rank \(split.rank) connected to \(split.peer!)")
+            }
+
+            let runner = SplitRunner(
+                plan: .init(modelId: split.model, rank: split.rank, size: split.size),
+                channel: channel)
+            // The cap the control plane already applied, computed from the
+            // presence of the machine holding the head. Read rather than
+            // recomputed, so the decision lives in one place.
+            let budget = dispatch.body["max_tokens"]?.intValue ?? 256
+            let done = try await runner.run(directory: directory,
+                                            prompt: promptFrom(dispatch.body),
+                                            maxTokens: budget)
+
+            let seconds = Date().timeIntervalSince(started)
+            log(String(format: "rank %d (layers %d..<%d) finished %d tokens in %.1fs",
+                       split.rank, done.layers.lowerBound, done.layers.upperBound,
+                       done.outcome.tokens, seconds))
+            // Only the rank holding the head has text. The others report a
+            // completion with none, which is what tells the control plane they
+            // did not fail.
+            try await controlPlane.reportDispatch(
+                id: dispatch.id,
+                text: done.isHead ? done.outcome.text : nil,
+                error: nil, completionTokens: done.outcome.tokens)
+        } catch {
+            log("rank \(split.rank) failed: \(error)")
+            try? await controlPlane.reportDispatch(
+                id: dispatch.id, text: nil,
+                error: "rank \(split.rank) failed: \(error)")
+        }
+    }
+
     private func handle(_ dispatch: ControlPlane.Dispatch, maxTokens: Int) async {
         guard let gpu else {
             try? await controlPlane.reportDispatch(
@@ -197,6 +292,14 @@ public actor ReverseChannel {
             }
         }
         defer { watching.cancel() }
+
+        // A rank of a split model, which is a different piece of work from a
+        // completion: two machines, one answer, and a channel between them that
+        // has to exist before either can start.
+        if let split = SplitDispatch(body: dispatch.body) {
+            await runSplit(split, dispatch: dispatch)
+            return
+        }
 
         // Counting is not generating: no cancellation watch, no policy cap, no
         // tool parsing. It exists so a client can decide what to send, so it

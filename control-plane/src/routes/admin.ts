@@ -27,7 +27,7 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
     const { rows } = await db.query(
       `SELECT id, hostname, chip, memory_gb, metal_working_set_gb, tier, tiers, state,
               owner_user_id, presence_state, last_heartbeat, capability_profiles,
-              model_sync_faults, last_model_sync,
+              model_sync_faults, last_model_sync, agent_version, agent_fingerprint,
               user_paused, user_paused_at, resident_models, model_context
          -- Superseded records are history, not fleet. They are the previous
          -- enrollment of a machine that is still here under a newer identity,
@@ -50,6 +50,14 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
       // model never moves either way.
       syncFaults: n.model_sync_faults ?? {},
       lastModelSync: n.last_model_sync,
+      // What this machine is running. The version is a claim the binary makes
+      // about itself and can be wrong or absent; the fingerprint is the hash of
+      // the executable and is the only evidence of what is actually deployed.
+      // Both are shown, because a fleet that cannot name what it runs cannot be
+      // audited - and on this fleet every node reported a placeholder while two
+      // different binaries were in service.
+      agentVersion: n.agent_version ?? null,
+      agentFingerprint: n.agent_fingerprint ?? null,
       presenceState: n.presence_state,
       userPaused: n.user_paused ?? false,
       userPausedAt: n.user_paused_at ? new Date(n.user_paused_at).toISOString() : null,
@@ -309,7 +317,8 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
       `SELECT id, hostname, chip, memory_gb, metal_working_set_gb, tier, tiers, state,
               owner_user_id, presence_state, on_ac_power, thermal_ok,
               last_heartbeat, capability_profiles, allowed_cidrs,
-              user_paused, user_paused_at
+              user_paused, user_paused_at, agent_version, agent_fingerprint,
+              model_sync_faults, last_model_sync
          FROM nodes WHERE id = $1`, [nodeId])
     if (rows.length === 0) { res.status(404).json({ error: 'not_found' }); return }
     const n = rows[0] as any
@@ -333,6 +342,14 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
 
     res.json({
       id: n.id, hostname: n.hostname, chip: n.chip,
+      // The version is what the binary says it is; the fingerprint is what it
+      // actually hashes to. Only the second survives somebody replacing a
+      // binary by hand, which is how this fleet ran two different builds while
+      // every node reported the same placeholder.
+      agentVersion: n.agent_version ?? null,
+      agentFingerprint: n.agent_fingerprint ?? null,
+      syncFaults: n.model_sync_faults ?? {},
+      lastModelSync: n.last_model_sync,
       memoryGb: n.memory_gb === null ? null : Number(n.memory_gb),
       metalWorkingSetGb: n.metal_working_set_gb === null ? null : Number(n.metal_working_set_gb),
       tier: n.tier, tiers: n.tiers, state: n.state, ownerUserId: n.owner_user_id,

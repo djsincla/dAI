@@ -2498,6 +2498,17 @@ components:
           description: >
             Why this machine is not holding what it was assigned, as it last
             reported. Empty on a healthy node.
+        agentVersion:
+          type: string
+          nullable: true
+          description: What the running binary calls itself. A claim, not evidence.
+        agentFingerprint:
+          type: string
+          nullable: true
+          description: >
+            sha256 of the running executable, which is the only evidence of what
+            is actually deployed. A version string survives a binary being
+            replaced by hand; this does not.
         lastModelSync:
           type: string
           format: date-time

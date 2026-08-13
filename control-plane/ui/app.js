@@ -421,6 +421,16 @@ function openNode(id, { push = false } = {}) {
         ${d.userPaused ? `<dt>Owner</dt><dd class="paused-by-user">paused this machine${
           d.userPausedAt ? ` ${new Date(d.userPausedAt).toLocaleString()}` : ''
         }</dd>` : ''}
+        <dt>Agent</dt><dd>${escape(d.agentVersion ?? 'unknown')}${
+          d.agentFingerprint
+            ? ` <span class="muted" title="sha256 of the running executable">${
+                escape(String(d.agentFingerprint).slice(0, 12))}</span>`
+            : ''
+        }</dd>
+        ${Object.keys(d.syncFaults ?? {}).length > 0 ? `<dt>Not holding</dt><dd class="fault">${
+          Object.entries(d.syncFaults).map(([id, why]) =>
+            `${escape(id === '*' ? 'model sync' : id.split('/').pop())}: ${escape(why)}`).join('<br>')
+        }</dd>` : ''}
         <dt>On AC power</dt><dd>${d.onAcPower === null ? '&mdash;' : d.onAcPower}</dd>
         <dt>Yields (7d)</dt><dd>${d.yields7d}</dd>
         <dt>Pinned networks</dt><dd>${escape(d.allowedCidrs ?? 'unpinned')}</dd>

@@ -701,3 +701,11 @@ th.sortable.desc::after { content: ' \2193'; opacity: 1; color: var(--accent); }
   .api-op-head { grid-template-columns: 14px 56px 1fr; }
   .api-summary { display: none; }
 }
+
+/* A machine that is not holding what it was assigned. Coloured like a warning
+   rather than an error: the fleet still works, but somebody has to look, and
+   before this the only trace was a line in that machine's own log. */
+.fault {
+  color: var(--warn-fg);
+  font-variant-numeric: tabular-nums;
+}

@@ -198,10 +198,24 @@ if [[ -n "$GPU_MODEL_CACHE" && -d "$GPU_MODEL_CACHE" ]]; then
 fi
 
 if [[ "$ANE" != "-" && -e "$ANE" ]]; then
-  rm -rf "$MODEL_DIR/$(basename "$ANE")"
-  cp -R "$ANE" "$MODEL_DIR/"
-  ANE="$MODEL_DIR/$(basename "$ANE")"
-  echo "==> ANE model staged at $ANE"
+  DEST="$MODEL_DIR/$(basename "$ANE")"
+  # The source may already be the destination, and on any machine that has been
+  # installed once it is: install.sh rewrites the config to the staged path, so
+  # the next run is handed its own output. The rm then deleted the model and the
+  # cp failed on a source that no longer existed, taking the whole install with
+  # it - after the binary had already been replaced.
+  #
+  # This is the same shape as the binary case above, which was found and guarded
+  # earlier. Re-running an installer has to be safe, because that is what an
+  # upgrade is.
+  if [[ "$(cd "$(dirname "$ANE")" 2>/dev/null && pwd)/$(basename "$ANE")" == "$DEST" ]]; then
+    echo "==> ANE model already in place at $ANE"
+  else
+    rm -rf "$DEST"
+    cp -R "$ANE" "$MODEL_DIR/"
+    echo "==> ANE model staged at $DEST"
+  fi
+  ANE="$DEST"
 fi
 
 # The identity belongs to the account that will use it. The Enclave blob is

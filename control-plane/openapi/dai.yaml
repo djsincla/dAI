@@ -2683,6 +2683,20 @@ components:
       type: object
       required: [id, runtime, kind, sizeBytes, fileCount, assignedPools, nodesHolding]
       properties:
+        machines:
+          type: integer
+          minimum: 1
+          description: >
+            Machines this model runs across, its layers divided between them.
+            Declared rather than derived: whether a 40GB model runs on one
+            machine or two is a decision about the fleet, not a property of the
+            weights.
+        minMemoryGb:
+          type: number
+          nullable: true
+          description: >
+            What each of those machines must be able to load. Null means derive
+            it from the size, which is what dividing the layers does.
         id: { type: string }
         runtime: { type: string, enum: [mlx, coreml] }
         kind: { $ref: '#/components/schemas/WorkKind' }

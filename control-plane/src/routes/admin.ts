@@ -6,6 +6,7 @@ import { resolve as resolveOpenJD, frameOf, type JobTemplate } from '../lib/open
 import { repositoryRoot, safePath, verifyModel } from '../lib/repository.js'
 import { COMPLETE_ENOUGH, holdsModel } from '../lib/possession.js'
 import { coupledWith, violations, type Group } from '../lib/groupRules.js'
+import { shapeOf, whyGroupCannotHost } from '../lib/shape.js'
 import { existsSync } from 'node:fs'
 import { Router } from 'express'
 import { type Db, tx } from '../lib/db.js'
@@ -547,16 +548,42 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
     const current = pools.find((p) => p.id === poolId)
     if (!current) { res.status(404).json({ error: 'not_found', detail: 'no such group' }); return }
 
+    let model: { size_bytes: number; machines: number; min_memory_gb: number | null } | null = null
     if (modelId !== null) {
-      const { rows: known } = await db.query(`SELECT 1 FROM models WHERE id = $1`, [modelId])
+      const { rows: known } = await db.query(
+        `SELECT size_bytes, machines, min_memory_gb FROM models WHERE id = $1`, [modelId])
       if (known.length === 0) {
         res.status(404).json({ error: 'not_found', detail: `no model called ${modelId}` })
         return
       }
+      model = known[0] as never
     }
 
     const { rows: nodes } = await db.query(
-      `SELECT id, hostname, tier, chip, memory_gb FROM nodes WHERE state = 'active'`)
+      `SELECT id, hostname, tier, chip, memory_gb, metal_working_set_gb
+         FROM nodes WHERE state = 'active'`)
+
+    // Can this group actually run it? Asked here rather than at dispatch, where
+    // the answer arrives as a request that hangs, weeks later, found by whoever
+    // happens to send one.
+    if (model) {
+      const shape = shapeOf(model)
+      const members = (nodes as never[])
+        .filter((n: never) => poolsFor(n, [current] as never).length > 0)
+        .map((n: { hostname: string; metal_working_set_gb: string | null }) => ({
+          hostname: n.hostname,
+          metalWorkingSetGb: n.metal_working_set_gb === null
+            ? null : Number(n.metal_working_set_gb),
+        }))
+      const why = whyGroupCannotHost(members, shape)
+      if (why) {
+        res.status(409).json({
+          error: 'conflict',
+          detail: `${current.name} cannot run ${modelId}: ${why}`,
+        })
+        return
+      }
+    }
 
     // Checked against the state this would create, not against the change, so
     // every reason it cannot exist comes back at once.
@@ -860,7 +887,7 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
   r.get('/models', async (_req, res) => {
     const { rows } = await db.query(
       `SELECT m.id, m.runtime, m.kind, m.size_bytes, m.context_length,
-              m.quantization, m.family, m.imported_at,
+              m.quantization, m.family, m.imported_at, m.machines, m.min_memory_gb,
               count(DISTINCT f.path)::int AS file_count,
               coalesce(array_agg(DISTINCT pm.pool_id)
                        FILTER (WHERE pm.pool_id IS NOT NULL), '{}') AS assigned_pools,
@@ -1544,6 +1571,11 @@ async function modelRow(db: Db, m: Record<string, unknown>) {
     quantization: (m.quantization as string | null) ?? null,
     family: (m.family as string | null) ?? null,
     fileCount: Number(m.file_count),
+    // What running this actually requires. A model that needs two machines and
+    // is assigned to a group with one should be refused when somebody says so,
+    // not when somebody sends a request.
+    machines: Number(m.machines ?? 1),
+    minMemoryGb: m.min_memory_gb == null ? null : Number(m.min_memory_gb),
     importedAt: m.imported_at ? new Date(m.imported_at as string).toISOString() : undefined,
     assignedPools: pools,
     nodesHolding: Number(m.nodes_holding ?? 0),

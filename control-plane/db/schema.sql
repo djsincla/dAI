@@ -301,6 +301,15 @@ CREATE TABLE IF NOT EXISTS models (
     family         text,
     imported_at    timestamptz NOT NULL DEFAULT now(),
     imported_by    uuid REFERENCES users(id),
+    -- Machines this model runs across, its layers divided between them.
+    --
+    -- Declared rather than derived: whether a 40GB model runs on one machine or
+    -- two is a decision about the fleet, not a property of the weights.
+    machines       integer NOT NULL DEFAULT 1,
+    -- What each of those machines has to be able to load, in gigabytes. Null
+    -- means derive it from the size, which is what dividing the layers does.
+    -- Set it when somebody has actually run the model and knows better.
+    min_memory_gb  numeric,
     CONSTRAINT models_runtime_check CHECK (runtime IN ('mlx', 'coreml')),
     CONSTRAINT models_kind_check CHECK (kind IN ('generate', 'embed'))
 );
@@ -435,6 +444,16 @@ ALTER TABLE pools ADD COLUMN IF NOT EXISTS desired_agent_version text;
 -- Postgres has no IF NOT EXISTS for a constraint, so this is asked rather than
 -- assumed. Re-applying the schema has to be a no-op: it is how an upgrade
 -- reaches a database that already has data in it.
+ALTER TABLE models ADD COLUMN IF NOT EXISTS machines integer NOT NULL DEFAULT 1;
+ALTER TABLE models ADD COLUMN IF NOT EXISTS min_memory_gb numeric;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'models_machines_check')
+  THEN
+    ALTER TABLE models ADD CONSTRAINT models_machines_check CHECK (machines >= 1);
+  END IF;
+END $$;
+
 -- The group's serving model, and its foreign key.
 --
 -- Declared here rather than on the table because pools is created two hundred

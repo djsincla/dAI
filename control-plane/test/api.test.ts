@@ -220,6 +220,45 @@ describe('agent surface', () => {
     expect(r.status).toBe(204)
   })
 
+  it('refuses a group that cannot run the model, saying what is short', async () => {
+    // Asked at assignment. The alternative is a request that hangs, weeks
+    // later, found by whoever happens to send one.
+    await db.query(
+      `INSERT INTO models (id, runtime, kind, size_bytes, machines)
+       VALUES ('org/huge','mlx','generate',$1,2) ON CONFLICT (id) DO UPDATE
+         SET size_bytes=EXCLUDED.size_bytes, machines=EXCLUDED.machines`,
+      [Math.round(40.4 * 1073741824)])
+    await db.query(
+      `UPDATE nodes SET state='active', tiers=ARRAY['harvest','cluster']::text[],
+                        metal_working_set_gb=37.4 WHERE id=$1`, [fx.nodeId])
+
+    const r = await fetch(`${base}/admin/v1/pools/${fx.poolId}/serving-model`, {
+      method: 'PUT', headers: asUser(fx.operatorToken),
+      body: JSON.stringify({ modelId: 'org/huge' }),
+    })
+    expect(r.status).toBe(409)
+    const body = await r.json()
+    // One machine in the group, model needs two.
+    expect(body.detail).toContain('needs 2 machines')
+  })
+
+  it('accepts a model the group can actually run', async () => {
+    await db.query(
+      `INSERT INTO models (id, runtime, kind, size_bytes, machines)
+       VALUES ('org/small','mlx','generate',$1,1) ON CONFLICT (id) DO UPDATE
+         SET size_bytes=EXCLUDED.size_bytes, machines=EXCLUDED.machines`,
+      [Math.round(4 * 1073741824)])
+    await db.query(
+      `UPDATE nodes SET state='active', tiers=ARRAY['harvest','cluster']::text[],
+                        metal_working_set_gb=37.4 WHERE id=$1`, [fx.nodeId])
+
+    const r = await fetch(`${base}/admin/v1/pools/${fx.poolId}/serving-model`, {
+      method: 'PUT', headers: asUser(fx.operatorToken),
+      body: JSON.stringify({ modelId: 'org/small' }),
+    })
+    expect(r.status).toBe(204)
+  })
+
   it('serves the policy table to an approved node', async () => {
     const r = await fetch(`${base}/agent/v1/policy`, { headers: asNode(fx.fingerprint) })
     expect(r.status).toBe(200)

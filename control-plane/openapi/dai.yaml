@@ -1854,6 +1854,53 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
 
         '401': { $ref: '#/components/responses/Unauthorized' }
+  /admin/v1/models/{modelId}/shape:
+    parameters:
+      - name: modelId
+        in: path
+        required: true
+        schema: { type: string }
+    put:
+      tags: [admin]
+      summary: How many machines a model runs across
+      description: >
+        Declared rather than derived: whether a 40GB model runs on one machine
+        or two is a decision about the fleet, not a property of the weights.
+
+
+        409 when no group could run it. A model needing more machines than the
+        fleet has anywhere is not a plan, it is a request refused at every
+        dispatch, and finding that out now is the point of declaring shape.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                machines: { type: integer, minimum: 1 }
+                minMemoryGb: { type: number, nullable: true }
+      responses:
+        '200':
+          description: The shape, and which groups could run it
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  machines: { type: integer }
+                  perMachineGb: { type: number }
+                  runnableIn: { type: array, items: { type: object, additionalProperties: true } }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: No group can run it at that shape
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
   /admin/v1/models/verify:
     get:
       tags: [admin]

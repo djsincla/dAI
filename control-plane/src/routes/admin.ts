@@ -968,6 +968,58 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
    * that data does not leave the building should not have weights arriving from
    * outside it as a side effect of somebody clicking a name in a list.
    */
+  /**
+   * How many machines a model runs across.
+   *
+   * Declared rather than derived: whether a 40GB model runs on one machine or
+   * two is a decision about the fleet, not a property of the weights. Until
+   * this existed the columns could be read and never written, which made shape
+   * something only a migration could set.
+   *
+   * Refused when no group could run it. A model declared to need more machines
+   * than the fleet has anywhere is not a plan, it is a request that will be
+   * refused at every dispatch - and finding that out now is the whole point of
+   * declaring shape at all.
+   */
+  r.put('/models/:modelId/shape', async (req, res) => {
+    const id = decodeURIComponent(req.params.modelId!)
+    const b = req.body as { machines?: number; minMemoryGb?: number | null }
+    const machines = Math.max(1, Number(b.machines ?? 1))
+
+    const { rows } = await db.query(
+      `SELECT size_bytes FROM models WHERE id = $1`, [id])
+    if (rows.length === 0) {
+      res.status(404).json({ error: 'not_found', detail: `no model called ${id}` })
+      return
+    }
+
+    const shape = shapeOf({
+      size_bytes: rows[0].size_bytes as number,
+      machines,
+      min_memory_gb: b.minMemoryGb ?? null,
+    })
+    const groups = await runnableGroups(db, {
+      id, size_bytes: rows[0].size_bytes, machines, min_memory_gb: b.minMemoryGb ?? null,
+    })
+    // Blocked everywhere is a shape nothing can run. Pending is fine - the
+    // weights are on their way - and so is a group that is simply too small
+    // while another is not.
+    if (groups.length > 0 && groups.every((g) => g.state === 'blocked')) {
+      res.status(409).json({
+        error: 'conflict',
+        detail: `no group can run ${id} across ${machines} machines: `
+          + groups.map((g) => `${g.name}: ${g.detail}`).join('; '),
+      })
+      return
+    }
+
+    await db.query(
+      `UPDATE models SET machines = $2, min_memory_gb = $3 WHERE id = $1`,
+      [id, machines, b.minMemoryGb ?? null])
+    await audit(db, req.user!.id, 'model.shape', id, { machines })
+    res.json({ id, machines, perMachineGb: Number(shape.perMachineGb.toFixed(2)), runnableIn: groups })
+  })
+
   r.get('/models/available', async (_req, res) => {
     const { rows } = await db.query(`SELECT id FROM models`)
     res.json(await candidates(new Set(rows.map((r2) => r2.id as string))))

@@ -113,7 +113,19 @@ if [[ -f "$HERE/VERSION" ]]; then VERSION="$(tr -d '[:space:]' < "$HERE/VERSION"
 # compile MLX's Metal shaders, which is documented upstream, so a binary built
 # with `swift build` aborts from C++ the first time it touches the GPU. It looks
 # exactly like a missing Metal toolchain and is not.
-BUILD="${BUILD_OVERRIDE:-$HERE/../.xcbuild/Build/Products/Release}"
+# Beside the script first, because that is where the package puts them. The
+# postinstall passes --build explicitly and so always worked; a person running
+# the installed copy by hand got the source-tree path instead and was told to
+# run xcodebuild on a machine that has no source tree. An installed script that
+# cannot find its own binaries is a trap, and this is the one place that knows
+# both layouts.
+if [[ -n "${BUILD_OVERRIDE:-}" ]]; then
+  BUILD="$BUILD_OVERRIDE"
+elif [[ -x "$HERE/dai-agent" ]]; then
+  BUILD="$HERE"
+else
+  BUILD="$HERE/../.xcbuild/Build/Products/Release"
+fi
 [[ -x "$BUILD/dai-agent" ]] || {
   echo "no build found at $BUILD" >&2
   echo "run: xcodebuild build -scheme dai-agent -destination 'platform=OS X' \\" >&2

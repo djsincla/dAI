@@ -45,7 +45,7 @@ fi
 [[ $EUID -eq 0 ]] || { echo "must run as root: sudo $0 ..." >&2; exit 1; }
 
 if [[ $REVERT -eq 1 ]]; then
-  BACKUP="$PLIST.before-model-change"
+  BACKUP=/var/db/dai/com.dai.agent.plist.before-model-change
   [[ -f "$BACKUP" ]] || { echo "no backup at $BACKUP" >&2; exit 1; }
   cp "$BACKUP" "$PLIST"
   echo "reverted to: $(current)"
@@ -65,7 +65,11 @@ else
   fi
 
   echo "was:  $(current)"
-  cp "$PLIST" "$PLIST.before-model-change"
+  # Not beside the plist. /Library/LaunchDaemons is a directory launchd scans,
+  # and leaving anything there that is not a job somebody meant to install is
+  # how a machine ends up with a daemon nobody can account for.
+  mkdir -p /var/db/dai
+  cp "$PLIST" /var/db/dai/com.dai.agent.plist.before-model-change
   plutil -replace "ProgramArguments.$MODEL_INDEX" -string "$MODEL" "$PLIST"
   echo "now:  $(current)"
 fi

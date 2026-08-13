@@ -83,8 +83,16 @@ cp "$PRODUCTS/dai-agent" "$STAGING/usr/local/libexec/dai/"
 for bundle in "$PRODUCTS"/*.bundle; do
   [[ -e "$bundle" ]] && cp -R "$bundle" "$STAGING/usr/local/libexec/dai/"
 done
+# Everything install.sh reaches for beside itself. It is worth listing rather
+# than globbing: the updater template and reload-daemon.sh were added later and
+# not added here, so every package built since shipped an install.sh that could
+# not finish. install.sh calls reload-daemon.sh unconditionally under `set -e`,
+# so the install died partway; and the updater plist is behind an `if [[ -f ]]`,
+# so its absence was silent and produced machines that could never self-update.
 cp "$HERE/com.dai.agent.plist.in" "$HERE/com.dai.menubar.plist.in" \
+   "$HERE/com.dai.updater.plist.in" "$HERE/reload-daemon.sh" \
    "$HERE/install.sh" "$HERE/uninstall.sh" "$STAGING/usr/local/libexec/dai/"
+chmod 755 "$STAGING/usr/local/libexec/dai/reload-daemon.sh"
 
 # The package carries its own version, so install.sh can stamp it into the
 # daemon's environment without being told. A build that cannot name itself

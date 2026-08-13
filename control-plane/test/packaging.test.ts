@@ -595,3 +595,84 @@ describe('the control plane uninstaller', () => {
     expect(beforePurge).not.toContain('rm -rf "$STATE_DIR"')
   })
 })
+
+/**
+ * That the package carries everything install.sh reaches for.
+ *
+ * This has now gone wrong twice, both times silently and both times the same
+ * way: a file was added beside install.sh and not added to the staging list in
+ * build-pkg.sh. reload-daemon.sh is called unconditionally under `set -e`, so
+ * its absence killed the install partway; com.dai.updater.plist.in is behind an
+ * `if [[ -f ]]`, so its absence said nothing at all and produced machines that
+ * looked installed and could never take an upgrade.
+ *
+ * Comparing the two files is the check, because the failure is a disagreement
+ * between them rather than a fault in either.
+ */
+describe('what the package has to contain', () => {
+  const packaging = join(process.cwd(), '..', 'agent', 'packaging')
+  const install = readFileSync(join(packaging, 'install.sh'), 'utf8')
+  const build = readFileSync(join(packaging, 'build-pkg.sh'), 'utf8')
+
+  // Every "$HERE/<name>" install.sh uses, which is every file it expects to
+  // find beside itself once the package has laid it down.
+  const needed = [...install.matchAll(/\$HERE\/([A-Za-z0-9._-]+)/g)]
+    .map((m) => m[1]!)
+    .filter((n) => n !== '..')
+
+  it('finds at least the files we know it needs', () => {
+    // Guards the regex above: if it silently matched nothing, every assertion
+    // below would pass while checking nothing.
+    expect(needed).toContain('install.sh'.replace('install.sh', 'reload-daemon.sh'))
+    expect(needed).toContain('com.dai.updater.plist.in')
+    expect(needed.length).toBeGreaterThan(3)
+  })
+
+  it('stages every file install.sh expects beside itself', () => {
+    const missing = needed.filter((n) => n !== 'VERSION' && !build.includes(n))
+    expect(missing, `build-pkg.sh does not stage: ${missing.join(', ')}`).toEqual([])
+  })
+
+  it('writes the VERSION file install.sh reads', () => {
+    // Not copied but generated, so it is exempt from the check above and needs
+    // its own. Without it the daemon reports no version and the fleet cannot
+    // say what is deployed.
+    expect(build).toMatch(/> "\$STAGING\/usr\/local\/libexec\/dai\/VERSION"/)
+  })
+})
+
+/**
+ * Re-running the installer has to be safe, because that is what an upgrade is.
+ *
+ * install.sh rewrites the config to point at the copy it staged, so on any
+ * machine installed once the next run is handed its own output as the source.
+ * The ANE block deleted the destination and then copied the source into it,
+ * which for that case is the same path: it removed the model and failed on a
+ * source that no longer existed, taking the install down after the binary had
+ * already been replaced. The same shape was found and fixed for the binary
+ * earlier; this is the one nobody went back for.
+ *
+ * Asserted against the script text rather than by running it, because the paths
+ * it stages into are absolute and owned by root. That makes this a weaker test
+ * than the others here and still worth having: it fails if the guard is removed,
+ * which is exactly how this arrived.
+ */
+describe('installing over an existing install', () => {
+  const install = readFileSync(
+    join(process.cwd(), '..', 'agent', 'packaging', 'install.sh'), 'utf8')
+
+  it('does not delete the ANE model it is about to copy', () => {
+    const block = install.slice(install.indexOf('if [[ "$ANE" != "-"'))
+      .slice(0, 900)
+    // The destination is only cleared on the branch where it differs from the
+    // source. A bare rm before the cp is the bug.
+    expect(block).toMatch(/already in place/)
+    expect(block).toMatch(/rm -rf "\$DEST"/)
+    expect(block).not.toMatch(/^\s*rm -rf "\$MODEL_DIR\/\$\(basename "\$ANE"\)"/m)
+  })
+
+  it('does not reinstall a binary onto itself', () => {
+    // The same guard, for the case that was found first.
+    expect(install).toMatch(/already in place/)
+  })
+})

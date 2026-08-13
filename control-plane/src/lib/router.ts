@@ -248,7 +248,10 @@ export async function candidatesFor(db: Db, inFlight: Map<string, number>,
   // membership is a rule, so the only way to know is to evaluate it. Only the
   // cluster group matters here - a gang runs nowhere else.
   const { rows: pools } = await db.query(
-    `SELECT id, tier, membership FROM pools WHERE tier = 'cluster'`)
+    // Enabled only. A gang is a group asserting itself across several
+    // machines, which is exactly what a group that has been stood down is not
+    // doing - and a request on the shared port must not assemble one out of it.
+    `SELECT id, tier, membership FROM pools WHERE tier = 'cluster' AND enabled`)
 
   // The scoping group, which may be of either tier: a harvest group has its own
   // socket too, and a request on it is asking those machines and no others. A

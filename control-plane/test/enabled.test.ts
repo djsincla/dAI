@@ -170,3 +170,50 @@ describe('standing a group down over HTTP', () => {
     expect(r.status).toBe(400)
   })
 })
+
+describe('what a stood-down group is left out of', () => {
+  it('is not routed to on the shared port', async () => {
+    // The socket refusal covers a caller who addressed the group directly. This
+    // is the other way in: a request on the shared port must not be handed to a
+    // group that is asserting nothing.
+    const { candidatesFor } = await import('../src/lib/router.js')
+    await db.query(
+      `UPDATE nodes SET state='active', presence_state='ABSENT', last_heartbeat=now(),
+                        tiers=ARRAY['harvest','cluster']::text[] WHERE id=$1`, [fx.nodeId])
+    const cluster = await db.query(
+      `INSERT INTO pools (name, tier, schedule, preempt, enabled)
+       VALUES ('standing-down','cluster','gang','never', false) RETURNING id`)
+
+    const candidates = await candidatesFor(db, new Map())
+    // The machine is still a candidate - it is only the group that stood down -
+    // but nothing places it in that group.
+    expect(candidates).toHaveLength(1)
+    expect(candidates[0]!.group_id).not.toBe(cluster.rows[0].id)
+
+    // And scoping to it finds nobody at all.
+    expect(await candidatesFor(db, new Map(), cluster.rows[0].id as string)).toEqual([])
+  })
+
+  it('stops suspending machines from harvest', async () => {
+    // The scenario this was asked for: stand the cluster group down and the
+    // machines go back to their harvest group.
+    await db.query(
+      `INSERT INTO models (id, runtime, kind, size_bytes, machines)
+       VALUES ('big-72b','mlx','generate',40000000000,2) ON CONFLICT DO NOTHING`)
+    await db.query(
+      `UPDATE nodes SET state='active', tiers=ARRAY['harvest','cluster']::text[] WHERE id=$1`,
+      [fx.nodeId])
+    const cluster = await db.query(
+      `INSERT INTO pools (name, tier, schedule, preempt, serving_model_id)
+       VALUES ('split-cluster','cluster','gang','never','big-72b') RETURNING id`)
+
+    const held = await (await fetch(`${base}/admin/v1/nodes`,
+                                    { headers: asUser(fx.ownerToken) })).json() as any[]
+    expect(held.find((n) => n.hostname === 'rotorua').suspended).not.toBe(null)
+
+    await db.query(`UPDATE pools SET enabled = false WHERE id = $1`, [cluster.rows[0].id])
+    const freed = await (await fetch(`${base}/admin/v1/nodes`,
+                                     { headers: asUser(fx.ownerToken) })).json() as any[]
+    expect(freed.find((n) => n.hostname === 'rotorua').suspended).toBe(null)
+  })
+})

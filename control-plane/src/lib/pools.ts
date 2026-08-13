@@ -126,7 +126,9 @@ export async function membersOf(
   groupId: string,
 ): Promise<Set<string> | null> {
   const { rows: pools } = await db.query(
-    `SELECT id, tier, membership FROM pools WHERE id = $1`, [groupId])
+    // A group that has been stood down has no members for this purpose: it is
+    // asserting nothing, so nothing should be routed to it.
+    `SELECT id, tier, membership FROM pools WHERE id = $1 AND enabled`, [groupId])
   if (pools.length === 0) return null
   const { rows: nodes } = await db.query(
     `SELECT id, hostname, tier, chip, memory_gb FROM nodes`)

@@ -686,7 +686,13 @@ public actor ControlPlane {
                           storedModels: [String: Double]? = nil,
                           modelInfo: [String: Int] = [:],
                           syncFaults: [String: String]? = nil,
-                          pipelineAddress: String? = nil) async throws -> Directives {
+                          // Resolved by default rather than left nil, so that a
+                          // nil reaching the body below means one thing only:
+                          // this machine looked and has no address to offer.
+                          // The distinction matters because that answer now
+                          // clears the one on record.
+                          pipelineAddress: String? = PipelineAddress.current())
+        async throws -> Directives {
         var body: [String: JSONValue] = [
             "presenceState": .string(state.rawValue),
             // Replaced rather than merged: a model released on a yield is no
@@ -738,7 +744,11 @@ public actor ControlPlane {
         // not where the control plane sees it connecting from. A split runs over
         // whatever link the machines share, and E7's ran over a Thunderbolt
         // bridge while both nodes reached the control plane over the LAN.
-        if let pipelineAddress { body["pipelineAddress"] = .string(pipelineAddress) }
+        // Always sent, including as null. A node whose link has gone is the
+        // only thing that knows, and a control plane holding the address it
+        // last heard will form a gang over a cable that is not there - which is
+        // what a dropped Thunderbolt bridge did to this fleet, twice.
+        body["pipelineAddress"] = pipelineAddress.map { JSONValue.string($0) } ?? .null
         if let onACPower { body["onAcPower"] = .bool(onACPower) }
         if let thermalOK { body["thermalOk"] = .bool(thermalOK) }
         if !capability.isEmpty {

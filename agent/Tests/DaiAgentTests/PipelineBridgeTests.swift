@@ -1,6 +1,7 @@
 import Foundation
 import MLX
 import MLXLLM
+import NIOPosix
 import Testing
 @testable import DaiAgent
 @testable import DaiWorker
@@ -197,5 +198,69 @@ struct PipelineSplitTests {
         let s = PipelineSplit.whole(layerCount: 80)
         #expect(s.startIndex == 0 && s.endIndex == 80)
         #expect(s.isFirst && s.isLast)
+    }
+}
+
+/// The way a model actually calls the link: synchronously, from inside an actor.
+///
+/// Every other test here drives `PipelineChannel` with `await` from a test
+/// function. Nothing exercised the shape the split really has - a synchronous
+/// forward pass on an actor, blocking a thread on a semaphore while an
+/// unstructured task does the asynchronous work underneath. That seam is where
+/// a fleet split stopped: two machines connected over a real socket and then
+/// exchanged nothing at all, twice, with no error on either side.
+struct SyncBridgeTests {
+    /// Stands in for the model: an actor that hands a tensor over and waits,
+    /// exactly as `SplitRunner` does inside a forward pass.
+    actor Compute {
+        private let transport: ChannelPipelineTransport
+
+        init(channel: PipelineChannel, timeout: TimeInterval = 10) {
+            transport = ChannelPipelineTransport(channel: channel, timeout: timeout)
+        }
+
+        /// Plain numbers in and out. An MLXArray is not Sendable, so a test
+        /// that handed one to an actor would be testing something the split
+        /// never does: the tensor is built where it is used, on the machine
+        /// that owns those layers.
+        func handOver(values: [Float], shape: [Int]) throws {
+            try transport.send(MLXArray(values).reshaped(shape), to: 0)
+        }
+
+        func takeOver(shape: [Int]) throws -> [Float] {
+            let expected = MLXArray.zeros(shape, type: Float32.self)
+            return try transport.receive(like: expected, from: 1).asArray(Float.self)
+        }
+    }
+
+    @Test("a hidden state crosses when the model calls the link from an actor",
+          .enabled(if: metalAvailable))
+    func crossesFromInsideAnActor() async throws {
+        let fx = try PipelineChannelSocketTests().fixture()
+        defer { try? FileManager.default.removeItem(at: fx.dir) }
+
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
+        let later = PipelineChannel(group: group)
+        let earlier = PipelineChannel(group: group)
+        let port = try await later.listen(port: 0, tls: fx.serverContext)
+        try await earlier.connect(host: "127.0.0.1", port: port,
+                                  tls: fx.clientContext, serverName: "localhost")
+
+        let sender = Compute(channel: earlier)
+        let receiver = Compute(channel: later)
+        let values = (0..<32).map { Float($0) * 0.25 }
+
+        // Both halves blocking at once, which is the real arrangement: neither
+        // machine has anything else to do until the tensor has crossed, and
+        // each is inside an actor while it waits.
+        async let arrived = receiver.takeOver(shape: [1, 8, 4])
+        try await sender.handOver(values: values, shape: [1, 8, 4])
+        let got = try await arrived
+
+        #expect(got == values)
+
+        await earlier.close()
+        await later.close()
+        try? await group.shutdownGracefully()
     }
 }

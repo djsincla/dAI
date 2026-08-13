@@ -383,7 +383,7 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
       // model id -> why this node does not hold it. Sent only after a sync pass
       // has run, so absent means "nothing new to say" rather than "all well".
       syncFaults?: Record<string, string>
-      pipelineAddress?: string
+      pipelineAddress?: string | null
     }
     const node = req.node!
 
@@ -432,7 +432,15 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
               -- cleared its faults just by heartbeating. A pass that succeeded
               -- sends an empty object, which does clear them.
               model_sync_faults = COALESCE($12::jsonb, model_sync_faults),
-              pipeline_address = COALESCE($13, pipeline_address),
+              -- Present-and-null clears it; absent leaves it alone. Only the
+              -- node knows whether the link its peers reach it on still has an
+              -- address, and a fleet that keeps the last one it heard forms a
+              -- gang over a cable that is no longer there - which is exactly
+              -- what happened: a Thunderbolt bridge went inactive, both
+              -- machines went on advertising the addresses it used to have,
+              -- and a split dialled into silence.
+              pipeline_address = CASE WHEN $14::boolean
+                                      THEN $13 ELSE pipeline_address END,
               last_model_sync = CASE WHEN $12::jsonb IS NULL
                                      THEN last_model_sync ELSE now() END
         WHERE id = $6`,
@@ -446,7 +454,10 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
        b.storedModels ? JSON.stringify(b.storedModels) : null,
        b.agentVersion ?? null, b.agentFingerprint ?? null,
        b.syncFaults === undefined ? null : JSON.stringify(b.syncFaults),
-       b.pipelineAddress ?? null ],
+       b.pipelineAddress ?? null,
+       // Whether the node said anything about it at all. An agent that predates
+       // the field must not appear to have lost its link by heartbeating.
+       'pipelineAddress' in (req.body as object) ],
     )
     // Presence history feeds the capacity graph, which cannot be drawn from
     // current state alone.

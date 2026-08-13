@@ -2525,11 +2525,16 @@ components:
             control plane believes it deployed.
         pipelineAddress:
           type: string
+          nullable: true
           description: >
             Where a peer should dial this machine for pipeline traffic, declared
             by the node rather than observed from its connection. A split runs
             over whatever link the machines share, and that is deliberately not
             always the one they use to reach the control plane.
+            Null means the node has no such address at the moment - the link is
+            down or unconfigured - and clears the one on record. Omitting the
+            field leaves it unchanged, which is what an agent that predates it
+            does.
         syncFaults:
           type: object
           additionalProperties: { type: string }

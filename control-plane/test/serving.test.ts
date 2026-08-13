@@ -331,6 +331,23 @@ describe('serving over HTTP', () => {
     expect(kept.rows[0].pipeline_address).toBe('192.168.99.2')
   })
 
+  it('forgets the address when the node says the link has gone', async () => {
+    // The distinction that matters is between an agent that never mentions the
+    // field and one that says it has no address. Keeping the last one heard
+    // leaves the fleet forming a gang over a cable that is not there: the
+    // Thunderbolt bridge here went inactive, both machines went on being
+    // recorded at the addresses it used to have, and a split dialled silence
+    // and waited two minutes to say so.
+    await db.query(
+      `UPDATE nodes SET pipeline_address = '192.168.99.2' WHERE id=$1`, [fx.nodeId])
+    await fetch(`${base}/agent/v1/heartbeat`, {
+      method: 'POST', headers: asNode(fx.fingerprint),
+      body: JSON.stringify({ presenceState: 'LOCKED', pipelineAddress: null }),
+    })
+    const gone = await db.query(`SELECT pipeline_address FROM nodes WHERE id=$1`, [fx.nodeId])
+    expect(gone.rows[0].pipeline_address).toBe(null)
+  })
+
   it('records why a node is not holding what it was assigned', async () => {
     // A transfer that fails is written to the node's own log and nowhere else,
     // so a machine that has silently stopped fetching looks exactly like one

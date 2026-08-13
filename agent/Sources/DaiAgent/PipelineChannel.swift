@@ -2,6 +2,7 @@ import Foundation
 import NIOCore
 import NIOPosix
 import NIOSSL
+import NIOTLS
 
 /// A direct link between two machines running halves of one model.
 ///
@@ -48,11 +49,27 @@ public actor PipelineChannel {
     private var connected: EventLoopFuture<Channel>?
     private var bound: Channel?
     private var inbox: FrameInbox
+    /// Where this link says what happened to it.
+    ///
+    /// Silent until a gang failed on real hardware and left nothing to read: one
+    /// rank waited its full two minutes for a hidden state and the other's first
+    /// write was still queued behind a handshake that never finished, and
+    /// between them they logged that they had connected and nothing else. A
+    /// transport that cannot say "the peer's certificate was refused" turns a
+    /// one-line answer into an afternoon.
+    private let log: @Sendable (String) -> Void
+    /// How long two machines have to agree to talk before the link is given up
+    /// on. Injectable so a test does not have to wait it out.
+    private let handshakeDeadline: TimeAmount
 
     /// `group` is injectable so a test can run both ends in one process, and so
     /// the agent can share the loop group it already has rather than starting
     /// threads for a link that is idle most of the time.
-    public init(group: EventLoopGroup? = nil) {
+    public init(group: EventLoopGroup? = nil,
+                log: @escaping @Sendable (String) -> Void = { _ in },
+                handshakeDeadline: TimeAmount = .seconds(10)) {
+        self.log = log
+        self.handshakeDeadline = handshakeDeadline
         if let group {
             self.group = group
             self.ownsGroup = false
@@ -86,15 +103,20 @@ public actor PipelineChannel {
                        timeout: TimeInterval = 60) async throws -> Int {
         let accepted = group.next().makePromise(of: Channel.self)
         let inbox = self.inbox
+        let deadline = handshakeDeadline
 
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.backlog, value: 1)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelOption(ChannelOptions.socketOption(.tcp_nodelay), value: 1)
-            .childChannelInitializer { ch in
+            .childChannelInitializer { [log, deadline] ch in
                 do {
+                    log("pipeline: a peer connected from "
+                        + "\(ch.remoteAddress.map(String.init(describing:)) ?? "an unknown address")")
                     let ssl = try NIOSSLServerHandler(context: tls)
                     return ch.pipeline.addHandler(ssl).flatMap {
+                        ch.pipeline.addHandler(HandshakeWatcher(log: log, deadline: deadline))
+                    }.flatMap {
                         ch.pipeline.addHandler(FrameHandler(inbox: inbox))
                     }.map {
                         accepted.succeed(ch)
@@ -211,10 +233,11 @@ public actor PipelineChannel {
     public func connect(host: String, port: Int, tls: NIOSSLContext,
                         serverName: String) async throws {
         let inbox = self.inbox
+        let deadline = handshakeDeadline
 
         let channel = try await ClientBootstrap(group: group)
             .channelOption(ChannelOptions.socketOption(.tcp_nodelay), value: 1)
-            .channelInitializer { ch in
+            .channelInitializer { [log, deadline] ch in
                 do {
                     // SNI is a hostname field and TLS forbids putting an
                     // address in it, so a peer reached by address is offered no
@@ -225,6 +248,8 @@ public actor PipelineChannel {
                     let ssl = try NIOSSLClientHandler(
                         context: tls, serverHostname: Self.sniName(for: serverName))
                     return ch.pipeline.addHandler(ssl).flatMap {
+                        ch.pipeline.addHandler(HandshakeWatcher(log: log, deadline: deadline))
+                    }.flatMap {
                         ch.pipeline.addHandler(FrameHandler(inbox: inbox))
                     }
                 } catch {
@@ -416,5 +441,87 @@ final class FrameHandler: ChannelInboundHandler, @unchecked Sendable {
     func errorCaught(context: ChannelHandlerContext, error: Error) {
         Task { await inbox.fail(PipelineChannel.Failure.transport(String(describing: error))) }
         context.close(promise: nil)
+    }
+}
+
+/// Says whether the two machines actually agreed to talk.
+///
+/// Sits directly behind the TLS handler so it sees the handshake result before
+/// anything reads a byte. Both outcomes are worth a line and neither was
+/// reported before: a completed handshake is the moment the link becomes real,
+/// and a refused one is the whole answer to why a split hangs - it arrives as an
+/// error here, is passed on to fail whoever is waiting, and previously vanished
+/// because nothing in the pipeline had anything to say about it.
+///
+/// Passes everything on rather than consuming it. This watches; the handler
+/// behind it is what does something about it.
+final class HandshakeWatcher: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = ByteBuffer
+    typealias InboundOut = ByteBuffer
+
+    private let log: @Sendable (String) -> Void
+    private let deadline: TimeAmount
+    private var timeout: Scheduled<Void>?
+    private var completed = false
+
+    /// Ten seconds, which is generous for two machines on a cable and short
+    /// enough to be worth reading. The link this runs over is measured in
+    /// fractions of a millisecond; a handshake still unfinished after ten
+    /// seconds is not slow, it is not happening.
+    init(log: @escaping @Sendable (String) -> Void,
+         deadline: TimeAmount = .seconds(10)) {
+        self.log = log
+        self.deadline = deadline
+    }
+
+    /// A link that goes quiet mid-handshake has to end, not wait.
+    ///
+    /// This is what a Thunderbolt bridge dropping looks like from inside: no
+    /// error, no close, no bytes. TCP has nothing to report because nothing was
+    /// refused, so the listener sat through its whole two minute read waiting
+    /// for a hidden state, and the dialer's first write stayed queued behind a
+    /// handshake that would never finish. Both machines held half a model
+    /// meanwhile, and what they eventually said was that the other one had not
+    /// answered - true, and no help at all in finding out why.
+    func handlerAdded(context: ChannelHandlerContext) {
+        let channel = context.channel
+        timeout = context.eventLoop.scheduleTask(in: deadline) { [weak self, log] in
+            guard let self, !self.completed else { return }
+            let peer = channel.remoteAddress.map(String.init(describing:)) ?? "the peer"
+            log("pipeline: no handshake with \(peer) after \(self.deadline.nanoseconds / 1_000_000_000)s;"
+                + " giving up on the link")
+            channel.pipeline.fireErrorCaught(PipelineChannel.Failure.handshakeTimedOut)
+            channel.close(promise: nil)
+        }
+    }
+
+    func handlerRemoved(context: ChannelHandlerContext) {
+        timeout?.cancel()
+        timeout = nil
+    }
+
+    func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
+        if case TLSUserEvent.handshakeCompleted = event {
+            completed = true
+            timeout?.cancel()
+            timeout = nil
+            log("pipeline: handshake completed with "
+                + "\(context.channel.remoteAddress.map(String.init(describing:)) ?? "the peer")")
+        }
+        context.fireUserInboundEventTriggered(event)
+    }
+
+    func errorCaught(context: ChannelHandlerContext, error: Error) {
+        // Named as the peer's refusal rather than as a socket error, because
+        // that is what it almost always is: the certificate one machine presents
+        // is not one the other will accept, and every other explanation for a
+        // link that never carries a byte is rarer than that.
+        log("pipeline: link failed: \(error)")
+        context.fireErrorCaught(error)
+    }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        log("pipeline: the peer closed the link")
+        context.fireChannelInactive()
     }
 }

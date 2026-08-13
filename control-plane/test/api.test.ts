@@ -163,24 +163,25 @@ describe('agent surface', () => {
     expect(r.status).toBe(404)
   })
 
-  it('refuses two groups that would disagree about one machine, naming it', async () => {
-    // The rule the whole design turns on: a machine loads one model, so its
-    // groups are not allowed to disagree about which. Refused on write, with
-    // the machine named, because the coupling is transitive and the group in
-    // the message may not be the one the operator was thinking about.
+  it('lets a cluster group override the harvest group on a shared machine', async () => {
+    // This used to be refused outright, which made the order an operator did
+    // two legitimate things in decide whether they were allowed to: assigning a
+    // model to a cluster group failed because somebody had given a harvest
+    // group a different one weeks earlier.
+    //
+    // The tiers are not equal claims. A cluster group promises never to be
+    // preempted and is the only place a split can run; a harvest group promises
+    // that the machine may be taken away the moment somebody touches a
+    // keyboard. Only one of those survives on a single machine.
     await db.query(
       `INSERT INTO models (id, runtime, kind, size_bytes) VALUES ('org/a','mlx','generate',1),
                                                                 ('org/b','mlx','generate',1)
        ON CONFLICT DO NOTHING`)
-    // In both tiers, which is the arrangement the rule exists for. A cluster
-    // group admits only cluster nodes, so a harvest-only machine would never
-    // match one and there would be nothing to disagree about.
     await db.query(
       `UPDATE nodes SET state='active', tiers=ARRAY['harvest','cluster']::text[] WHERE id=$1`,
       [fx.nodeId])
     await db.query(`UPDATE pools SET serving_model_id='org/a' WHERE id=$1`, [fx.poolId])
 
-    // A second group of the other tier, matching the same machine by rule.
     const other = await db.query(
       `INSERT INTO pools (name, tier, schedule, preempt)
        VALUES ('serving','cluster','gang','never') RETURNING id`)
@@ -190,15 +191,15 @@ describe('agent surface', () => {
       method: 'PUT', headers: asUser(fx.operatorToken),
       body: JSON.stringify({ modelId: 'org/b' }),
     })
-    expect(r.status).toBe(409)
-    const body = await r.json()
-    expect(body.detail).toContain('org/a')
-    expect(body.detail).toContain('org/b')
-    expect(body.violations[0].rule).toBe('groups-must-agree')
+    expect(r.status).toBe(204)
 
-    // And nothing was written.
-    const after = await db.query(`SELECT serving_model_id FROM pools WHERE id=$1`, [otherId])
-    expect(after.rows[0].serving_model_id).toBeNull()
+    // And the machine is told the cluster group's model, not the harvest
+    // group's, which is the whole point of resolving rather than refusing.
+    const beat = await fetch(`${base}/agent/v1/heartbeat`, {
+      method: 'POST', headers: asNode(fx.fingerprint),
+      body: JSON.stringify({ presenceState: 'LOCKED' }),
+    })
+    expect((await beat.json() as any).servingModel).toBe('org/b')
   })
 
   it('allows two groups that agree', async () => {

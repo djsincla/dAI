@@ -527,6 +527,18 @@ paths:
                       Renew the certificate now rather than waiting for two
                       thirds of its life. The node must do this in-process: the
                       Enclave key signs only inside its daemon.
+                  servingModel:
+                    type: string
+                    nullable: true
+                    description: >
+                      Which model this machine should be serving. It belongs to
+                      the machine's group rather than to the machine: a node is
+                      in at most one group per tier and any two groups sharing
+                      it must name the same model, so there is one answer
+                      however many groups it is in. Null means nobody has said,
+                      which the node treats as "keep what you have" rather than
+                      "stop serving" - a group that has not been given a model
+                      is not an instruction to unload one.
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
 

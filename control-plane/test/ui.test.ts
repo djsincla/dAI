@@ -9,7 +9,8 @@ import {
 import {
   TIERS, describeTier, inBothTiers, tierMachines, tiersAfter, tiersOf,
   attentionItems, capacityOf, copyState, distributionOf, humanBytes, importCost,
-  bucketFor, certificateStanding, clampWindow, suspensionNote, describeWindow, groupMachines, groupMismatches,
+  bucketFor, certificateStanding, clampWindow, effectiveModelFor, groupMismatches,
+  suspensionNote, describeWindow, groupMachines, groupMismatches,
   groupMode, groupWarning, importProgress, isStale, isSynthetic, kindsFor,
   machinesThatCouldHold, matchesQuery, MAX_WINDOW_S, MIN_WINDOW_S, nextSort,
   pauseAction, progressOf, runsGpu, servingFor, sortRows, windowFromDrag,
@@ -1018,5 +1019,65 @@ describe('what the fleet view says about a suspended machine', () => {
 
   it('says nothing about a machine that is simply idle', () => {
     expect(suspensionNote(held({ suspended: null }))).toBe(null)
+  })
+})
+
+/**
+ * A machine running something other than what its group serves.
+ *
+ * This fleet was doing exactly that and nothing said so: split-cluster declared
+ * a 14B while its two machines ran a 32B and a 30B, because a machine's model
+ * came from the argument its daemon was started with and nothing ever compared
+ * the two.
+ */
+describe('what the fleet view says about the model a machine runs', () => {
+  // tier 'cluster' because these machines are in both tiers, which is the
+  // arrangement the override rule exists for. A cluster group will not take a
+  // harvest-tier machine at all.
+  const machine = (hostname: string, runs: string[]) => ({
+    id: hostname, hostname, tier: 'cluster', chip: 'Apple M2 Max',
+    memoryGb: 64, models: runs,
+  }) as any
+  const g = (name: string, tier: string, servingModelId: string | null) => ({
+    id: name, name, tier, membership: {}, servingModelId,
+  }) as any
+
+  it('flags a machine that is not running its group model', () => {
+    const pool = g('split-cluster', 'cluster', 'mlx/Qwen2.5-14B')
+    const found = groupMismatches(
+      pool, [machine('rotorua', ['mlx/Qwen3-30B'])], [], [pool])
+    expect(found).toHaveLength(1)
+    expect(found[0]!.kind).toBe('wrong-model')
+    expect(found[0]!.reason).toContain('Qwen3-30B')
+    expect(found[0]!.reason).toContain('Qwen2.5-14B')
+  })
+
+  it('says nothing when the machine is running it', () => {
+    const pool = g('split-cluster', 'cluster', 'mlx/Qwen2.5-14B')
+    expect(groupMismatches(pool, [machine('rotorua', ['mlx/Qwen2.5-14B', 'ane:embed'])],
+                           [], [pool])).toEqual([])
+  })
+
+  it('does not blame a harvest group for being overridden', () => {
+    // The cluster group wins where they share a machine, so a harvest group
+    // whose machine runs the cluster group's model is not a group with a
+    // problem - it is the rule working. Blaming it here would put a warning on
+    // every correctly overridden group in the fleet.
+    const harvest = g('overnight', 'harvest', 'mlx/Qwen3-30B')
+    const cluster = g('split-cluster', 'cluster', 'mlx/Qwen2.5-14B')
+    const nodes = [machine('rotorua', ['mlx/Qwen2.5-14B'])]
+    expect(groupMismatches(harvest, nodes, [], [harvest, cluster])).toEqual([])
+  })
+
+  it('resolves a disagreement in the cluster group\'s favour', () => {
+    const harvest = g('overnight', 'harvest', 'mlx/Qwen3-30B')
+    const cluster = g('split-cluster', 'cluster', 'mlx/Qwen2.5-14B')
+    expect(effectiveModelFor(machine('rotorua', []), [harvest, cluster]))
+      .toBe('mlx/Qwen2.5-14B')
+  })
+
+  it('says nothing about a machine whose groups have named nothing', () => {
+    expect(effectiveModelFor(machine('rotorua', []), [g('overnight', 'harvest', null)]))
+      .toBe(null)
   })
 })

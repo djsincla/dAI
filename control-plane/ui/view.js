@@ -576,7 +576,7 @@ export function groupMode(pool) {
  * thing while the membership says another is worth surfacing rather than
  * leaving for somebody to find.
  */
-export function groupMismatches(pool, nodes, models) {
+export function groupMismatches(pool, nodes, models, allGroups) {
   const members = nodes.filter((n) => matchesGroup(n, pool))
   const assigned = models.filter((m) => (m.assignedPools ?? []).includes(pool.id))
   const out = []
@@ -603,6 +603,28 @@ export function groupMismatches(pool, nodes, models) {
         reason: `${node.hostname} is below this group's own ${floor}GB floor`,
       })
     }
+    // Running something other than what the group serves.
+    //
+    // The group's serving model is a declaration, and until the machine is told
+    // it stays one: a machine's model comes from the argument its daemon was
+    // started with. So a group can say it serves a 14B while its two machines
+    // run a 32B and a 30B, and nothing anywhere says otherwise - which is
+    // exactly what this fleet was doing when somebody looked.
+    // What this machine should be running, which is not always what *this*
+    // group says: a cluster group overrides a harvest one where they share a
+    // machine. Comparing against the group's own declaration would light up
+    // every harvest group that has been legitimately overridden.
+    const serves = effectiveModelFor(node, allGroups ?? [pool]) ?? pool.servingModelId
+    const canServe = node.models ?? []
+    if (serves && canServe.length > 0 && !canServe.includes(serves)) {
+      out.push({
+        nodeId: node.id, hostname: node.hostname, kind: 'wrong-model',
+        reason: `${node.hostname} is running ${
+          canServe.filter((m) => !m.startsWith('ane:')).map((m) => m.split('/').pop()).join(', ')
+            || 'nothing'}, not this group's ${serves.split('/').pop()}`,
+      })
+    }
+
     const chips = pool.membership?.chips
     if (chips && node.chip && !chips.includes(node.chip)) {
       out.push({
@@ -619,11 +641,16 @@ export function groupWarning(mismatches) {
   if (mismatches.length === 0) return null
   const worst = mismatches.some((m) => m.kind === 'too-small') ? 'bad' : 'warn'
   const machines = new Set(mismatches.map((m) => m.hostname)).size
-  return {
-    level: worst,
-    label: `${machines} machine${machines === 1 ? '' : 's'} cannot do what this group holds`,
-    reasons: mismatches.map((m) => m.reason),
-  }
+  // Two different complaints, and the label has to say which. "Cannot do what
+  // this group holds" is about capability; running the wrong model is about
+  // agreement, and reading the second as the first sends somebody to look at
+  // memory on a machine that has plenty.
+  const wrong = new Set(
+    mismatches.filter((m) => m.kind === 'wrong-model').map((m) => m.hostname)).size
+  const label = wrong === machines
+    ? `${machines} machine${machines === 1 ? '' : 's'} not serving this group's model`
+    : `${machines} machine${machines === 1 ? '' : 's'} cannot do what this group holds`
+  return { level: worst, label, reasons: mismatches.map((m) => m.reason) }
 }
 
 /**
@@ -1033,4 +1060,22 @@ export function suspensionNote(node) {
     ? ` (not available to ${s.from.join(' or ')})`
     : ''
   return `holding part of ${model} across ${s.machines} machines for ${s.by}${from}`
+}
+
+/**
+ * What a machine should be running, given every group it is in.
+ *
+ * The browser's copy of the rule the control plane applies: a cluster group
+ * overrides a harvest one where they share a machine, because only one of the
+ * two promises survives on a single box and it is not the preemptible one.
+ *
+ * Duplicated deliberately rather than fetched. The fleet view has to be able to
+ * say "this machine is running the wrong thing" without a round trip per row,
+ * and the alternative - trusting a field the server computed - hides exactly the
+ * disagreement this is here to show.
+ */
+export function effectiveModelFor(node, groups) {
+  const mine = (groups ?? []).filter((g) => matchesGroup(node, g) && g.servingModelId)
+  const cluster = mine.find((g) => g.tier === 'cluster')
+  return (cluster ?? mine[0])?.servingModelId ?? null
 }

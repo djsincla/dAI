@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { coupledWith, groupsFor, violations, type Group } from '../src/lib/groupRules.js'
+import { coupledWith, effectiveModel, groupsFor, overrides, violations,
+         type Group } from '../src/lib/groupRules.js'
 import type { NodeFacts } from '../src/lib/pools.js'
 
 /**
@@ -58,63 +59,84 @@ describe('a machine is in at most one group per tier', () => {
   })
 })
 
-describe('groups that share a machine agree on what it serves', () => {
-  it('allows two groups serving the same model', () => {
-    const nodes = [node('rotorua')]
-    const groups = [
-      group('overnight', { servingModelId: 'qwen3-30b' }),
-      group('serving', { tier: 'cluster', servingModelId: 'qwen3-30b' }),
-    ]
-    expect(violations(nodes, groups)).toEqual([])
-  })
-
-  it('refuses a disagreement, naming the machine and both claims', () => {
-    // A machine loads one model. Without this nothing decides which group wins,
-    // and the fleet cannot answer why a machine is not serving what it was
-    // assigned.
+describe('when a machine\'s groups disagree about what it runs', () => {
+  it('lets the cluster group win rather than refusing the pair', () => {
+    // The two tiers are not equal claims. A cluster group promises never to be
+    // preempted and is the only place a split can run; a harvest group promises
+    // that the machine may be taken away. Only one of those survives contact
+    // with a single machine, and it is not the harvest one.
     const nodes = [node('rotorua')]
     const groups = [
       group('overnight', { servingModelId: 'qwen3-30b' }),
       group('serving', { tier: 'cluster', servingModelId: 'coder-32b' }),
     ]
-    const found = violations(nodes, groups)
-    expect(found).toHaveLength(1)
-    expect(found[0]!.rule).toBe('groups-must-agree')
-    expect(found[0]!.detail).toContain('rotorua')
-    expect(found[0]!.detail).toContain('qwen3-30b')
-    expect(found[0]!.detail).toContain('coder-32b')
+    expect(violations(nodes, groups)).toEqual([])
+    expect(effectiveModel(nodes[0]!, groups)).toBe('coder-32b')
   })
 
-  it('lets a group that names no model sit beside one that does', () => {
-    // Otherwise the order an operator does two legitimate things in decides
-    // whether they are allowed to, which is a rule nobody can hold in their head.
+  it('follows the harvest group when there is no cluster group to override it', () => {
+    const nodes = [node('rotorua')]
+    const groups = [group('overnight', { servingModelId: 'qwen3-30b' })]
+    expect(effectiveModel(nodes[0]!, groups)).toBe('qwen3-30b')
+  })
+
+  it('says nobody has said, rather than serve nothing', () => {
+    // Null is not an instruction to unload. A group that has not been given a
+    // model is not a claim about anything.
+    const nodes = [node('rotorua')]
+    expect(effectiveModel(nodes[0]!, [group('overnight')])).toBe(null)
+  })
+
+  it('still refuses a disagreement nothing can resolve', () => {
+    // Two groups of the same tier have no ordering between them, so there is
+    // nothing to prefer. One-group-per-tier already makes this unreachable;
+    // this is the check that would catch it if that rule were relaxed.
+    const nodes = [node('rotorua')]
+    const groups = [
+      group('a', { servingModelId: 'x' }),
+      group('b', { servingModelId: 'y' }),
+    ]
+    const found = violations(nodes, groups).filter((v) => v.rule === 'groups-must-agree')
+    expect(found).toHaveLength(1)
+    expect(found[0]!.detail).toContain('rotorua')
+  })
+})
+
+describe('which harvest groups are being overridden', () => {
+  it('names the machine, the group, and what it runs instead', () => {
+    // Not a fault - it is the rule working - but a harvest group whose machines
+    // all run somebody else's model is a group whose own declaration means
+    // nothing at the moment, and reading it would be reading something untrue.
+    const nodes = [node('rotorua')]
+    const groups = [
+      group('overnight', { servingModelId: 'qwen3-30b' }),
+      group('serving', { tier: 'cluster', servingModelId: 'coder-32b' }),
+    ]
+    const found = overrides(nodes, groups)
+    expect(found).toHaveLength(1)
+    expect(found[0]).toMatchObject({
+      hostname: 'rotorua', harvest: 'overnight',
+      runs: 'coder-32b', insteadOf: 'qwen3-30b', by: 'serving',
+    })
+  })
+
+  it('says nothing when the two agree', () => {
+    const nodes = [node('rotorua')]
+    const groups = [
+      group('overnight', { servingModelId: 'same' }),
+      group('serving', { tier: 'cluster', servingModelId: 'same' }),
+    ]
+    expect(overrides(nodes, groups)).toEqual([])
+  })
+
+  it('says nothing when the harvest group has named nothing', () => {
+    // Nothing is being overridden: the group has made no claim to lose.
     const nodes = [node('rotorua')]
     const groups = [
       group('overnight'),
-      group('serving', { tier: 'cluster', servingModelId: 'qwen3-30b' }),
+      group('serving', { tier: 'cluster', servingModelId: 'coder-32b' }),
     ]
-    expect(violations(nodes, groups)).toEqual([])
-  })
-
-  it('reports one machine once, not once per direction', () => {
-    const nodes = [node('rotorua')]
-    const groups = [
-      group('a', { servingModelId: 'x' }),
-      group('b', { tier: 'cluster', servingModelId: 'y' }),
-    ]
-    expect(violations(nodes, groups).filter((v) => v.rule === 'groups-must-agree'))
-      .toHaveLength(1)
-  })
-
-  it('names every machine that is affected, not just the first', () => {
-    const nodes = [node('rotorua'), node('orca')]
-    const groups = [
-      group('a', { servingModelId: 'x' }),
-      group('b', { tier: 'cluster', servingModelId: 'y' }),
-    ]
-    const detail = violations(nodes, groups).map((v) => v.detail).join(' ')
-    expect(detail).toContain('rotorua')
-    expect(detail).toContain('orca')
+    expect(overrides(nodes, groups)).toEqual([])
   })
 })
 

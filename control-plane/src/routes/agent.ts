@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import type { Db } from '../lib/db.js'
 import { agentAuth } from '../lib/auth.js'
 import { poolsFor } from '../lib/pools.js'
+import { effectiveModel } from '../lib/groupRules.js'
 import { repositoryRoot, safePath } from '../lib/repository.js'
 import { outputsRoot, sceneById, scenesRoot } from '../lib/scenes.js'
 import { blobPath, finishIfDone, manifestFor, outputPath } from '../lib/attachments.js'
@@ -473,7 +474,33 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
     // renewal cannot be run by hand from any shell.
     const { rows: asked } = await db.query(
       `SELECT renew_requested_at FROM nodes WHERE id = $1`, [node.id])
-    res.json({ renewRequested: asked[0]?.renew_requested_at != null })
+
+    // Which model this machine should be serving, which belongs to its group
+    // and not to the machine.
+    //
+    // Until this existed a node's model was the argument its daemon happened to
+    // be started with, set once by hand per box. A group could therefore
+    // declare it served one model while its machines ran two different ones,
+    // and nothing anywhere disagreed - which is what this fleet was doing.
+    //
+    // Where a machine's cluster and harvest groups disagree, the cluster group
+    // wins: it promises never to be preempted and is the only place a split can
+    // run, and the harvest group promises the opposite. Only one of those
+    // survives contact with a single machine.
+    const { rows: pools } = await db.query(
+      `SELECT id, name, tier, membership, serving_model_id FROM pools
+        WHERE serving_model_id IS NOT NULL`)
+    const servingModel = effectiveModel(node as never, (pools as any[]).map((p) => ({
+      ...p, servingModelId: p.serving_model_id as string,
+    })) as never)
+
+    res.json({
+      renewRequested: asked[0]?.renew_requested_at != null,
+      // Null means nobody has said, which the node treats as "keep what you
+      // have" rather than "stop serving": a group that has not been given a
+      // model is not an instruction to unload one.
+      servingModel,
+    })
   })
 
   /**

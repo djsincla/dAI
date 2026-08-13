@@ -56,6 +56,9 @@ public actor SplitRunner {
     private let plan: Plan
     private let transport: ChannelPipelineTransport
     private let channel: PipelineChannel
+    /// Where the model records a link failure it had no way to throw. Checked
+    /// after every step, before anything is sampled.
+    private let fault = PipelineFault()
 
     public init(plan: Plan, channel: PipelineChannel) {
         self.plan = plan
@@ -114,7 +117,7 @@ public actor SplitRunner {
         guard let pipelineable = model as? any Pipelineable else {
             throw Failure.notPipelineable(config.modelType)
         }
-        pipelineable.pipeline(split, transport: transport)
+        pipelineable.pipeline(split, transport: transport, fault: fault)
 
         try loadWeights(modelDirectory: directory, model: model,
                         quantization: config.quantization,
@@ -213,6 +216,17 @@ public actor SplitRunner {
             residentGb: Double(GPU.peakMemory) / 1_073_741_824)
     }
 
+    /// Give up if the model recorded a link failure it could not throw.
+    ///
+    /// This is the whole point of the fault latch. A pipeline failure used to
+    /// be a `fatalError`, which killed the daemon on every machine in the gang
+    /// - including the harvest work that had nothing to do with the split - and
+    /// told the control plane nothing at all. Failing the request instead is
+    /// what `runSplit` already knows how to report.
+    private func failIfTheLinkBroke() throws {
+        if let error = fault.take() { throw error }
+    }
+
     /// One token, on both machines.
     private func step(_ loaded: Loaded, input: MLXArray, cache: [KVCache]) throws -> Int {
         let split = loaded.split
@@ -220,6 +234,11 @@ public actor SplitRunner {
         let last = logits[0..., -1, 0...]
 
         if split.isLast {
+            // Before anything is sampled. The forward pass cannot throw, so a
+            // hidden state that never arrived leaves `last` holding this
+            // machine's own embeddings - the right shape and the wrong numbers,
+            // which would sample cleanly and answer confident nonsense.
+            try failIfTheLinkBroke()
             let chosen = argMax(last, axis: -1)
             eval(chosen)
             let token = chosen.item(Int.self)
@@ -241,6 +260,11 @@ public actor SplitRunner {
             // actually runs: MLX is lazy, and a graph nobody evaluates is a
             // hidden state that never leaves.
             eval(last)
+            // After the eval rather than before it, because that is when the
+            // send has actually happened and therefore when a failure in it is
+            // known. Reported here rather than waiting to time out on the token
+            // that is never coming back.
+            try failIfTheLinkBroke()
             let told = try transport.receive(like: MLXArray([Int32(0)]),
                                              from: split.rank - 1)
             eval(told)

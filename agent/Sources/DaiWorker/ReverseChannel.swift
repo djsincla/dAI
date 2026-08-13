@@ -1,5 +1,6 @@
 import DaiAgent
 import Foundation
+import MLXLLM
 
 /// Serves interactive requests pushed down from the control plane.
 ///
@@ -292,10 +293,15 @@ public actor ReverseChannel {
                 text: done.isHead ? done.outcome.text : nil,
                 error: nil, completionTokens: done.outcome.tokens)
         } catch {
-            log("rank \(split.rank) failed: \(error)")
+            // A pipeline failure already names the rank that noticed, which is
+            // not always this one: rank 0 timing out and rank 1 failing to send
+            // are the same broken link seen from both ends, and prefixing both
+            // with the local rank would say it twice and lose which end spoke.
+            let detail = error is PipelineStep
+                ? "\(error)" : "rank \(split.rank) failed: \(error)"
+            log(detail)
             try? await controlPlane.reportDispatch(
-                id: dispatch.id, text: nil,
-                error: "rank \(split.rank) failed: \(error)")
+                id: dispatch.id, text: nil, error: detail)
         }
     }
 

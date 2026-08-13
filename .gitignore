@@ -10,8 +10,12 @@ __pycache__/
 *.err.log
 /spike/**/results/
 
-# Models are large and fetched on demand, never committed
-models/
+# Model weights are large and fetched on demand, never committed. Anchored,
+# because a bare `models/` also matched every source directory named Models -
+# including the vendored library's, so the whole of MLXLLM/Models was silently
+# absent from the repository along with the pipelining this fleet depends on.
+/models/
+control-plane/models/
 *.safetensors
 *.gguf
 *.mlx
@@ -53,8 +57,10 @@ control-plane/packaging/.node-cache/
 # never committed - the packages are large and reproducible from the tag.
 /dist/
 
-# xcodebuild derived data (the GPU-capable build lives here)
+# xcodebuild derived data (the GPU-capable build lives here, and the tests that
+# need the Metal shaders run out of a second one)
 agent/.xcbuild/
+agent/.xcbuild-test/
 # profiling output, from before coverage was disabled in the build
 *.profraw
 

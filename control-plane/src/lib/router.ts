@@ -18,6 +18,10 @@ import { POLICY, type PresenceState, type WorkKind } from './policy.js'
 export interface Candidate {
   id: string
   hostname: string
+  /// Which group this machine belongs to at the tier the work needs. A gang
+  /// runs inside one group: the machines have to agree about what they serve,
+  /// and that agreement is a property of the group rather than of the fleet.
+  group_id?: string | null
   /// Cluster nodes are never preempted, so they are not presence-gated.
   tier?: 'harvest' | 'cluster'
   presence_state: PresenceState | null
@@ -31,6 +35,8 @@ export type RefusalReason =
   | 'all-in-use'
   | 'no-capacity-for-kind'
   | 'node-unreachable'
+  | 'gang-short'
+  | 'gang-not-cluster'
 
 export interface Refusal {
   refused: RefusalReason
@@ -110,6 +116,102 @@ export function selectNode(
     // one is the slower.
     return rb - ra
   })[0]!
+}
+
+/**
+ * Pick a whole gang, or explain why there is not one.
+ *
+ * A split model runs across N machines in lockstep. Every rank has to be
+ * admitted together or none of them: half a pipeline is not a slower answer, it
+ * is a request that hangs while holding memory on machines that could have been
+ * doing something else.
+ *
+ * Three conditions, and each rules out a way this goes wrong quietly:
+ *
+ * **Cluster tier only.** Never-preempted is what the work depends on. A harvest
+ * node cannot promise it at any memory ceiling or QoS, and one rank yielding
+ * because somebody touched a keyboard takes the whole job down and wastes every
+ * other machine's model load.
+ *
+ * **One group.** Machines in a group agree about what they serve; machines in
+ * different groups do not. A gang assembled across groups could be handed ranks
+ * of models that are not the same model.
+ *
+ * **All of them, or none.** Returning what is available and letting the caller
+ * cope is the shape that produces a half-started pipeline.
+ *
+ * On failure the caller releases every member. That is the decision taken
+ * deliberately over holding the survivors or resuming elsewhere: resuming needs
+ * the lost rank's KV cache, which is not transferable, and holding costs memory
+ * on a machine doing nothing while betting the peer returns. On a tier defined
+ * as never-preempted this should be rare, and building machinery for a case the
+ * tier exists to prevent would be admitting the tier does not work.
+ */
+export function selectGang(
+  candidates: Candidate[],
+  kind: WorkKind,
+  modelHash: string | null,
+  size: number,
+): Candidate[] | Refusal {
+  if (size <= 1) {
+    const one = selectNode(candidates, kind, modelHash)
+    return isRefusal(one) ? one : [one]
+  }
+  if (candidates.length === 0) {
+    return { refused: 'no-nodes', detail: 'no active nodes are connected' }
+  }
+
+  const cluster = candidates.filter((c) => c.tier === 'cluster')
+  if (cluster.length === 0) {
+    return {
+      refused: 'gang-not-cluster',
+      detail: `a ${size}-machine model runs only on cluster-tier machines, which are never `
+        + 'preempted; no connected node is one',
+    }
+  }
+
+  // Grouped, because a gang runs inside one group. Machines with no group are
+  // kept apart from each other rather than pooled: two ungrouped machines have
+  // not been said to agree about anything.
+  const byGroup = new Map<string, Candidate[]>()
+  for (const c of cluster) {
+    const key = c.group_id ?? `ungrouped:${c.id}`
+    byGroup.set(key, [...(byGroup.get(key) ?? []), c])
+  }
+
+  // Residency is a preference within a group, as it is for a single node: a
+  // machine without the weights is still better than refusing, it just pays the
+  // load once. But a gang prefers a group that can field the whole thing
+  // already, because N cold loads is N times the delay rather than one.
+  const ranked = [...byGroup.values()]
+    .filter((members) => members.length >= size)
+    .sort((a, b) => resident(b, modelHash) - resident(a, modelHash))
+
+  const chosen = ranked[0]
+  if (!chosen) {
+    const largest = Math.max(0, ...[...byGroup.values()].map((m) => m.length))
+    return {
+      refused: 'gang-short',
+      detail: `this model needs ${size} machines in one group; the largest cluster group with `
+        + `connected machines has ${largest}`,
+    }
+  }
+
+  // Least loaded first, then measured throughput, so a gang is assembled from
+  // the machines least likely to make the rest of it wait. A pipeline runs at
+  // the speed of its slowest rank.
+  return [...chosen]
+    .sort((a, b) => {
+      if (a.in_flight !== b.in_flight) return a.in_flight - b.in_flight
+      const key = modelHash ?? kind
+      return (b.capability_profiles?.[key] ?? 0) - (a.capability_profiles?.[key] ?? 0)
+    })
+    .slice(0, size)
+}
+
+function resident(members: Candidate[], modelHash: string | null): number {
+  if (!modelHash) return 0
+  return members.filter((m) => modelHash in (m.resident_models ?? {})).length
 }
 
 export function isRefusal(x: Candidate | Refusal): x is Refusal {

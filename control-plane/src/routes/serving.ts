@@ -3,7 +3,9 @@ import type { Db } from '../lib/db.js'
 import type { Broker } from '../lib/broker.js'
 import { userAuth } from '../lib/auth.js'
 import { POLICY, type PresenceState } from '../lib/policy.js'
-import { candidatesFor, isRefusal, selectNode } from '../lib/router.js'
+import { candidatesFor, isRefusal, selectGang, selectNode,
+         type Candidate, type Refusal } from '../lib/router.js'
+import { shapeOf } from '../lib/shape.js'
 
 /**
  * OpenAI-compatible serving surface.
@@ -54,6 +56,34 @@ async function servableModels(db: Db, broker: Broker) {
     }
     return models
   }
+
+
+/**
+ * Whether this model needs more than one machine, and whether a gang exists.
+ *
+ * A guard before anything else, because the failure it prevents is silent. A
+ * model declared to need two machines, routed by `selectNode`, is dispatched to
+ * one - which either fails to load or, worse, loads a model built from a
+ * reduced layer count and answers confidently from half a network.
+ *
+ * Returns null when the model runs on one machine and the ordinary path
+ * applies.
+ */
+async function gangFor(
+  db: Db, modelId: string | null, connected: Candidate[],
+): Promise<{ refusal: Refusal } | { members: Candidate[] } | null> {
+  if (!modelId) return null
+  const { rows } = await db.query(
+    `SELECT size_bytes, machines, min_memory_gb FROM models WHERE id = $1`, [modelId])
+  if (rows.length === 0) return null
+
+  const shape = shapeOf(rows[0] as never)
+  if (shape.machines <= 1) return null
+
+  const gang = selectGang(connected, 'generate', modelId, shape.machines)
+  if (isRefusal(gang)) return { refusal: gang }
+  return { members: gang }
+}
 
 export function servingRoutes(db: Db, broker: Broker): Router {
   const r = Router()
@@ -128,6 +158,31 @@ export function servingRoutes(db: Db, broker: Broker): Router {
     // Only nodes holding the reverse channel open can be routed to. A node that
     // is eligible on paper but not listening cannot answer in time.
     const connected = candidates.filter((c) => broker.isConnected(c.id))
+
+    // A split model is not a big model. Routing it as though it were dispatches
+    // one machine to run something built from a reduced layer count, which
+    // answers rather than failing.
+    const gang = await gangFor(db, modelHash, connected)
+    if (gang && 'refusal' in gang) {
+      res.status(503).json({ error: {
+        message: gang.refusal.detail,
+        type: 'no_capacity',
+        code: gang.refusal.refused,
+      } })
+      return
+    }
+    if (gang && 'members' in gang) {
+      // Admission works; the ranks cannot be started yet. Said plainly rather
+      // than dispatched to one machine, because a wrong answer is worse than a
+      // refusal and much harder to notice.
+      res.status(503).json({ error: {
+        message: `${modelHash} runs across ${gang.members.length} machines and a gang was `
+          + 'admitted, but this control plane cannot start the ranks yet',
+        type: 'no_capacity',
+        code: 'gang-not-dispatchable',
+      } })
+      return
+    }
 
     const choice = selectNode(connected, 'generate', modelHash)
     if (isRefusal(choice)) {
@@ -216,6 +271,26 @@ export function servingRoutes(db: Db, broker: Broker): Router {
 
     const candidates = await candidatesFor(db, broker.inFlightCounts)
     const connected = candidates.filter((c) => broker.isConnected(c.id))
+    const gang = await gangFor(db, body.model ?? null, connected)
+    if (gang && 'refusal' in gang) {
+      res.status(503).json({
+        type: 'error',
+        error: { type: 'overloaded_error', message: gang.refusal.detail },
+      })
+      return
+    }
+    if (gang && 'members' in gang) {
+      res.status(503).json({
+        type: 'error',
+        error: {
+          type: 'overloaded_error',
+          message: `${body.model} runs across ${gang.members.length} machines and a gang was `
+            + 'admitted, but this control plane cannot start the ranks yet',
+        },
+      })
+      return
+    }
+
     const choice = selectNode(connected, 'generate', body.model)
     if (isRefusal(choice)) {
       res.status(503).json({

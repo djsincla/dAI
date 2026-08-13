@@ -202,6 +202,66 @@ describe('serving over HTTP', () => {
     node.stop()
   })
 
+  it('will not serve a split model from a single machine', async () => {
+    // The silent failure this guard exists for. Without it selectNode picks one
+    // node for a model declared to need two, and the node loads a model built
+    // from a reduced layer count - which answers rather than failing, from half
+    // a network, confidently.
+    await db.query(
+      `INSERT INTO models (id, runtime, kind, size_bytes, machines)
+       VALUES ('org/split','mlx','generate',$1,2)
+       ON CONFLICT (id) DO UPDATE SET machines = 2`, [Math.round(40 * 1073741824)])
+    const node = attachNode(() => ({ text: 'x', promptTokens: 1, completionTokens: 1 }))
+    await new Promise((r) => setTimeout(r, 150))
+
+    const r = await fetch(`${base}/v1/chat/completions`, {
+      method: 'POST', headers: asUser(fx.operatorToken),
+      body: JSON.stringify({
+        model: 'org/split', messages: [{ role: 'user', content: 'hi' }], max_tokens: 8,
+      }),
+    })
+    expect(r.status).toBe(503)
+    const body = await r.json()
+    // One connected machine cannot be a gang of two, and the reason says so
+    // rather than reporting a busy fleet.
+    expect(body.error.message).toMatch(/2 machines|never preempted/)
+    node.stop()
+  })
+
+  it('still serves an ordinary model from one machine', async () => {
+    // The guard has to be invisible to everything that fits, which is nearly
+    // everything.
+    await db.query(
+      `INSERT INTO models (id, runtime, kind, size_bytes, machines)
+       VALUES ('org/whole','mlx','generate',$1,1)
+       ON CONFLICT (id) DO UPDATE SET machines = 1`, [Math.round(4 * 1073741824)])
+    const node = attachNode(() => ({ text: 'ok', promptTokens: 1, completionTokens: 1 }))
+    await new Promise((r) => setTimeout(r, 150))
+
+    const r = await fetch(`${base}/v1/chat/completions`, {
+      method: 'POST', headers: asUser(fx.operatorToken),
+      body: JSON.stringify({
+        model: 'org/whole', messages: [{ role: 'user', content: 'hi' }], max_tokens: 8,
+      }),
+    })
+    expect(r.status).toBe(200)
+    node.stop()
+  })
+
+  it('is silent about a model the catalogue has never heard of', async () => {
+    // Shape is only knowable for a model in the catalogue. An unknown name
+    // falls through to ordinary routing rather than being refused by a check
+    // that had nothing to check.
+    const node = attachNode(() => ({ text: 'ok', promptTokens: 1, completionTokens: 1 }))
+    await new Promise((r) => setTimeout(r, 150))
+    const r = await fetch(`${base}/v1/chat/completions`, {
+      method: 'POST', headers: asUser(fx.operatorToken),
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }], max_tokens: 8 }),
+    })
+    expect(r.status).toBe(200)
+    node.stop()
+  })
+
   it('refuses while the machine is in use, even with the node connected', async () => {
     await setPresence(db, fx.nodeId, 'ACTIVE')
     const node = attachNode(() => ({ text: 'x', promptTokens: 1, completionTokens: 1 }))

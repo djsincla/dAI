@@ -22,6 +22,7 @@ set -euo pipefail
 PLIST=/Library/LaunchDaemons/com.dai.agent.plist
 LABEL=com.dai.agent
 MODEL_INDEX=3          # dai-agent work <url> <model> <ane-model>
+EXPECTED_ARGS=5        # the whole argument vector, which the daemon reads by position
 MODEL=""; SHOW=0; REVERT=0
 
 while [[ $# -gt 0 ]]; do
@@ -70,7 +71,24 @@ else
   # how a machine ends up with a daemon nobody can account for.
   mkdir -p /var/db/dai
   cp "$PLIST" /var/db/dai/com.dai.agent.plist.before-model-change
-  plutil -replace "ProgramArguments.$MODEL_INDEX" -string "$MODEL" "$PLIST"
+  # remove then insert, not -replace. On an array index `plutil -replace`
+  # INSERTS: it grows the array and shifts everything after it right. Running
+  # this script twice on rotorua left seven arguments instead of five, with the
+  # ANE model pushed out of position - so the daemon read the language model as
+  # its ANE model, failed to load it, and reported ane=no while looking healthy
+  # in every other respect.
+  plutil -remove "ProgramArguments.$MODEL_INDEX" "$PLIST"
+  plutil -insert "ProgramArguments.$MODEL_INDEX" -string "$MODEL" "$PLIST"
+
+  # The daemon takes a fixed number of arguments and silently misreads them if
+  # the count is wrong, so it is checked rather than assumed.
+  COUNT=$(plutil -extract ProgramArguments raw -o - "$PLIST" | head -1)
+  if [[ "$COUNT" != "$EXPECTED_ARGS" ]]; then
+    echo "the daemon now has $COUNT arguments, expected $EXPECTED_ARGS" >&2
+    echo "  restoring and stopping; nothing has been reloaded" >&2
+    cp /var/db/dai/com.dai.agent.plist.before-model-change "$PLIST"
+    exit 1
+  fi
   echo "now:  $(current)"
 fi
 

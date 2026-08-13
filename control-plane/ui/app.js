@@ -15,6 +15,7 @@
 import {
   attentionItems, capacityOf, copyState, distributionOf, humanBytes, importCost,
   bucketFor, certificateStanding, clampWindow, describeTier, describeWindow,
+  suspensionNote,
   groupMachines, groupMismatches,
   inBothTiers, tierMachines, tiersAfter,
   groupMode, groupWarning, importProgress, isSynthetic, kindsFor,
@@ -284,6 +285,10 @@ function renderNodes(nodes, details) {
     const kinds = kindsFor(n)
     const serving = servingFor(n)
     const action = pauseAction(n)
+    // Why this machine is offered nothing, when the reason is not idleness. A
+    // suspended machine is doing what it was told to and there is nothing to
+    // fix, which is exactly why it must not read as a quiet one.
+    const note = suspensionNote(n)
     const tr = document.createElement('tr')
     tr.innerHTML = `
       <td><b>${escape(n.hostname)}</b></td>
@@ -293,6 +298,7 @@ function renderNodes(nodes, details) {
       <td><span class="pill ${escape(n.presenceState ?? '')}">${escape(n.presenceState ?? 'unknown')}</span></td>
       <td><span class="kinds">
         ${action.kind === 'none' ? '<span class="kind paused-by-user">paused by owner</span>' : `
+        ${note ? `<span class="kind suspended" title="${escape(note)}">suspended</span>` : ''}
         ${kinds.map((k) => `<span class="kind ${k === 'embed' ? 'on-ane' : 'on-gpu'}">${k}</span>`).join('')}`}
       </span></td>
       <td><span class="serving ${serving.state}">${escape(serving.label)}</span>${

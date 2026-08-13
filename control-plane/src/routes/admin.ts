@@ -7,6 +7,7 @@ import { repositoryRoot, safePath, verifyModel } from '../lib/repository.js'
 import { COMPLETE_ENOUGH, holdsModel } from '../lib/possession.js'
 import { coupledWith, violations, type Group } from '../lib/groupRules.js'
 import { runnability, shapeOf, whyGroupCannotHost } from '../lib/shape.js'
+import { costOfServing, suspensions } from '../lib/suspension.js'
 import { capacity, nextFree, rangeFrom } from '../lib/ports.js'
 import type { GroupListeners } from '../lib/groupSockets.js'
 import { existsSync } from 'node:fs'
@@ -46,6 +47,24 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
          -- superseding them was meant to solve.
          FROM nodes WHERE state <> 'superseded' ORDER BY hostname`,
     )
+
+    // Which machines are out of harvesting because their cluster group is
+    // serving a split model. A machine sitting idle for this reason has to read
+    // as suspended and not as merely quiet: it is doing exactly what it was
+    // told to, and an operator who cannot tell the difference goes looking for
+    // a fault that is not there.
+    const { rows: pools } = await db.query(
+      `SELECT id, name, tier, membership, serving_model_id FROM pools`)
+    const { rows: split } = await db.query(`SELECT id, machines FROM models WHERE machines > 1`)
+    const machines = new Map((split as { id: string; machines: number }[])
+      .map((m) => [m.id, Number(m.machines)]))
+    const groups = (pools as any[]).map((p) => ({
+      ...p, servingModelId: (p.serving_model_id as string | null) ?? null,
+    })) as unknown as Group[]
+    const held = new Map(
+      suspensions(rows as never, groups, (id) => machines.get(id) ?? 1)
+        .map((s) => [s.nodeId, s]))
+
     res.json(rows.map((n) => ({
       id: n.id,
       hostname: n.hostname,
@@ -72,6 +91,16 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
       // Where a peer dials this machine for a split, which is not where the
       // control plane sees it connect from.
       pipelineAddress: n.pipeline_address ?? null,
+      // Why this machine is not available to harvest, when it is not. Null for
+      // every machine that is, which is nearly all of them.
+      suspended: held.get(n.id as string)
+        ? {
+            modelId: held.get(n.id as string)!.modelId,
+            machines: held.get(n.id as string)!.machines,
+            by: held.get(n.id as string)!.by.name,
+            from: held.get(n.id as string)!.from.map((g) => g.name),
+          }
+        : null,
       presenceState: n.presence_state,
       userPaused: n.user_paused ?? false,
       userPausedAt: n.user_paused_at ? new Date(n.user_paused_at).toISOString() : null,
@@ -749,6 +778,27 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
         violations: broken,
       })
       return
+    }
+
+    // What this will cost, before it costs it.
+    //
+    // An N-way split takes N workstations out of harvesting for as long as the
+    // group serves it, because a gang cannot be preempted and harvest
+    // membership is the promise that a machine can be taken away. The operator
+    // is trading harvest capacity for a model that would not otherwise run at
+    // all, which is a decision rather than a side effect - so it is said, and
+    // then confirmed, in the same shape this codebase already uses for the
+    // other change that quietly means more than it looks like.
+    const machines = model === null ? 1 : Number((model as { machines: number }).machines)
+    if (model && machines > 1
+        && !(req.body as { confirm?: boolean })?.confirm) {
+      const members = (nodes as never[]).filter(
+        (n: never) => poolsFor(n, [current] as never).length > 0)
+      const cost = costOfServing(modelId!, machines, members as never, pools as never)
+      if (cost) {
+        res.status(409).json({ error: 'confirm_required', detail: cost })
+        return
+      }
     }
 
     await db.query(`UPDATE pools SET serving_model_id = $2 WHERE id = $1`, [poolId, modelId])

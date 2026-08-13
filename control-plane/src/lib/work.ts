@@ -2,6 +2,8 @@ import type pg from 'pg'
 import { type Db, tx } from './db.js'
 import { filterRequestedKinds, type PresenceState, type WorkKind } from './policy.js'
 import { poolsFor, type PoolSpec } from './pools.js'
+import { suspensionFor } from './suspension.js'
+import type { Group } from './groupRules.js'
 
 /**
  * Lease duration. Sized from E4: model load is 1-3s and a harvest work unit is
@@ -40,7 +42,7 @@ export interface Lease {
 }
 
 export type NoWorkReason = 'empty' | 'none-of-these-kinds' | 'node-paused' | 'user-paused'
-  | 'no-pool'
+  | 'no-pool' | 'holding-a-split'
 
 /**
  * Lease one unit for a node.
@@ -76,9 +78,43 @@ export async function leaseWork(
   // ids. Writing the same rule again as a SQL predicate would be two
   // implementations of one policy, and the copy that drifts is the one deciding
   // whether gang work lands on a preemptible machine.
-  const { rows: allPools } = await db.query(`SELECT id, tier, membership FROM pools`)
-  const eligible = poolsFor(node, allPools as PoolSpec[]).map((p) => p.id)
-  if (eligible.length === 0) return { reason: 'no-pool' }
+  const { rows: allPools } = await db.query(
+    `SELECT id, name, tier, membership, serving_model_id FROM pools`)
+  const mine = poolsFor(node, allPools as PoolSpec[])
+  if (mine.length === 0) return { reason: 'no-pool' }
+
+  // A machine holding part of a split model is not available to its harvest
+  // group, for as long as it holds it.
+  //
+  // A gang cannot be preempted: one rank yielding because somebody touched a
+  // keyboard kills the job on every machine in it, and wastes the model load on
+  // all of them. Harvest membership is precisely the promise that a machine may
+  // be taken away, so it is the promise that has to give.
+  //
+  // Only harvest work is withheld. The cluster group's own work is gang
+  // scheduled and never preempted, so it is coordinated with the split rather
+  // than competing with it.
+  //
+  // The catalogue is only consulted when this machine is in a cluster group
+  // that names a model, which is the only way to be suspended. A lease happens
+  // twice a second per node; a query per lease to answer "no" is a query that
+  // did not need asking.
+  const groups = (allPools as any[]).map((p) => ({
+    ...p, servingModelId: (p.serving_model_id as string | null) ?? null,
+  })) as unknown as Group[]
+  const named = poolsFor(node, groups).find(
+    (p) => p.tier === 'cluster' && (p as unknown as Group).servingModelId !== null)
+  let machines = 1
+  if (named) {
+    const { rows } = await db.query(`SELECT machines FROM models WHERE id = $1`,
+                                    [(named as unknown as Group).servingModelId])
+    machines = Number((rows[0] as { machines?: number } | undefined)?.machines ?? 1)
+  }
+  const held = suspensionFor(node, groups, () => machines)
+  const eligible = (held
+    ? mine.filter((p) => p.tier !== 'harvest')
+    : mine).map((p) => p.id)
+  if (eligible.length === 0) return { reason: 'holding-a-split' }
 
   return tx(db, async (c: pg.PoolClient) => {
     const { rows } = await c.query(
@@ -104,7 +140,12 @@ export async function leaseWork(
       // There is work, but not for this node. Which of the two reasons applies
       // decides whether an operator looks at the node or at the pool.
       const barred = !eligible.includes(elsewhere[0]!.pool_id as string)
-      return { reason: barred ? ('no-pool' as const) : ('none-of-these-kinds' as const) }
+      if (!barred) return { reason: 'none-of-these-kinds' as const }
+      // Barred because it is suspended reads very differently from barred
+      // because it is in no such group: the first is a machine doing exactly
+      // what it was told to, and an operator sent looking at membership for
+      // that would find nothing wrong and no explanation.
+      return { reason: held ? ('holding-a-split' as const) : ('no-pool' as const) }
     }
 
     const { rows: leased } = await c.query(

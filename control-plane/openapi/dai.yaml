@@ -2694,10 +2694,19 @@ components:
       properties:
         reason:
           type: string
-          enum: [empty, none-of-these-kinds, node-paused, user-paused, no-pool]
+          enum: [empty, none-of-these-kinds, node-paused, user-paused, no-pool,
+                 holding-a-split]
           description: |
             `node-paused` is administrative and an operator can lift it.
             `user-paused` is the machine owner's own pause and nobody else can.
+            `holding-a-split` is neither: this machine's cluster group serves a
+            model that runs across several machines, so it is not available to
+            its harvest group for as long as it does. A gang cannot be
+            preempted, and harvest membership is the promise that a machine can
+            be taken away. It returns on its own when the group stops serving
+            that model - there is nothing for an operator to lift, and it is
+            reported separately so that nobody goes looking at membership for an
+            explanation that is not there.
 
     WorkResult:
       type: object
@@ -2746,6 +2755,29 @@ components:
           type: string
           nullable: true
           description: Where a peer dials this machine for a split.
+        suspended:
+          type: object
+          nullable: true
+          description: >
+            Why this machine is not available to harvest, when it is not. A
+            machine whose cluster group serves a model that runs across several
+            machines is held out of its harvest group for as long as it does:
+            a gang cannot be preempted, and harvest membership is the promise
+            that a machine can be taken away. Null for every machine that is
+            available, which is nearly all of them. It clears itself when the
+            group stops serving that model - there is nothing to lift.
+          properties:
+            modelId: { type: string }
+            machines:
+              type: integer
+              description: How many machines that model runs across.
+            by:
+              type: string
+              description: The cluster group serving it.
+            from:
+              type: array
+              items: { type: string }
+              description: The harvest groups that have lost this machine.
         agentVersion:
           type: string
           nullable: true

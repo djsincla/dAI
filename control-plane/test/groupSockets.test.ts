@@ -3,7 +3,16 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Db } from '../src/lib/db.js'
 import { type Fixtures, appFor, freshDb, seed } from './helpers.js'
 import { RecordingListeners } from '../src/lib/groupSockets.js'
-import { DEFAULT_RANGE } from '../src/lib/ports.js'
+
+/**
+ * Its own range, not the default one.
+ *
+ * These tests bind real sockets, and a control plane running on the same
+ * machine holds the bottom of the default range for its own groups - so a test
+ * reaching for 8460 collides with the fleet rather than testing anything. The
+ * range is configuration for exactly this reason.
+ */
+const FROM = 9400
 
 /**
  * A group's own socket, end to end.
@@ -22,6 +31,7 @@ let base: string
 let extra: Server | null = null
 
 beforeEach(async () => {
+  process.env.DAI_GROUP_PORT_RANGE = `${FROM}-${FROM + 39}`
   db = await freshDb()
   fx = await seed(db)
   const app = appFor(db)
@@ -59,11 +69,11 @@ describe('the socket a group is created with', () => {
     // to go and look up is one they will get wrong.
     const made = await createGroup('first')
     expect(made.status).toBe(201)
-    expect(made.body.servingPort).toBe(DEFAULT_RANGE.from)
+    expect(made.body.servingPort).toBe(FROM)
 
     const listed = await (await fetch(`${base}/admin/v1/pools`,
                                       { headers: asUser(fx.ownerToken) })).json() as any[]
-    expect(listed.find((p) => p.name === 'first').servingPort).toBe(DEFAULT_RANGE.from)
+    expect(listed.find((p) => p.name === 'first').servingPort).toBe(FROM)
   })
 
   it('never gives two groups the same one', async () => {
@@ -154,13 +164,13 @@ describe('a group whose socket is not answering', () => {
     // startup leaves behind.
     await db.query(
       `INSERT INTO pools (name, tier, schedule, preempt, serving_port)
-       VALUES ('silent','harvest','independent-units','on-user-activity', 8499)`)
+       VALUES ('silent','harvest','independent-units','on-user-activity', 9499)`)
     const sick = await fetch(`${at}/monitor/v1/health`)
     const said = await sick.text()
     await new Promise<void>((resolve) => s.close(() => resolve()))
 
     expect(sick.status).toBe(503)
-    expect(said).toContain('silent is not answering on :8499')
+    expect(said).toContain('silent is not answering on :9499')
   })
 })
 
@@ -209,8 +219,8 @@ describe('the listeners themselves', () => {
     const listeners = new BoundListeners(() => http.createServer((_q, r) => r.end('ok')))
 
     // Port 0 would let the kernel choose and defeat the point, so take a real
-    // one from the top of the default range, which nothing else here uses.
-    const port = 8498
+    // one from the top of this file's range, which nothing else uses.
+    const port = FROM + 39
     await listeners.open(port)
     expect(listeners.bound()).toEqual([port])
     expect(await (await fetch(`http://127.0.0.1:${port}/`)).text()).toBe('ok')
@@ -258,10 +268,10 @@ describe('a group that predates sockets', () => {
       { method: 'PUT', headers: asUser(fx.operatorToken) })).json() as any
     await new Promise<void>((resolve) => s.close(() => resolve()))
 
-    expect(first).toEqual({ servingPort: DEFAULT_RANGE.from, allocated: true })
+    expect(first).toEqual({ servingPort: FROM, allocated: true })
     // Not a second socket. A group handed a new port each time it was asked
     // would abandon the one clients are already pointed at.
-    expect(again).toEqual({ servingPort: DEFAULT_RANGE.from, allocated: false })
-    expect(listeners.opened).toEqual([DEFAULT_RANGE.from])
+    expect(again).toEqual({ servingPort: FROM, allocated: false })
+    expect(listeners.opened).toEqual([FROM])
   })
 })

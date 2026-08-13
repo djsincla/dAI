@@ -196,8 +196,8 @@ group.
 
 ## A split model suspends its machines from harvesting
 
-**A machine holding a rank of a split model is not available to its harvest
-group for as long as it holds it.**
+**Built.** A machine holding a rank of a split model is not available to its
+harvest group for as long as it holds it.
 
 This is the two-tier decision arriving at its conclusion rather than a new rule.
 A gang-scheduled pipeline cannot be preempted: if one rank yields because
@@ -209,16 +209,30 @@ It is also why the same-model gate does not apply here. A harvest group cannot
 serve half a model, so there is nothing for the two groups to agree on, and
 suspension is the only coherent state.
 
-Consequences:
+Read from what is assigned rather than from what is running. A gang that formed
+a second after a harvest unit was leased is a gang that dies, so the moment that
+matters is when an operator says a cluster group will serve a split model - not
+when the first request for it arrives.
 
-- **Suspended, not removed.** The machine returns to its harvest group when the
-  split model is unloaded. Removing it would lose the operator's intent.
-- **The fleet loses that capacity, and should say so.** An N-way split takes N
-  workstations out of harvesting. A machine sitting idle in a harvest group
-  needs to read as *suspended: rank 0 of Qwen2.5-72B in cluster-1*, not as a
-  machine that is merely quiet.
-- **The cost belongs at assignment time.** Assigning a split model to a cluster
-  group should say what it will do before it does it - *this will suspend 2
-  machines from harvest-1* - because the operator is trading harvest capacity
-  for a model that would not otherwise run at all, and that is a decision rather
-  than a side effect.
+Consequences, as built:
+
+- **Suspended, not removed.** Nothing is written to membership. The machine is
+  available again the moment the group stops serving that model, and the
+  operator never has to remember to put it back.
+- **Only the harvest promise is withdrawn.** The cluster group's own work still
+  reaches the machine: it is gang scheduled and never preempted, so it is
+  coordinated with the split rather than competing with it.
+- **The refusal says which.** A lease returns `holding-a-split` rather than
+  `no-pool`. The machine *is* in that harvest group, and an operator sent to
+  look at membership would find nothing wrong and no explanation.
+- **The fleet view says so.** A suspended machine shows *suspended* in place of
+  the kinds it would otherwise be offered, with what it is holding, for which
+  group, and which harvest group lost it. It is active, unpaused and healthy,
+  which is exactly what a merely quiet machine looks like.
+- **The cost is stated at assignment.** Assigning a split model to a cluster
+  group is refused with `confirm_required` and a sentence naming the machines
+  and the groups losing them, until it is repeated with `confirm: true`. The
+  operator is trading harvest capacity for a model that would not otherwise run
+  at all, which is a decision rather than a side effect - and it is the same
+  shape this codebase already uses for the other change that means more than it
+  looks like.

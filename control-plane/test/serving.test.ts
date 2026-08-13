@@ -305,6 +305,32 @@ describe('serving over HTTP', () => {
     await r.body?.cancel()
   })
 
+  it('records where a peer should dial this machine', async () => {
+    // Declared by the node, not observed. A split runs over whatever link the
+    // machines share, and E7's ran over a Thunderbolt bridge while both nodes
+    // reached the control plane over the ordinary LAN. Using the source address
+    // of a heartbeat would send a dialer down the slow path.
+    await fetch(`${base}/agent/v1/heartbeat`, {
+      method: 'POST', headers: asNode(fx.fingerprint),
+      body: JSON.stringify({ presenceState: 'LOCKED', pipelineAddress: '192.168.99.1' }),
+    })
+    const seen = await db.query(`SELECT pipeline_address FROM nodes WHERE id=$1`, [fx.nodeId])
+    expect(seen.rows[0].pipeline_address).toBe('192.168.99.1')
+  })
+
+  it('keeps the address when a beat does not mention it', async () => {
+    // An agent that predates the field must not appear to have lost its address
+    // by staying alive.
+    await db.query(
+      `UPDATE nodes SET pipeline_address = '192.168.99.2' WHERE id=$1`, [fx.nodeId])
+    await fetch(`${base}/agent/v1/heartbeat`, {
+      method: 'POST', headers: asNode(fx.fingerprint),
+      body: JSON.stringify({ presenceState: 'LOCKED' }),
+    })
+    const kept = await db.query(`SELECT pipeline_address FROM nodes WHERE id=$1`, [fx.nodeId])
+    expect(kept.rows[0].pipeline_address).toBe('192.168.99.2')
+  })
+
   it('records why a node is not holding what it was assigned', async () => {
     // A transfer that fails is written to the node's own log and nowhere else,
     // so a machine that has silently stopped fetching looks exactly like one

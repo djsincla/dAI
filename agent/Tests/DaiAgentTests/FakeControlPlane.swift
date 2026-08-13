@@ -42,7 +42,8 @@ actor FakeControlPlane: ControlPlaneClient {
     func heartbeat(state: PresenceState, onACPower: Bool?, thermalOK: Bool?,
                    userPaused: Bool, capability: [String: Double],
                    residentModels: [String: Double], storedModels: [String: Double]?,
-                   modelInfo: [String: Int], syncFaults: [String: String]?) async throws {
+                   modelInfo: [String: Int], syncFaults: [String: String]?,
+                   pipelineAddress: String?) async throws {
         heartbeats.append((state, userPaused, residentModels, modelInfo))
         if let storedModels { lastStoredModels = storedModels }
         if let syncFaults { lastSyncFaults = syncFaults }
@@ -230,7 +231,8 @@ actor FailingControlPlane: ControlPlaneClient {
     func heartbeat(state: PresenceState, onACPower: Bool?, thermalOK: Bool?,
                    userPaused: Bool, capability: [String: Double],
                    residentModels: [String: Double], storedModels: [String: Double]?,
-                   modelInfo: [String: Int], syncFaults: [String: String]?)
+                   modelInfo: [String: Int], syncFaults: [String: String]?,
+                   pipelineAddress: String?)
         async throws { throw Unreachable() }
     func leaseWork(kinds: [WorkKind]) async throws -> ControlPlane.Lease? { throw Unreachable() }
     var lastLeaseReason: String? { nil }

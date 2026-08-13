@@ -9,6 +9,37 @@ import Testing
 /// so the source address of a heartbeat is the wrong answer - it sends a dialer
 /// down the slow path, or to somewhere the peer cannot reach at all.
 struct PipelineAddressTests {
+    @Test("a named interface is read for its current address")
+    func namedInterface() throws {
+        // The way to be certain. An interface name is stable where an address is
+        // not: a link that comes back on a different address after a reboot
+        // still has the same name, and a pinned address would go on being
+        // advertised after it stopped being true.
+        let real = PipelineAddress.addresses().first
+        try #require(real != nil)
+        #expect(PipelineAddress.current(
+            environment: ["DAI_PIPELINE_INTERFACE": real!.interface]) == real!.address)
+    }
+
+    @Test("a named interface with no address advertises nothing")
+    func namedButAbsent() {
+        // Rather than falling back. Somebody who named an interface meant it,
+        // and quietly advertising a different link is worse than saying nothing:
+        // the split would run, slowly, over a path nobody chose.
+        #expect(PipelineAddress.current(
+            environment: ["DAI_PIPELINE_INTERFACE": "bridge-that-does-not-exist"]) == nil)
+    }
+
+    @Test("a named interface wins over a named address")
+    func interfaceBeatsAddress() {
+        let real = PipelineAddress.addresses().first
+        guard let real else { return }
+        #expect(PipelineAddress.current(environment: [
+            "DAI_PIPELINE_INTERFACE": real.interface,
+            "DAI_PIPELINE_ADDRESS": "10.0.0.1",
+        ]) == real.address)
+    }
+
     @Test("an explicit address is used exactly as given")
     func explicitWins() {
         // Somebody who has cabled two machines together and says so is not

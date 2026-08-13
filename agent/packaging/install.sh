@@ -35,7 +35,7 @@ MENUBAR_APP=/Applications/dAI.app
 MENUBAR_PLIST=/Library/LaunchAgents/com.dai.menubar.plist
 LABEL=com.dai.agent
 
-URL=""; TOKEN=""; CA=""; MODEL=""; ANE="-"; CONFIG=""; WAIT=600; SVC_USER="_dai"; PROMOTE=300; GPU_MODEL_CACHE=""
+URL=""; TOKEN=""; CA=""; MODEL=""; ANE="-"; CONFIG=""; WAIT=600; SVC_USER="_dai"; PROMOTE=300; GPU_MODEL_CACHE=""; PIPELINE_IF=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --url)   URL="$2"; shift 2 ;;
@@ -49,6 +49,7 @@ while [[ $# -gt 0 ]]; do
     # design; short only for testing, since waiting 5 minutes to see anything
     # happen makes the behaviour impossible to check by hand.
     --promote) PROMOTE="$2"; shift 2 ;;
+    --pipeline-interface) PIPELINE_IF="$2"; shift 2 ;;
     --gpu-model-cache) GPU_MODEL_CACHE="$2"; shift 2 ;;
     --build) BUILD_OVERRIDE="$2"; shift 2 ;;
     # Where an unattended install gets its site settings. Everything in the file
@@ -86,6 +87,7 @@ if [[ -n "$CONFIG" ]]; then
   if [[ -n "$CFG_ANE" && "$ANE" == "-" ]]; then ANE="$CFG_ANE"; fi
   CFG_PROMOTE="$(cfg promoteSeconds)"
   if [[ -n "$CFG_PROMOTE" ]]; then PROMOTE="$CFG_PROMOTE"; fi
+  if [[ -z "$PIPELINE_IF" ]]; then PIPELINE_IF="$(cfg pipelineInterface)"; fi
   CFG_CACHE="$(cfg gpuModelCache)"
   if [[ -n "$CFG_CACHE" ]]; then GPU_MODEL_CACHE="$CFG_CACHE"; fi
 fi
@@ -270,6 +272,7 @@ sed -e "s|@BINARY@|$BINARY_DIR/dai-agent|g" \
     -e "s|@URL@|$URL|g" \
     -e "s|@MODEL@|${MODEL:--}|g" \
     -e "s|@ANE@|$ANE|g" \
+    -e "s|@PIPELINE_IF@|$PIPELINE_IF|g" \
     -e "s|@IDENTITY_DIR@|$IDENTITY_DIR|g" \
     -e "s|@STATE_DIR@|$STATE_DIR|g" \
     -e "s|@LOG_DIR@|$LOG_DIR|g" \

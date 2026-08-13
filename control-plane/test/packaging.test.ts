@@ -33,6 +33,9 @@ describe('the generated launchd plist', () => {
     .replace(/@USER@/g, '_dai')
     .replace(/@MODEL_DIR@/g, '/var/db/dai')
     .replace(/@PROMOTE@/g, '300')
+    // Empty on a machine nobody has named an interface for, which is the
+    // common case and still has to render.
+    .replace(/@PIPELINE_IF@/g, 'bridge0')
     .replace(/@VERSION@/g, '1.2.3')
 
   it('leaves no placeholder unsubstituted', () => {
@@ -700,5 +703,35 @@ describe('finding the binaries', () => {
     // The override still wins, because a build host installing what it just
     // compiled is the other real case.
     expect(block.indexOf('BUILD_OVERRIDE')).toBeLessThan(block.indexOf('$HERE/dai-agent'))
+  })
+})
+
+/**
+ * Naming the link a split runs over.
+ *
+ * Guessed by default, and the guess is a guess: a workstation running VMs has
+ * several bridges and only one of them goes anywhere. Naming the interface
+ * rather than the address is the stable form - a link that comes back on a new
+ * address after a reboot still answers to the same name.
+ */
+describe('the pipeline interface', () => {
+  const template = readFileSync(
+    join(process.cwd(), '..', 'agent', 'packaging', 'com.dai.agent.plist.in'), 'utf8')
+  const install = readFileSync(
+    join(process.cwd(), '..', 'agent', 'packaging', 'install.sh'), 'utf8')
+
+  it('is in the daemon environment, where the agent reads it', () => {
+    expect(template).toContain('DAI_PIPELINE_INTERFACE')
+  })
+
+  it('can be set from the config file an MDM drops', () => {
+    // The same path every other per-site setting takes. A flag alone would mean
+    // an unattended install could never name it.
+    expect(install).toContain('pipelineInterface')
+    expect(install).toContain('--pipeline-interface')
+  })
+
+  it('is substituted when the plist is rendered', () => {
+    expect(install).toContain('@PIPELINE_IF@')
   })
 })

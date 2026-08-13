@@ -80,15 +80,24 @@ struct RenewalDecisionTests {
 struct RenewalLoopTests {
     /// A renewer whose answer is fixed, standing in for one that talks to a
     /// control plane and writes files.
-    private actor Fixed: CertificateRenewing {
+    actor Fixed: CertificateRenewing {
         private let replacement: (any ControlPlaneClient)?
+        /// Whether the clock would say yes. False stands for the ordinary case -
+        /// a certificate with most of its life left - which is the only state in
+        /// which asking for a renewal means anything.
+        private let due: Bool
         private var handedOut = false
         private(set) var calls = 0
+        private(set) var askedCalls = 0
 
-        init(replacement: (any ControlPlaneClient)? = nil) { self.replacement = replacement }
+        init(replacement: (any ControlPlaneClient)? = nil, due: Bool = true) {
+            self.replacement = replacement
+            self.due = due
+        }
 
         func renewIfDue(now: Date) async -> (any ControlPlaneClient)? {
             calls += 1
+            guard due else { return nil }
             // Once, like the real one: a renewer that handed back a new client
             // every pass would have the loop rebuilding its connection forever.
             guard !handedOut, let replacement else { return nil }
@@ -96,7 +105,17 @@ struct RenewalLoopTests {
             return replacement
         }
 
+        /// Asked rather than due. Counted separately so a test can tell which
+        /// path the loop took, which is the whole question.
+        func renewNow(now: Date) async -> (any ControlPlaneClient)? {
+            askedCalls += 1
+            guard !handedOut, let replacement else { return nil }
+            handedOut = true
+            return replacement
+        }
+
         func callCount() -> Int { calls }
+        func askedCount() -> Int { askedCalls }
     }
 
     private func statusPath() -> String {
@@ -194,4 +213,48 @@ struct RenewalLoopTests {
         process.waitUntilExit()
         return try? String(contentsOf: dir.appendingPathComponent("c.pem"), encoding: .utf8)
     }()
+}
+
+/// Renewing because somebody asked, rather than because it is time.
+///
+/// The Enclave key signs only inside the daemon, so a renewal cannot be run
+/// from any other session - `dai-agent renew` over ssh fails with "unable to
+/// sign digest" even as root. And the daemon renews on its own only at two
+/// thirds of certificate life. Between those two facts, a node that needs a new
+/// certificate today has no way to get one, which is what this closes.
+struct RenewOnRequestTests {
+    @Test("a request renews a certificate the clock would refuse")
+    func askedBeatsDue() async throws {
+        // Three days into thirty: nowhere near due, and the case that prompted
+        // this - both machines in the fleet enrolled before nodes had to trust
+        // each other and cannot join a split without a node CA.
+        // due: false is the point. A renewer that would renew on the clock
+        // anyway proves nothing, and an earlier version of this test failed for
+        // exactly that reason - the loop renewed on the first pass, before the
+        // first heartbeat had even been sent.
+        let renewer = RenewalLoopTests.Fixed(replacement: FakeControlPlane(), due: false)
+        let cp = FakeControlPlane()
+        await cp.setDirectives(.init(renewRequested: true))
+
+        let worker = Worker(controlPlane: cp, source: FixedSignals.present(),
+                            renewer: renewer, promoteAfter: 0)
+        // Two turns' worth: the flag is set by the heartbeat partway through a
+        // turn and read at the top of the next one.
+        await worker.run(maxSeconds: 1.5)
+
+        #expect(await renewer.askedCount() > 0, "the loop should have renewed on request")
+    }
+
+    @Test("no request leaves the clock in charge")
+    func unaskedUsesTheClock() async throws {
+        let renewer = RenewalLoopTests.Fixed(replacement: FakeControlPlane(), due: false)
+        let cp = FakeControlPlane()   // directives default to nothing asked
+
+        let worker = Worker(controlPlane: cp, source: FixedSignals.present(),
+                            renewer: renewer, promoteAfter: 0)
+        await worker.run(maxSeconds: 1.5)
+
+        #expect(await renewer.askedCount() == 0)
+        #expect(await renewer.callCount() > 0, "the ordinary due check should still run")
+    }
 }

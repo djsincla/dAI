@@ -185,6 +185,11 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
       ? publicKeyIdOf(csrPem) !== publicKeyIdOf(node.cert_pem)
       : false
 
+    // Cleared here rather than when it was asked for: a request that was made
+    // and a request that was met are different facts, and only the second means
+    // the machine has what it was sent for.
+    await db.query(`UPDATE nodes SET renew_requested_at = NULL WHERE id = $1`, [req.node!.id])
+
     await db.query(
       `UPDATE nodes SET cert_pem=$2, cert_fingerprint=$3, cert_not_after=$4 WHERE id=$1`,
       [req.node!.id, signed.certPem, signed.fingerprint, signed.notAfter],
@@ -450,7 +455,14 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
        VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
       [node.id, b.presenceState, b.onAcPower ?? null],
     )
-    res.status(204).end()
+    // What the control plane wants from this node, answered on the beat it
+    // already sends. There is no other way to reach a machine that dials out
+    // and never listens - and the one thing worth asking for cannot be done
+    // any other way: the Enclave key signs only inside this daemon, so a
+    // renewal cannot be run by hand from any shell.
+    const { rows: asked } = await db.query(
+      `SELECT renew_requested_at FROM nodes WHERE id = $1`, [node.id])
+    res.json({ renewRequested: asked[0]?.renew_requested_at != null })
   })
 
   /**

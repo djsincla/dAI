@@ -448,6 +448,38 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
     res.json(rows[0])
   })
 
+  /**
+   * Ask a node to renew its certificate.
+   *
+   * Asked rather than done, because it cannot be done from here or from any
+   * shell. The Enclave key signs only inside the node's launchd daemon - a
+   * session whose keybag is not the daemon's fails with "unable to sign
+   * digest", which is what `dai-agent renew` does over ssh even as root. The
+   * daemon renews on its own at two thirds of certificate life, so without this
+   * a machine that needs a new certificate today waits weeks.
+   *
+   * Three reasons to want one, and only the first is routine: a node enrolled
+   * before the fleet had a node CA and cannot join a split without one; a
+   * certificate suspected of having leaked; a CA that has been replaced.
+   *
+   * The flag rides down on the next heartbeat and is cleared when the renewal
+   * arrives, so what is recorded is a request that was met.
+   */
+  r.post('/nodes/:nodeId/renew', async (req, res) => {
+    const { rows } = await db.query(
+      `UPDATE nodes SET renew_requested_at = now()
+        WHERE id = $1 AND state IN ('active','paused','offline')
+      RETURNING hostname`, [req.params.nodeId])
+    if (rows.length === 0) {
+      res.status(404).json({ error: 'not_found', detail: 'no such node, or it cannot renew' })
+      return
+    }
+    await audit(db, req.user!.id, 'node.renew-requested', rows[0].hostname as string, {})
+    // 202: the node has not renewed, it has been asked. It will on its next
+    // beat, and saying 204 here would claim something that has not happened.
+    res.status(202).json({ hostname: rows[0].hostname, asked: true })
+  })
+
   r.post('/nodes/:nodeId/revoke', async (req, res) => {
     const { rows: admin } = await db.query(
       `SELECT 1 FROM role_bindings rb

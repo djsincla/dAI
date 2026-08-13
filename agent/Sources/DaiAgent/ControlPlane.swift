@@ -686,7 +686,7 @@ public actor ControlPlane {
                           storedModels: [String: Double]? = nil,
                           modelInfo: [String: Int] = [:],
                           syncFaults: [String: String]? = nil,
-                          pipelineAddress: String? = nil) async throws {
+                          pipelineAddress: String? = nil) async throws -> Directives {
         var body: [String: JSONValue] = [
             "presenceState": .string(state.rawValue),
             // Replaced rather than merged: a model released on a yield is no
@@ -749,7 +749,30 @@ public actor ControlPlane {
                 .object(["workloadClass": .string($0.key), "itemsPerSecond": .number($0.value)])
             })
         }
-        _ = try await request("POST", "agent/v1/heartbeat", body: .object(body))
+        // The reply carries what the control plane wants from this node. It is
+        // the only channel there is: a harvested machine dials out and never
+        // listens, so anything asked of it has to ride back on a beat it sent.
+        //
+        // An older control plane answers 204 with no body, which decodes to no
+        // directives - the right answer, and the reason this is additive.
+        let (_, data) = try await request("POST", "agent/v1/heartbeat", body: .object(body))
+        let reply = (try? JSONDecoder().decode(JSONValue.self, from: data))?.objectValue ?? [:]
+        return Directives(renewRequested: reply["renewRequested"]?.boolValue ?? false)
+    }
+
+    /// What the control plane asked of this node on the last beat.
+    public struct Directives: Sendable, Equatable {
+        /// Renew now rather than at two thirds of certificate life.
+        ///
+        /// Asked rather than done elsewhere because it cannot be done
+        /// elsewhere: the Enclave key signs only inside this process, so a
+        /// renewal run from any other session fails with "unable to sign
+        /// digest".
+        public let renewRequested: Bool
+
+        public init(renewRequested: Bool = false) {
+            self.renewRequested = renewRequested
+        }
     }
 
     public struct Lease: Sendable {

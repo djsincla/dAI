@@ -378,7 +378,11 @@ describe('agent surface', () => {
         ],
       }),
     })
-    expect(r.status).toBe(204)
+    // 200 rather than 204: the beat now carries back what the control plane
+    // wants from this node, because there is no other way to reach a machine
+    // that dials out and never listens.
+    expect(r.status).toBe(200)
+    expect(await r.json()).toHaveProperty('renewRequested')
     const { rows } = await db.query(`SELECT capability_profiles FROM nodes WHERE id=$1`, [fx.nodeId])
     // A scalar would misallocate: the same machines differ 7.5% on 1.5B and
     // 26.3% on 7B.

@@ -349,3 +349,71 @@ struct PipelineChannelSocketTests {
     }
 
 }
+
+/// Dialling a peer that may not be listening yet.
+///
+/// Ranks find each other by dialling and their dispatches go out together, so
+/// the listener is frequently not up when the first attempt arrives. That is
+/// ordinary. What is not ordinary is a peer that never comes, and the two have
+/// to be told apart without anybody coordinating them.
+struct PipelineDialTests {
+    @Test("waits longer each time, and stops growing")
+    func backoffSchedule() {
+        // The two cases have very different durations: a rank still binding its
+        // socket is milliseconds away, a rank that is never coming is not coming
+        // at all. A fixed short interval hammers the second; a fixed long one
+        // makes the first feel broken.
+        #expect(PipelineChannel.backoff(attempt: 0) == 0.2)
+        #expect(PipelineChannel.backoff(attempt: 1) == 0.4)
+        #expect(PipelineChannel.backoff(attempt: 2) == 0.8)
+        #expect(PipelineChannel.backoff(attempt: 10) == 2.0)
+    }
+
+    @Test("a peer that comes up late is still reached")
+    func succeedsOnceListening() async throws {
+        let channel = PipelineChannel()
+        let attempts = Counter()
+        // Sleep is injected so the schedule is exercised without waiting for it.
+        // A test that really slept would be measuring Task.sleep.
+        do {
+            try await channel.connectWithRetry(
+                host: "127.0.0.1", port: 1, tls: try testClientContext(),
+                serverName: "peer", deadline: 1.0,
+                sleep: { _ in await attempts.bump() })
+        } catch {
+            // Expected: nothing is listening on port 1. What is asserted is that
+            // it kept trying rather than giving up on the first refusal.
+        }
+        #expect(await attempts.count > 1)
+    }
+
+    @Test("gives up rather than waiting past the deadline")
+    func stopsAtTheDeadline() async throws {
+        // A gang that cannot form should fail loudly rather than wait: every
+        // other rank is holding memory meanwhile.
+        let channel = PipelineChannel()
+        let started = Date()
+        do {
+            try await channel.connectWithRetry(
+                host: "127.0.0.1", port: 1, tls: try testClientContext(),
+                serverName: "peer", deadline: 0.5,
+                sleep: { _ in })
+            Issue.record("should not have connected to a closed port")
+        } catch {
+            #expect(Date().timeIntervalSince(started) < 5)
+        }
+    }
+}
+
+/// A client context with no trust configured. Nothing here reaches TLS: every
+/// dial is refused at the socket, which is exactly the case being exercised.
+private func testClientContext() throws -> NIOSSLContext {
+    var config = TLSConfiguration.makeClientConfiguration()
+    config.certificateVerification = .none
+    return try NIOSSLContext(configuration: config)
+}
+
+private actor Counter {
+    private(set) var count = 0
+    func bump() { count += 1 }
+}

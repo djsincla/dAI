@@ -19,9 +19,34 @@ import Foundation
 /// the dial fails rather than silently taking a slower route.
 public enum PipelineAddress {
     /// What to advertise, or nil when this machine has no usable address.
+    ///
+    /// Three ways of answering, most certain first.
+    ///
+    /// **`DAI_PIPELINE_INTERFACE`** names the interface - `bridge0` - and the
+    /// address is read from it. This is the one to use. An interface name is
+    /// stable in a way an address is not: a link that comes back on a different
+    /// address after a reboot or a DHCP lease still has the same name, and a
+    /// pinned address would then be advertised long after it stopped being
+    /// true.
+    ///
+    /// **`DAI_PIPELINE_ADDRESS`** names the address outright, for the case where
+    /// the right answer is not on an interface this machine can see - a NAT, a
+    /// tunnel, a forwarded port.
+    ///
+    /// **Neither**, and it guesses: bridge before wired before wireless, and
+    /// jumbo frames before ordinary ones. The guess is right on this fleet and
+    /// is still a guess, which is why naming the interface is worth doing.
     public static func current(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> String? {
+        if let named = environment["DAI_PIPELINE_INTERFACE"]?
+            .trimmingCharacters(in: .whitespaces), !named.isEmpty {
+            // Nil rather than falling back when the named interface has no
+            // address. Somebody who named one meant it, and quietly advertising
+            // a different link would be worse than saying nothing: the split
+            // would run, slowly, over a path nobody chose.
+            return addresses().first { $0.interface == named }?.address
+        }
         if let declared = environment["DAI_PIPELINE_ADDRESS"],
            !declared.trimmingCharacters(in: .whitespaces).isEmpty {
             return declared.trimmingCharacters(in: .whitespaces)

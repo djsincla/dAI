@@ -94,6 +94,19 @@
     <key>DAI_PROMOTE_SECONDS</key>
     <string>@PROMOTE@</string>
     <!--
+      Which interface a peer should dial to reach this machine for a split.
+      Named rather than guessed: this machine may have several bridges and only
+      one of them goes anywhere - a workstation running VMs has bridge100 and
+      friends on networks no peer can reach. An interface name is also stable
+      where an address is not, so a link that returns on a different address
+      after a reboot still answers to the same name.
+
+      Empty means guess, which is right on a simple machine and a guess on any
+      other.
+    -->
+    <key>DAI_PIPELINE_INTERFACE</key>
+    <string>@PIPELINE_IF@</string>
+    <!--
       The hub base, not the directory the weights sit in: the loader appends
       models/<repo> to whatever it is given, so naming the models directory
       produces models/models and a config.json nothing can find.

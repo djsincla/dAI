@@ -55,7 +55,17 @@ CREATE TABLE IF NOT EXISTS pools (
     -- that names no model is not a claim about anything, and refusing to sit
     -- beside one that does would make the order an operator does two legitimate
     -- things in decide whether they are allowed to.
-    serving_model_id text
+    serving_model_id text,
+    -- The socket this group answers on, allocated when it is created.
+    --
+    -- How a caller says which machines it wants without saying anything else:
+    -- an application pointed at this port is asking this group, and nothing in
+    -- the request has to name it. Unique because two groups sharing a socket
+    -- would route by whichever listener bound first.
+    --
+    -- Null for a group that predates this, which is reachable on the shared
+    -- serving port and nowhere else until somebody gives it one.
+    serving_port int UNIQUE
 );
 
 -- Pool-scoped role bindings. A group's role differs per pool, so membership is
@@ -469,6 +479,18 @@ ALTER TABLE pools ADD COLUMN IF NOT EXISTS desired_agent_version text;
 -- reaches a database that already has data in it.
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS pipeline_address text;
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS renew_requested_at timestamptz;
+-- The group's own socket. Null on every group that predates it, which is why
+-- the port is allocated when a group is created rather than backfilled here:
+-- handing a running group a new listener during a schema upgrade would bind
+-- sockets nobody asked for on a machine nobody was watching.
+ALTER TABLE pools ADD COLUMN IF NOT EXISTS serving_port int;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'pools_serving_port_key')
+  THEN
+    ALTER TABLE pools ADD CONSTRAINT pools_serving_port_key UNIQUE (serving_port);
+  END IF;
+END $$;
 ALTER TABLE models ADD COLUMN IF NOT EXISTS machines integer NOT NULL DEFAULT 1;
 ALTER TABLE models ADD COLUMN IF NOT EXISTS min_memory_gb numeric;
 DO $$

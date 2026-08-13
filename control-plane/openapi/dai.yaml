@@ -1352,8 +1352,19 @@ paths:
                   id: { type: string, format: uuid }
                   name: { type: string }
                   tier: { type: string }
+                  servingPort:
+                    type: integer
+                    description: >
+                      The socket this group now answers on, bound before this
+                      response was sent. Returned rather than left to be looked
+                      up, because the next thing somebody does with a new group
+                      is point something at it.
         '409':
-          description: A group with that name exists
+          description: >
+            A group with that name exists, or every socket in the range is
+            taken. The second is not a naming problem and says so: a group that
+            cannot be addressed is not created at all, since one that existed
+            and refused connections would be worse.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -1775,6 +1786,47 @@ paths:
                     name: { type: string }
                     tier: { type: string }
                     servingModelId: { type: string, nullable: true }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /admin/v1/pools/{poolId}/socket:
+    parameters:
+      - name: poolId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      tags: [admin]
+      summary: Give a group a socket of its own
+      description: >
+        For groups that predate per-group sockets. The schema deliberately does
+        not backfill them, because binding listeners nobody asked for during an
+        upgrade is how a control plane comes back up holding ports somebody else
+        wanted - so it is asked for, once, per group. Idempotent: a group that
+        already has one is told which, rather than being given a second and
+        abandoning the first while clients are pointed at it.
+      responses:
+        '200':
+          description: The group's socket
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [servingPort, allocated]
+                properties:
+                  servingPort: { type: integer }
+                  allocated:
+                    type: boolean
+                    description: False when the group already had one.
+        '409':
+          description: >
+            The range is full, or the port could not be bound. Either way the
+            group is left without one rather than recorded at a socket that is
+            not answering.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '404': { $ref: '#/components/responses/NotFound' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '401': { $ref: '#/components/responses/Unauthorized' }
@@ -2791,6 +2843,16 @@ components:
           description: >
             What this group's machines run, as against what they hold. Null
             means nobody has said, which is not the same as none.
+        servingPort:
+          type: integer
+          nullable: true
+          description: >
+            The socket this group answers on, allocated when it was created and
+            bound for as long as it exists. Pointing an application at this port
+            addresses this group's machines and no others - nothing in the
+            request names a group, so nothing in it can name the wrong one.
+            Null for a group created before groups had sockets, which is
+            reachable on the shared serving port only.
 
     Model:
       type: object

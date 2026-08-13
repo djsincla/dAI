@@ -111,3 +111,26 @@ export function nodeMatchesPool(node: NodeFacts, pool: PoolSpec): boolean {
 export function poolsFor(node: NodeFacts, pools: PoolSpec[]): PoolSpec[] {
   return pools.filter((p) => nodeMatchesPool(node, p))
 }
+
+/**
+ * The machines in one group, by id.
+ *
+ * Membership is a rule as often as it is a list, so the only way to answer this
+ * is to evaluate it - which is why this exists rather than a join. Null when
+ * there is no such group, which a caller has to treat as "no machines" rather
+ * than "no restriction": a request addressed to a group that has been deleted
+ * must not quietly widen to the whole fleet.
+ */
+export async function membersOf(
+  db: { query: (text: string, params?: unknown[]) => Promise<{ rows: unknown[] }> },
+  groupId: string,
+): Promise<Set<string> | null> {
+  const { rows: pools } = await db.query(
+    `SELECT id, tier, membership FROM pools WHERE id = $1`, [groupId])
+  if (pools.length === 0) return null
+  const { rows: nodes } = await db.query(
+    `SELECT id, hostname, tier, chip, memory_gb FROM nodes`)
+  return new Set((nodes as NodeFacts[])
+    .filter((n) => poolsFor(n, pools as PoolSpec[]).length > 0)
+    .map((n) => n.id!))
+}

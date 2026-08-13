@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import type { GroupListeners } from '../lib/groupSockets.js'
 import type { Db } from '../lib/db.js'
 
 /**
@@ -19,7 +20,16 @@ import type { Db } from '../lib/db.js'
  * names, how many machines exist, when they were last seen, and which models the
  * fleet holds. That is a map of the building.
  */
-export function monitorRoutes(db: Db): Router {
+/**
+ * `listeners` reports which group sockets are actually bound.
+ *
+ * Health has to know, because the failure it exists to catch is silent: the
+ * group is there, its models are assigned, its machines are holding them, and
+ * nothing answers on the port an application is pointed at. A control plane
+ * that called that "ok" would be the reason nobody noticed.
+ */
+export function monitorRoutes(db: Db,
+                              listeners?: () => GroupListeners | undefined): Router {
   const r = Router()
 
   /**
@@ -36,6 +46,24 @@ export function monitorRoutes(db: Db): Router {
       res.status(503).type('text/plain').send(
         `unhealthy: database unreachable: ${(e as Error).message}\n`)
       return
+    }
+    // Every group with a socket should have that socket bound. A group that
+    // predates sockets has none to check, and is answered for on the shared
+    // serving port.
+    const bound = new Set(listeners?.()?.bound() ?? [])
+    if (listeners?.()) {
+      const { rows } = await db.query(
+        `SELECT name, serving_port FROM pools
+          WHERE serving_port IS NOT NULL ORDER BY serving_port`)
+      const silent = (rows as { name: string; serving_port: number }[])
+        .filter((p) => !bound.has(Number(p.serving_port)))
+      if (silent.length > 0) {
+        res.status(503).type('text/plain').send(
+          'unhealthy: '
+          + silent.map((p) => `${p.name} is not answering on :${p.serving_port}`).join('; ')
+          + '\n')
+        return
+      }
     }
     res.type('text/plain').send('ok\n')
   })

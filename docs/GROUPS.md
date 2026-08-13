@@ -49,32 +49,53 @@ same machine, and "which group answered" stops having an answer.
 
 ## Sockets
 
-**Allocated from a range, bound at runtime when a group is created.**
+**Built.** Allocated from a range, bound when a group is created, and shown
+wherever the group is.
 
-The port belongs on the group's row, is unique, and is what the fleet view shows
-so somebody can point a client at it.
+The port is on the group's row (`pools.serving_port`, unique), returned by
+`POST /admin/v1/pools`, listed by `GET /admin/v1/pools`, printed in the toast
+that confirms a group was made and on the group's card in the fleet view. The
+range defaults to 8460-8499 and moves with `DAI_GROUP_PORT_RANGE=from-to`, which
+is refused rather than silently defaulted if it cannot be read.
 
-Consequences that have to be designed rather than discovered:
+A group socket serves the OpenAI-compatible routes and nothing else. Admin
+belongs in one place however the fleet is divided, and an agent talks to the
+control plane rather than to a group; mounting admin on forty sockets would be
+forty more doors to the same room.
 
-**Creating a group can now fail at bind.** The port may be taken by something
-else on the host. A group that is created and then found unreachable is worse
-than a creation that refused, so the bind has to succeed before the row is
-committed - or the row has to be removed when it does not.
+**Scope comes from the port, not the request.** A request arriving on a group's
+socket is answered for that group's machines only - `/v1/chat/completions`,
+`/v1/models` and the LM Studio shape all narrow the same way. Nothing in the
+request names a group, so nothing in it can name the wrong one, and "no capacity"
+on a group's port means that group has none rather than that the fleet does. A
+group whose row has been deleted narrows to nothing rather than widening back to
+the fleet.
 
-**Every group's listener has to be rebound at startup.** The ports live in the
-database, so the server binds N listeners at boot rather than one. A bind that
-fails then is the dangerous case: the group exists, its models are assigned, its
-machines are holding them, and nothing answers. That must be loud - reported by
-`/monitor/v1/health` and visible in the fleet view - and not merely logged.
+Consequences, as designed:
 
-The fleet has spent today finding counts that meant less than they appeared to.
-A group whose socket is not listening should not read as healthy.
+**Creating a group fails at bind rather than half-succeeding.** If the port is
+taken by something else on the host, the row is removed and the creation is
+refused with the reason. A group that existed and refused connections would be
+worse, because only the refusal says so.
 
-**Deleting a group has to close its listener**, and the port should not be
-reused immediately by the next group created, or a client left pointing at the
-old URL silently starts talking to a different group.
+**Every group's listener is rebound at startup.** One that cannot be is reported
+loudly rather than logged: `/monitor/v1/health` answers 503 naming the group and
+the port it is not answering on. The dangerous case is a group that exists, has
+models assigned, has machines holding them, and answers nothing - a control
+plane that called that healthy is why nobody would notice.
+
+**Running out of ports refuses the group.** The range is small enough to
+enumerate on purpose; a fleet with more than forty groups has a naming problem
+rather than a port problem. The refusal says which range is full and what to
+widen.
 
 **TLS is unaffected.** One certificate covers every port on the same host.
+
+Still open: **deleting a group has to close its listener**, and the port should
+not be reused immediately by the next group created, or a client left pointing at
+the old URL silently starts talking to a different group. There is no delete
+route today, so allocation takes the lowest free port; the day one is added, the
+port has to be held back rather than handed straight on.
 
 ## What the interface has to show and do
 

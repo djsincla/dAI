@@ -1,4 +1,5 @@
 import express, { type Express, type NextFunction, type Request, type Response } from 'express'
+import { BoundListeners, type GroupListeners } from './lib/groupSockets.js'
 import * as OpenApiValidator from 'express-openapi-validator'
 import { parse as parseYaml } from 'yaml'
 import { readFileSync } from 'node:fs'
@@ -35,6 +36,11 @@ const DOCS_HTML = `<!doctype html>
  * a mismatch can be caught before deployment.
  */
 export type Surface = 'agent' | 'admin' | 'both'
+  // A group's own socket. The OpenAI-compatible routes and nothing else: admin
+  // belongs in one place however the fleet is divided, and an agent talks to
+  // the control plane rather than to a group. Mounting admin on forty sockets
+  // would be forty more doors to the same room.
+  | 'serving'
 
 /**
  * Shared between the agent and serving surfaces: one holds the reverse channel
@@ -49,8 +55,47 @@ export const broker = new Broker()
  */
 export const ca = await Ca.fromEnv()
 
-export function createApp(db: Db, surface: Surface = 'both'): Express {
+/**
+ * The shared serving port, where the whole fleet is in scope.
+ *
+ * Named so the group middleware can tell "this is the ordinary listener" from
+ * "this is somebody's group socket" without a lookup on every request to the
+ * main surface.
+ */
+export function sharedPort(): number { return Number(process.env.PORT ?? 8443) }
+
+/**
+ * The group sockets, once the process has bound them.
+ *
+ * Held here because the admin routes need to open one the moment a group is
+ * created, and they are built before there is anything to open. A getter is
+ * passed to them rather than this variable, so they see whatever it becomes.
+ */
+let groupListeners: GroupListeners | undefined
+
+export function createApp(db: Db, surface: Surface = 'both',
+                          listeners?: () => GroupListeners | undefined): Express {
   const app = express()
+
+  // Which group this request is addressed to, read from the socket it arrived
+  // on rather than from anything it says.
+  //
+  // A group's port is the whole of its addressing, which is the point: an
+  // application pointed at one port is asking one set of machines, and there is
+  // no header to forget and no field to get wrong. Looked up per request rather
+  // than captured when the listener was bound, so that a group whose port is
+  // reassigned - or whose row is gone - stops answering as that group without
+  // anything having to reach into a running server.
+  app.use(async (req, _res, next) => {
+    const port = req.socket.localPort
+    if (port == null || port === sharedPort()) { next(); return }
+    try {
+      const { rows } = await db.query(
+        `SELECT id FROM pools WHERE serving_port = $1`, [port])
+      ;(req as Request & { groupId?: string | null }).groupId = rows[0]?.id ?? null
+    } catch { /* the shared surface's behaviour is the safe default */ }
+    next()
+  })
 
   // Off unless a proxy is actually in front. With this unset, req.ip is the
   // socket peer and X-Forwarded-For is ignored, so a caller cannot declare
@@ -203,7 +248,7 @@ export function createApp(db: Db, surface: Surface = 'both'): Express {
   if (surface !== 'admin') {
     app.use('/agent/v1', aclMiddleware(agentAcl, 'agent'), agentRoutes(db, broker, ca))
   }
-  if (surface !== 'agent') {
+  if (surface !== 'agent' && surface !== 'serving') {
     // Before the admin routes, because signing in cannot itself require being
     // signed in. Still behind the admin network ACL: obtaining a credential is
     // not something to expose more widely than using one.
@@ -211,10 +256,10 @@ export function createApp(db: Db, surface: Surface = 'both'): Express {
     // entirely when none are. No credential, deliberately: the alternative is a
     // long-lived secret in a scraper's config file that nobody ever rotates.
     const monitorAcl = new Acl(process.env.DAI_MONITOR_CIDRS)
-    app.use('/monitor/v1', closedAclMiddleware(monitorAcl, 'monitoring'), monitorRoutes(db))
+    app.use('/monitor/v1', closedAclMiddleware(monitorAcl, 'monitoring'), monitorRoutes(db, listeners ?? (() => groupListeners)))
 
     app.use('/admin/v1/auth', aclMiddleware(adminAcl, 'admin'), authRoutes(db))
-    app.use('/admin/v1', aclMiddleware(adminAcl, 'admin'), adminRoutes(db, ca, broker))
+    app.use('/admin/v1', aclMiddleware(adminAcl, 'admin'), adminRoutes(db, ca, broker, listeners ?? (() => groupListeners)))
     // OpenAI-compatible surface. Separate from /admin because its callers are
     // applications rather than people, and it will want its own rate limits and
     // availability treatment.
@@ -222,6 +267,18 @@ export function createApp(db: Db, surface: Surface = 'both'): Express {
     // Access needs a credential now as well as a reachable network: either a
     // signed-in session or a named API key. It used to be network ACL alone,
     // which meant anyone who could reach the subnet could use the fleet.
+  }
+  if (surface !== 'agent') {
+    // OpenAI-compatible surface. Separate from /admin because its callers are
+    // applications rather than people, and it will want its own rate limits and
+    // availability treatment.
+    //
+    // Access needs a credential now as well as a reachable network: either a
+    // signed-in session or a named API key. It used to be network ACL alone,
+    // which meant anyone who could reach the subnet could use the fleet.
+    //
+    // Mounted on a group's socket too, where it answers for that group's
+    // machines only. Same routes, same credentials; the port decides the scope.
     app.use('/v1', aclMiddleware(adminAcl, 'serving'), servingRoutes(db, broker))
     // The same router under /api, so /api/v0/models resolves. Tools written
     // against LM Studio probe that path for the context window, and the point
@@ -264,6 +321,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   }
 
   const { existsSync } = await import('node:fs')
+  const https = await import('node:https')
+  const http = await import('node:http')
   const certPath = process.env.TLS_CERT ?? join(here, '..', 'certs', 'server.crt')
   const keyPath = process.env.TLS_KEY ?? join(here, '..', 'certs', 'server.key')
   const caPath = process.env.TLS_CA ?? join(here, '..', 'certs', 'ca.crt')
@@ -278,7 +337,6 @@ if (import.meta.url === `file://${process.argv[1]}`) {
         console.warn(`[${surface}] HTTP on :${port} (no TLS material at ${certPath})`))
       return
     }
-    const https = await import('node:https')
     https
       .createServer(
         {
@@ -302,12 +360,53 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   // One process by default. Set AGENT_PORT to run the worker API on its own
   // listener so it can be firewalled separately and kept up while the
   // human-facing side restarts.
-  const port = Number(process.env.PORT ?? 8443)
+  const port = sharedPort()
   const agentPort = process.env.AGENT_PORT ? Number(process.env.AGENT_PORT) : null
   if (agentPort) {
     await listen('admin', port)
     await listen('agent', agentPort)
   } else {
     await listen('both', port)
+  }
+
+  // Then one socket per group.
+  //
+  // The serving surface only, because a group's port is for the applications
+  // that use it: admin lives in one place whatever the fleet is divided into,
+  // and an agent reaches the control plane rather than a group. Each of these
+  // serves the same routes, scoped by the port the request arrived on.
+  const groups = new BoundListeners(
+    (groupPort) => {
+      const app = createApp(db, 'serving')
+      if (!tls) return http.createServer(app)
+      return https.createServer(
+        {
+          cert: readFileSync(certPath),
+          key: readFileSync(keyPath),
+          ca: [ca.certPem, ...(existsSync(caPath) ? [readFileSync(caPath, 'utf8')] : [])],
+          // No client certificate wanted here: these callers are applications
+          // with an API key or a session, the same as the shared serving port.
+          requestCert: false,
+          rejectUnauthorized: false,
+        },
+        app,
+      )
+    },
+    (message) => console.log(message),
+  )
+  groupListeners = groups
+
+  const { rows: withPorts } = await db.query(
+    `SELECT name, serving_port FROM pools WHERE serving_port IS NOT NULL ORDER BY serving_port`)
+  for (const row of withPorts as { name: string; serving_port: number }[]) {
+    try {
+      await groups.open(Number(row.serving_port))
+    } catch (err) {
+      // One group failing to bind must not stop the others or the control
+      // plane. Something else on the machine holding that port is an operator's
+      // problem, and they can only act on it if it is said out loud.
+      console.warn(`[group] ${row.name} could not take :${row.serving_port}: `
+        + `${(err as Error).message}`)
+    }
   }
 }

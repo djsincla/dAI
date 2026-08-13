@@ -953,7 +953,7 @@ function renderGroups(nodes, pools, models) {
 
   const { groups, ungrouped } = groupMachines(nodes, pools, matchesGroup)
 
-  const card = (title, subtitle, members, poolId, warning) => `
+  const card = (title, subtitle, members, poolId, warning, extra = '') => `
     <section class="panel group" ${poolId ? `data-drop="${escape(poolId)}"` : ''}>
       <div class="panel-head">
         <h2>${escape(title)}</h2>
@@ -961,6 +961,7 @@ function renderGroups(nodes, pools, models) {
           title="${escape(warning.reasons.join('\n'))}">&#9650;</span>
           <span class="hint ${warning.level}">${escape(warning.label)}</span>` : ''}
         <span class="hint">${escape(subtitle)}</span>
+        ${extra}
       </div>
       ${members.length === 0
         ? '<p class="empty">Nothing here. Drag a machine in.</p>'
@@ -977,11 +978,37 @@ function renderGroups(nodes, pools, models) {
   box.innerHTML = groups.map((g) => {
     const warning = groupWarning(groupMismatches(g.pool, g.nodes, models))
     const mode = g.mode === 'list' ? 'hand-picked list' : 'a rule machines match'
-    return card(g.pool.name, `${g.pool.tier} tier, ${mode}`, g.nodes, g.pool.id, warning)
+    // The socket is on the card because it is the address somebody points an
+    // application at. A group whose port lives only in the database is one an
+    // operator has to go and look up, which is how they end up pointing at the
+    // wrong group's machines.
+    const at = g.pool.servingPort
+      ? `, answering on :${g.pool.servingPort}`
+      : ''
+    const socket = g.pool.servingPort ? '' : `
+      <button class="link" data-socket="${escape(g.pool.id)}"
+              title="Give this group a port of its own, so clients can address it directly"
+              >give it a socket</button>`
+    return card(g.pool.name, `${g.pool.tier} tier, ${mode}${at}`, g.nodes, g.pool.id,
+                warning, socket)
   }).join('') + (ungrouped.length > 0
     ? card('In no group', 'not scheduled by any pool, and holding no assigned models',
       ungrouped, null, null)
     : '')
+
+  // Groups made before sockets existed. Asked for rather than backfilled: the
+  // schema will not open ports nobody requested during an upgrade, so somebody
+  // has to say so once per group.
+  box.querySelectorAll('[data-socket]').forEach((btn) =>
+    btn.addEventListener('click', async (ev) => {
+      ev.stopPropagation()
+      btn.disabled = true
+      try {
+        const got = await api(`/pools/${btn.dataset.socket}/socket`, { method: 'PUT' })
+        toast(`answering on port ${got.servingPort}`)
+        refresh()
+      } catch (err) { btn.disabled = false; toast(err.message, true) }
+    }))
 
   bindGroupDragging(box, pools)
 }
@@ -1171,8 +1198,15 @@ async function createGroup() {
   const name = prompt('Name for the new group')
   if (!name || !name.trim()) return
   try {
-    await api('/pools', { method: 'POST', body: JSON.stringify({ name: name.trim() }) })
-    toast(`created ${name.trim()}`)
+    const made = await api('/pools',
+                           { method: 'POST', body: JSON.stringify({ name: name.trim() }) })
+    // The port, at the moment of creation, because that is when somebody is
+    // about to go and use it. Told rather than left to be found: the socket is
+    // how an application addresses this group and nothing else in a request
+    // names it.
+    toast(made.servingPort
+      ? `created ${name.trim()}, answering on port ${made.servingPort}`
+      : `created ${name.trim()}`)
     refresh()
   } catch (err) { toast(err.message, true) }
 }

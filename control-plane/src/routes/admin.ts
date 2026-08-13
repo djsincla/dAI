@@ -7,6 +7,8 @@ import { repositoryRoot, safePath, verifyModel } from '../lib/repository.js'
 import { COMPLETE_ENOUGH, holdsModel } from '../lib/possession.js'
 import { coupledWith, violations, type Group } from '../lib/groupRules.js'
 import { runnability, shapeOf, whyGroupCannotHost } from '../lib/shape.js'
+import { capacity, nextFree, rangeFrom } from '../lib/ports.js'
+import type { GroupListeners } from '../lib/groupSockets.js'
 import { existsSync } from 'node:fs'
 import { Router } from 'express'
 import { type Db, tx } from '../lib/db.js'
@@ -21,7 +23,13 @@ import { POLICY, type PresenceState } from '../lib/policy.js'
 import type { Ca } from '../lib/ca.js'
 import type { Broker } from '../lib/broker.js'
 
-export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
+/**
+ * `listeners` is a getter rather than the thing itself: the routes are built
+ * while the process is still deciding what it will bind, so capturing the
+ * manager here would capture nothing.
+ */
+export function adminRoutes(db: Db, ca: Ca, broker: Broker,
+                            listeners?: () => GroupListeners | undefined): Router {
   const r = Router()
   r.use(userAuth(db))
 
@@ -509,7 +517,7 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
   r.get('/pools', async (_req, res) => {
     const { rows } = await db.query(
       `SELECT id, name, tier, schedule, preempt, priority,
-              agent_channel, desired_agent_version, serving_model_id
+              agent_channel, desired_agent_version, serving_model_id, serving_port
          FROM pools ORDER BY name`,
     )
     res.json(rows.map((p) => ({
@@ -519,6 +527,11 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
       desiredAgentVersion: p.desired_agent_version ?? null,
       // What this group's machines run, as against what they hold.
       servingModelId: p.serving_model_id ?? null,
+      // The socket this group answers on. Shown rather than kept internal: it
+      // is the address somebody points an application at, and a port an
+      // operator has to go and look up in a database is one they will get
+      // wrong. Null for a group created before groups had sockets.
+      servingPort: p.serving_port === null ? null : Number(p.serving_port),
     })))
   })
 
@@ -532,12 +545,29 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
   r.post('/pools', async (req, res) => {
     const b = req.body as { name: string; tier?: 'harvest' | 'cluster' }
     try {
+      // The socket, allocated here rather than at first use. A group that
+      // exists but cannot be addressed is a group somebody has to be told
+      // about separately, and the whole point of a port per group is that
+      // there is nothing to tell: the address is the routing.
+      const range = rangeFrom(process.env.DAI_GROUP_PORT_RANGE)
+      const { rows: held } = await db.query(
+        `SELECT serving_port FROM pools WHERE serving_port IS NOT NULL`)
+      const port = nextFree(held.map((r) => Number(r.serving_port)), range)
+      if (port === null) {
+        res.status(409).json({
+          error: 'conflict',
+          detail: `every socket in ${range.from}-${range.to} is taken; `
+            + `${capacity(range)} groups is the limit until one is deleted `
+            + 'or DAI_GROUP_PORT_RANGE is widened',
+        })
+        return
+      }
       const { rows } = await db.query(
-        `INSERT INTO pools (name, tier, schedule, preempt)
-         VALUES ($1, $2, $3, $4) RETURNING id, name, tier`,
+        `INSERT INTO pools (name, tier, schedule, preempt, serving_port)
+         VALUES ($1, $2, $3, $4, $5) RETURNING id, name, tier, serving_port`,
         [b.name, b.tier ?? 'harvest',
          b.tier === 'cluster' ? 'gang' : 'independent-units',
-         b.tier === 'cluster' ? 'never' : 'on-user-activity'],
+         b.tier === 'cluster' ? 'never' : 'on-user-activity', port],
       )
       const pool = rows[0]!
       // The creator can act on what they made. Without this a new group is one
@@ -550,8 +580,29 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
           `INSERT INTO role_bindings (group_id, pool_id, role) VALUES ($1,$2,'admin')
            ON CONFLICT DO NOTHING`, [groups[0].id, pool.id])
       }
-      await audit(db, req.user!.id, 'pool.create', pool.name, { tier: pool.tier })
-      res.status(201).json({ id: pool.id, name: pool.name, tier: pool.tier })
+      await audit(db, req.user!.id, 'pool.create', pool.name,
+                  { tier: pool.tier, servingPort: pool.serving_port })
+      // Bound now, so the port in this response is one that answers. A group
+      // whose socket only appeared on the next restart would be a group that
+      // looked created and refused connections.
+      //
+      // And if it cannot be bound, the group does not exist. Something else on
+      // the host holding that port would otherwise leave a group that is
+      // created, assignable, and unreachable - which is worse than a creation
+      // that refused, because only the refusal says so.
+      try {
+        await listeners?.()?.open(Number(pool.serving_port))
+      } catch (err) {
+        await db.query(`DELETE FROM pools WHERE id = $1`, [pool.id])
+        res.status(409).json({
+          error: 'conflict',
+          detail: `port ${pool.serving_port} could not be bound, so ${b.name} was not `
+            + `created: ${(err as Error).message}`,
+        })
+        return
+      }
+      res.status(201).json({ id: pool.id, name: pool.name, tier: pool.tier,
+                             servingPort: Number(pool.serving_port) })
     } catch (e) {
       if ((e as { code?: string }).code === '23505') {
         res.status(409).json({ error: 'conflict', detail: `a group called ${b.name} exists` })
@@ -559,6 +610,61 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
       }
       throw e
     }
+  })
+
+  /**
+   * Give a group a socket of its own.
+   *
+   * For the groups that predate sockets. The schema deliberately does not
+   * backfill them - binding listeners nobody asked for, during an upgrade, on a
+   * machine nobody is watching, is how a control plane comes back up holding
+   * ports somebody else wanted. So it is asked for, once, per group.
+   *
+   * Idempotent: a group that already has one is told which, rather than being
+   * given a second and abandoning the first while clients are pointed at it.
+   */
+  r.put('/pools/:poolId/socket', async (req, res) => {
+    const { poolId } = req.params as { poolId: string }
+    if (!(await requireRole(db, req.user!.id, poolId, 'admin'))) {
+      res.status(403).json({ error: 'forbidden', detail: 'admin role required on this pool' })
+      return
+    }
+    const { rows } = await db.query(
+      `SELECT name, serving_port FROM pools WHERE id = $1`, [poolId])
+    const pool = rows[0] as { name: string; serving_port: number | null } | undefined
+    if (!pool) { res.status(404).json({ error: 'not_found', detail: 'no such group' }); return }
+    if (pool.serving_port !== null) {
+      res.json({ servingPort: Number(pool.serving_port), allocated: false })
+      return
+    }
+
+    const range = rangeFrom(process.env.DAI_GROUP_PORT_RANGE)
+    const { rows: held } = await db.query(
+      `SELECT serving_port FROM pools WHERE serving_port IS NOT NULL`)
+    const port = nextFree(held.map((r) => Number(r.serving_port)), range)
+    if (port === null) {
+      res.status(409).json({
+        error: 'conflict',
+        detail: `every socket in ${range.from}-${range.to} is taken; `
+          + `${capacity(range)} groups is the limit until the range is widened`,
+      })
+      return
+    }
+    await db.query(`UPDATE pools SET serving_port = $2 WHERE id = $1`, [poolId, port])
+    try {
+      await listeners?.()?.open(port)
+    } catch (err) {
+      // Put it back rather than leaving the group recorded at a port that is
+      // not answering, which is the state health exists to shout about.
+      await db.query(`UPDATE pools SET serving_port = NULL WHERE id = $1`, [poolId])
+      res.status(409).json({
+        error: 'conflict',
+        detail: `port ${port} could not be bound: ${(err as Error).message}`,
+      })
+      return
+    }
+    await audit(db, req.user!.id, 'pool.socket', pool.name, { servingPort: port })
+    res.json({ servingPort: port, allocated: true })
   })
 
   /**

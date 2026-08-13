@@ -43,7 +43,19 @@ CREATE TABLE IF NOT EXISTS pools (
     preempt   text NOT NULL CHECK (preempt IN ('on-user-activity', 'never')),
     priority  int  NOT NULL DEFAULT 100,
     -- Cluster pools pin explicit members; harvest pools match a tag query.
-    membership jsonb NOT NULL DEFAULT '{}'::jsonb
+    membership jsonb NOT NULL DEFAULT '{}'::jsonb,
+    -- The one model this group's machines run.
+    --
+    -- Distinct from pool_models, which says what they should hold. A machine
+    -- holds many models and loads one, so only this is constrained: two groups
+    -- that share a machine must name the same model here, because nothing else
+    -- decides which of them wins.
+    --
+    -- Null means nobody has said yet, which is not the same as none: a group
+    -- that names no model is not a claim about anything, and refusing to sit
+    -- beside one that does would make the order an operator does two legitimate
+    -- things in decide whether they are allowed to.
+    serving_model_id text
 );
 
 -- Pool-scoped role bindings. A group's role differs per pool, so membership is
@@ -423,6 +435,22 @@ ALTER TABLE pools ADD COLUMN IF NOT EXISTS desired_agent_version text;
 -- Postgres has no IF NOT EXISTS for a constraint, so this is asked rather than
 -- assumed. Re-applying the schema has to be a no-op: it is how an upgrade
 -- reaches a database that already has data in it.
+-- The group's serving model, and its foreign key.
+--
+-- Declared here rather than on the table because pools is created two hundred
+-- lines before models, so the reference cannot be satisfied where the column
+-- belongs. Split in two for the same reason the file splits everything else:
+-- re-applying has to be a no-op.
+ALTER TABLE pools ADD COLUMN IF NOT EXISTS serving_model_id text;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'pools_serving_model_fk')
+  THEN
+    ALTER TABLE pools ADD CONSTRAINT pools_serving_model_fk
+      FOREIGN KEY (serving_model_id) REFERENCES models(id) ON DELETE SET NULL;
+  END IF;
+END $$;
+
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'pools_agent_channel_check')

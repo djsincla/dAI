@@ -138,6 +138,88 @@ describe('agent surface', () => {
     expect(r.status).toBe(200)
   })
 
+  it('sets what a group serves, and reports it back', async () => {
+    await db.query(
+      `INSERT INTO models (id, runtime, kind, size_bytes) VALUES ('org/m','mlx','generate',1)
+       ON CONFLICT DO NOTHING`)
+    const set = await fetch(`${base}/admin/v1/pools/${fx.poolId}/serving-model`, {
+      method: 'PUT', headers: asUser(fx.operatorToken),
+      body: JSON.stringify({ modelId: 'org/m' }),
+    })
+    expect(set.status).toBe(204)
+
+    const pools = await (await fetch(`${base}/admin/v1/pools`,
+      { headers: asUser(fx.operatorToken) })).json()
+    expect(pools.find((p: { id: string }) => p.id === fx.poolId).servingModelId).toBe('org/m')
+  })
+
+  it('refuses a model nothing in the catalogue knows about', async () => {
+    // Otherwise a group declares it serves something no machine could ever load,
+    // and the first sign is a node failing rather than the assignment refusing.
+    const r = await fetch(`${base}/admin/v1/pools/${fx.poolId}/serving-model`, {
+      method: 'PUT', headers: asUser(fx.operatorToken),
+      body: JSON.stringify({ modelId: 'org/never-imported' }),
+    })
+    expect(r.status).toBe(404)
+  })
+
+  it('refuses two groups that would disagree about one machine, naming it', async () => {
+    // The rule the whole design turns on: a machine loads one model, so its
+    // groups are not allowed to disagree about which. Refused on write, with
+    // the machine named, because the coupling is transitive and the group in
+    // the message may not be the one the operator was thinking about.
+    await db.query(
+      `INSERT INTO models (id, runtime, kind, size_bytes) VALUES ('org/a','mlx','generate',1),
+                                                                ('org/b','mlx','generate',1)
+       ON CONFLICT DO NOTHING`)
+    // In both tiers, which is the arrangement the rule exists for. A cluster
+    // group admits only cluster nodes, so a harvest-only machine would never
+    // match one and there would be nothing to disagree about.
+    await db.query(
+      `UPDATE nodes SET state='active', tiers=ARRAY['harvest','cluster']::text[] WHERE id=$1`,
+      [fx.nodeId])
+    await db.query(`UPDATE pools SET serving_model_id='org/a' WHERE id=$1`, [fx.poolId])
+
+    // A second group of the other tier, matching the same machine by rule.
+    const other = await db.query(
+      `INSERT INTO pools (name, tier, schedule, preempt)
+       VALUES ('serving','cluster','gang','never') RETURNING id`)
+    const otherId = other.rows[0].id as string
+
+    const r = await fetch(`${base}/admin/v1/pools/${otherId}/serving-model`, {
+      method: 'PUT', headers: asUser(fx.operatorToken),
+      body: JSON.stringify({ modelId: 'org/b' }),
+    })
+    expect(r.status).toBe(409)
+    const body = await r.json()
+    expect(body.detail).toContain('org/a')
+    expect(body.detail).toContain('org/b')
+    expect(body.violations[0].rule).toBe('groups-must-agree')
+
+    // And nothing was written.
+    const after = await db.query(`SELECT serving_model_id FROM pools WHERE id=$1`, [otherId])
+    expect(after.rows[0].serving_model_id).toBeNull()
+  })
+
+  it('allows two groups that agree', async () => {
+    await db.query(
+      `INSERT INTO models (id, runtime, kind, size_bytes) VALUES ('org/same','mlx','generate',1)
+       ON CONFLICT DO NOTHING`)
+    await db.query(
+      `UPDATE nodes SET state='active', tiers=ARRAY['harvest','cluster']::text[] WHERE id=$1`,
+      [fx.nodeId])
+    await db.query(`UPDATE pools SET serving_model_id='org/same' WHERE id=$1`, [fx.poolId])
+    const other = await db.query(
+      `INSERT INTO pools (name, tier, schedule, preempt)
+       VALUES ('serving2','cluster','gang','never') RETURNING id`)
+
+    const r = await fetch(`${base}/admin/v1/pools/${other.rows[0].id}/serving-model`, {
+      method: 'PUT', headers: asUser(fx.operatorToken),
+      body: JSON.stringify({ modelId: 'org/same' }),
+    })
+    expect(r.status).toBe(204)
+  })
+
   it('serves the policy table to an approved node', async () => {
     const r = await fetch(`${base}/agent/v1/policy`, { headers: asNode(fx.fingerprint) })
     expect(r.status).toBe(200)

@@ -1,4 +1,4 @@
-import { Router } from 'express'
+import { Router, type Request } from 'express'
 import type { Db } from '../lib/db.js'
 import type { Broker } from '../lib/broker.js'
 import { userAuth } from '../lib/auth.js'
@@ -6,6 +6,7 @@ import { POLICY, type PresenceState } from '../lib/policy.js'
 import { candidatesFor, isRefusal, selectGang, selectNode,
          type Candidate, type Refusal } from '../lib/router.js'
 import { shapeOf } from '../lib/shape.js'
+import { membersOf } from '../lib/pools.js'
 
 /**
  * OpenAI-compatible serving surface.
@@ -20,7 +21,13 @@ import { shapeOf } from '../lib/shape.js'
  * served by hearing that immediately, with a reason, than by a request that
  * hangs until it times out.
  */
-async function servableModels(db: Db, broker: Broker) {
+/**
+ * `groupId` narrows the catalogue to one group's machines, because a caller
+ * asking a group's socket what it can serve is asking about those machines. A
+ * catalogue that answered for the fleet would advertise models the next request
+ * on the same port could not be given.
+ */
+async function servableModels(db: Db, broker: Broker, groupId?: string | null) {
     const { rows } = await db.query(
       `SELECT id AS node_id, name,
               COALESCE((model_context ->> name)::int, 0) AS context,
@@ -32,8 +39,10 @@ async function servableModels(db: Db, broker: Broker) {
           AND (paused_until IS NULL OR paused_until < now())
           AND last_heartbeat > now() - interval '2 minutes'`)
 
+    const scope = groupId ? await membersOf(db, groupId) : null
     const models = new Map<string, { context: number; resident: boolean; live: boolean }>()
     for (const row of rows as any[]) {
+      if (scope !== null && !scope.has(row.node_id as string)) continue
       // Recent heartbeat, not currently parked on the channel.
       //
       // These are different facts and conflating them broke the listing in the
@@ -140,6 +149,21 @@ export function splitBody(
   }
 }
 
+/**
+ * Which group a request is addressed to, which is the socket it arrived on.
+ *
+ * A group's port is the whole of its addressing: nothing in the request names
+ * it, so nothing in the request can name the wrong one. Undefined on the shared
+ * serving port, where the fleet is in scope.
+ *
+ * Set by the middleware that fronts a group's listener; read here rather than
+ * threaded through every handler, because the alternative is a parameter on
+ * three routes that must never disagree.
+ */
+export function groupOf(req: Request): string | null {
+  return (req as Request & { groupId?: string | null }).groupId ?? null
+}
+
 export function servingRoutes(db: Db, broker: Broker): Router {
   const r = Router()
   r.use(userAuth(db))
@@ -167,8 +191,8 @@ export function servingRoutes(db: Db, broker: Broker): Router {
    * goes unused. Taken from what nodes report rather than configured here, so it
    * cannot drift from the weights on disk.
    */
-  r.get('/models', async (_req, res) => {
-    const models = await servableModels(db, broker)
+  r.get('/models', async (req, res) => {
+    const models = await servableModels(db, broker, groupOf(req))
     res.json({
       object: 'list',
       data: [...models].map(([id, m]) => ({
@@ -209,7 +233,7 @@ export function servingRoutes(db: Db, broker: Broker): Router {
     }
 
     const modelHash = body.model ?? null
-    const candidates = await candidatesFor(db, broker.inFlightCounts)
+    const candidates = await candidatesFor(db, broker.inFlightCounts, groupOf(req))
     // Only nodes holding the reverse channel open can be routed to. A node that
     // is eligible on paper but not listening cannot answer in time.
     const connected = candidates.filter((c) => broker.isConnected(c.id))
@@ -305,7 +329,7 @@ export function servingRoutes(db: Db, broker: Broker): Router {
       tools?: unknown[]
     }
 
-    const servable = await servableModels(db, broker)
+    const servable = await servableModels(db, broker, groupOf(req))
     if (!body.model || !servable.has(body.model)) {
       res.status(404).json({
         type: 'error',
@@ -320,7 +344,7 @@ export function servingRoutes(db: Db, broker: Broker): Router {
       return
     }
 
-    const candidates = await candidatesFor(db, broker.inFlightCounts)
+    const candidates = await candidatesFor(db, broker.inFlightCounts, groupOf(req))
     const connected = candidates.filter((c) => broker.isConnected(c.id))
     // No gang for counting. Every rank loads the same tokenizer and chat
     // template from the same directory, so one machine can answer this for a
@@ -384,7 +408,7 @@ export function servingRoutes(db: Db, broker: Broker): Router {
     // a model nobody has loaded returned a confident answer from whatever
     // happened to be resident - the worst possible response to asking for
     // something specific.
-    const servable = await servableModels(db, broker)
+    const servable = await servableModels(db, broker, groupOf(req))
     if (!body.model || !servable.has(body.model)) {
       res.status(404).json({
         type: 'error',
@@ -400,7 +424,7 @@ export function servingRoutes(db: Db, broker: Broker): Router {
     }
 
     const modelHash = body.model
-    const candidates = await candidatesFor(db, broker.inFlightCounts)
+    const candidates = await candidatesFor(db, broker.inFlightCounts, groupOf(req))
     const connected = candidates.filter((c) => broker.isConnected(c.id))
 
     // A split model is not a big model. Routed as one it goes to a single
@@ -768,8 +792,8 @@ export function servingRoutes(db: Db, broker: Broker): Router {
  */
 export function compatRoutes(db: Db, broker: Broker): Router {
   const r = Router()
-  r.get('/v0/models', async (_req, res) => {
-    const models = await servableModels(db, broker)
+  r.get('/v0/models', async (req, res) => {
+    const models = await servableModels(db, broker, groupOf(req))
     res.json({
       object: 'list',
       data: [...models].map(([id, m]) => ({

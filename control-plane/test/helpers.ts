@@ -1,6 +1,7 @@
 import type { Express } from 'express'
 import { createPool, type Db, reset } from '../src/lib/db.js'
 import { createApp } from '../src/server.js'
+import type { GroupListeners } from '../src/lib/groupSockets.js'
 
 /**
  * A separate database, and deliberately not the one anybody is using.
@@ -81,9 +82,9 @@ function claimDatabase(): Promise<void> {
 /** Arbitrary, and only has to be the same number in every copy of this file. */
 const LOCK_KEY = 7_314_159
 
-export function appFor(db: Db): Express {
+export function appFor(db: Db, listeners?: () => GroupListeners | undefined): Express {
   process.env.DAI_TRUST_FINGERPRINT_HEADER = '1'
-  return createApp(db)
+  return createApp(db, 'both', listeners)
 }
 
 export interface Fixtures {

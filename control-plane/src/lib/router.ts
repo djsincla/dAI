@@ -1,6 +1,6 @@
 import type { Db } from './db.js'
 import { POLICY, type PresenceState, type WorkKind } from './policy.js'
-import { poolsFor } from './pools.js'
+import { membersOf, poolsFor } from './pools.js'
 
 /**
  * Node selection for interactive requests.
@@ -222,7 +222,19 @@ export function isRefusal(x: Candidate | Candidate[] | Refusal): x is Refusal {
 }
 
 /** Nodes that could plausibly take an interactive request right now. */
-export async function candidatesFor(db: Db, inFlight: Map<string, number>): Promise<Candidate[]> {
+/**
+ * The machines a request may land on.
+ *
+ * `groupId` narrows it to one group's machines, which is what a request that
+ * arrived on that group's own socket is asking for. Undefined means the shared
+ * serving port, where the whole fleet is in scope - the behaviour every caller
+ * had before groups had sockets of their own.
+ *
+ * Narrowed here rather than at selection, so that "no capacity" on a group's
+ * port means that group has none, and cannot accidentally mean the fleet does.
+ */
+export async function candidatesFor(db: Db, inFlight: Map<string, number>,
+                                    groupId?: string | null): Promise<Candidate[]> {
   const { rows } = await db.query(
     `SELECT id, hostname, tier, chip, memory_gb,
             presence_state, resident_models, capability_profiles
@@ -238,7 +250,16 @@ export async function candidatesFor(db: Db, inFlight: Map<string, number>): Prom
   const { rows: pools } = await db.query(
     `SELECT id, tier, membership FROM pools WHERE tier = 'cluster'`)
 
-  return (rows as any[]).map((n) => ({
+  // The scoping group, which may be of either tier: a harvest group has its own
+  // socket too, and a request on it is asking those machines and no others. A
+  // group that no longer exists narrows to nothing rather than widening to the
+  // fleet.
+  const scope = groupId ? await membersOf(db, groupId) : null
+  if (groupId && scope === null) return []
+
+  return (rows as any[])
+    .filter((n) => scope === null || scope.has(n.id as string))
+    .map((n) => ({
     id: n.id,
     hostname: n.hostname,
     tier: n.tier as 'harvest' | 'cluster',

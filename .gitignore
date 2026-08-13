@@ -32,6 +32,8 @@ xcuserdata/
 spike/e5_ane/results*/
 
 # Control plane
+# Where a hand-started server writes; a running instance is a local thing.
+control-plane/control-plane.log
 control-plane/node_modules/
 control-plane/dist/
 control-plane/certs/

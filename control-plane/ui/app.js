@@ -14,7 +14,8 @@
 
 import {
   attentionItems, capacityOf, copyState, distributionOf, humanBytes, importCost,
-  bucketFor, clampWindow, describeTier, describeWindow, groupMachines, groupMismatches,
+  bucketFor, certificateStanding, clampWindow, describeTier, describeWindow,
+  groupMachines, groupMismatches,
   inBothTiers, tierMachines, tiersAfter,
   groupMode, groupWarning, importProgress, isSynthetic, kindsFor,
   machinesThatCouldHold, matchesGroup, matchesQuery, nextSort, pauseAction, progressOf,
@@ -427,6 +428,7 @@ function openNode(id, { push = false } = {}) {
                 escape(String(d.agentFingerprint).slice(0, 12))}</span>`
             : ''
         }</dd>
+        <dt>Certificate</dt><dd>${certLine(d)}</dd>
         ${Object.keys(d.syncFaults ?? {}).length > 0 ? `<dt>Not holding</dt><dd class="fault">${
           Object.entries(d.syncFaults).map(([id, why]) =>
             `${escape(id === '*' ? 'model sync' : id.split('/').pop())}: ${escape(why)}`).join('<br>')
@@ -454,6 +456,43 @@ function openNode(id, { push = false } = {}) {
   }
   push ? drawer.push(entry) : drawer.open(entry)
 }
+
+/**
+ * When this machine's certificate runs out, and the way to get it a new one.
+ *
+ * The button is here rather than on the machine itself because the machine
+ * cannot be asked directly: the key lives in the Secure Enclave and signs only
+ * inside the launchd daemon, so `dai-agent renew` over ssh fails even as root.
+ * The request rides the heartbeat the node already sends, which is also why
+ * nothing happens instantly - a node that is asleep or offline picks it up when
+ * it next reports in, and until then the request stands.
+ */
+function certLine(d) {
+  const c = certificateStanding(d)
+  const when = d.certNotAfter ? new Date(d.certNotAfter).toLocaleDateString() : ''
+  return `${escape(when)} <span class="${c.state === 'valid' ? 'muted' : 'fault'}">(${
+    escape(c.detail)})</span> ${c.canAsk
+      ? `<button data-renew="${d.id}">Ask to renew</button>`
+      : c.asked
+        ? `<span class="muted" title="Sent on this node's next heartbeat">renewal asked ${
+            escape(new Date(c.asked).toLocaleString())}</span>`
+        : ''}`
+}
+
+/**
+ * Wired on the drawer rather than at render time, because the drawer redraws
+ * its body and a listener bound to a replaced node stops firing.
+ */
+document.addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('[data-renew]')
+  if (!btn) return
+  btn.disabled = true
+  try {
+    await api(`/nodes/${btn.dataset.renew}/renew`, { method: 'POST', body: '{}' })
+    toast('Asked. The node renews on its next heartbeat, which also gives it '
+      + 'the node CA it needs to join a split.')
+  } catch (err) { btn.disabled = false; toast(err.message, true) }
+})
 
 function policyBlock(p) {
   return `<dl class="kv">

@@ -109,6 +109,9 @@ public actor Worker {
     private var pendingSyncFaults: [String: String]?
     /// Set by the control plane on a beat, acted on by the next loop turn.
     private var renewRequested = false
+    /// Told when this node starts presenting a new certificate, so the other
+    /// loop in this process can stop presenting the old one.
+    private let onRenewed: (@Sendable (any ControlPlaneClient) async -> Void)?
 
     /// Holds the machine awake while it is on AC and nobody has paused it.
     /// Released when either stops being true, and when the process dies.
@@ -132,9 +135,11 @@ public actor Worker {
                 scenes: SceneSync? = nil,
                 attachments: AttachmentSync? = nil,
                 renewer: (any CertificateRenewing)? = nil,
+                onRenewed: (@Sendable (any ControlPlaneClient) async -> Void)? = nil,
                 sleepAssertion: SleepAssertion = SleepAssertion(),
                 promoteAfter: TimeInterval = idlePromoteSeconds) {
         self.renewer = renewer
+        self.onRenewed = onRenewed
         self.renderer = renderer
         self.scenes = scenes
         self.attachments = attachments
@@ -374,6 +379,11 @@ public actor Worker {
             renewRequested = false
             controlPlane = replacement
             log("now presenting the renewed certificate")
+            // Anything else in this process holding the old certificate has to
+            // be told, because nothing else will notice: the serving loop kept
+            // presenting a retired certificate and was refused every five
+            // seconds until the daemon was restarted.
+            await onRenewed?(replacement)
         }
     }
 

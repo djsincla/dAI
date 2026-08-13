@@ -9,7 +9,7 @@ import {
 import {
   TIERS, describeTier, inBothTiers, tierMachines, tiersAfter, tiersOf,
   attentionItems, capacityOf, copyState, distributionOf, humanBytes, importCost,
-  bucketFor, clampWindow, describeWindow, groupMachines, groupMismatches,
+  bucketFor, certificateStanding, clampWindow, describeWindow, groupMachines, groupMismatches,
   groupMode, groupWarning, importProgress, isStale, isSynthetic, kindsFor,
   machinesThatCouldHold, matchesQuery, MAX_WINDOW_S, MIN_WINDOW_S, nextSort,
   pauseAction, progressOf, runsGpu, servingFor, sortRows, windowFromDrag,
@@ -916,5 +916,60 @@ describe('what a machine is offered for', () => {
   it('refuses a change that would do nothing', () => {
     expect(tiersAfter({ tiers: ['harvest'] }, 'harvest', 'add')).toBeNull()
     expect(tiersAfter({ tiers: ['harvest'] }, 'cluster', 'remove')).toBeNull()
+  })
+})
+
+/**
+ * The renewal control, which is the only way to get a certificate onto a node
+ * that cannot be asked for one directly - the Enclave key signs inside the
+ * daemon and nowhere else, so a person at the machine has no more power here
+ * than a person on the other side of the fleet.
+ */
+describe('what the fleet view says about a certificate', () => {
+  const DAY = 86_400_000
+  const now = Date.parse('2026-08-13T00:00:00Z')
+  const node = (over: Record<string, unknown> = {}) => ({
+    id: 'n1', hostname: 'orca', certNotAfter: new Date(now + 20 * DAY).toISOString(),
+    renewRequestedAt: null, ...over,
+  })
+
+  it('offers to renew a certificate with life left in it', () => {
+    const c = certificateStanding(node(), now)
+    expect(c.state).toBe('valid')
+    expect(c.days).toBe(20)
+    expect(c.canAsk).toBe(true)
+  })
+
+  it('does not offer twice while a request is outstanding', () => {
+    const c = certificateStanding(
+      node({ renewRequestedAt: '2026-08-13T00:00:00Z' }), now)
+    expect(c.canAsk).toBe(false)
+    expect(c.asked).toBe('2026-08-13T00:00:00Z')
+  })
+
+  it('warns when the automatic renewal has evidently not run', () => {
+    // Renewal happens on its own at two thirds of life, so a week left means
+    // something is wrong rather than that it is nearly time.
+    expect(certificateStanding(node({
+      certNotAfter: new Date(now + 3 * DAY).toISOString() }), now).state).toBe('expiring')
+  })
+
+  it('refuses to offer renewal to a node that can no longer heartbeat', () => {
+    // An expired certificate cannot authenticate, so the request has no ride
+    // home. The honest answer is re-enrolment, not a button.
+    const c = certificateStanding(node({
+      certNotAfter: new Date(now - DAY).toISOString() }), now)
+    expect(c.expired).toBe(true)
+    expect(c.canAsk).toBe(false)
+    expect(c.detail).toContain('re-enrolled')
+  })
+
+  it('says so rather than guessing when the expiry is unknown', () => {
+    const c = certificateStanding(node({ certNotAfter: null }), now)
+    expect(c.state).toBe('unknown')
+    expect(c.days).toBe(null)
+    // Still offerable: not knowing when a certificate expires is a reason to
+    // renew it, not a reason to withhold the only control that would.
+    expect(c.canAsk).toBe(true)
   })
 })

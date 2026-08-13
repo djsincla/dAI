@@ -45,7 +45,7 @@ public actor AttachmentSync {
         }
     }
 
-    private let controlPlane: any ControlPlaneClient
+    private var controlPlane: any ControlPlaneClient
     private let base: URL
     private let log: @Sendable (String) -> Void
 
@@ -55,6 +55,23 @@ public actor AttachmentSync {
         self.base = base
         self.log = log
     }
+
+    /// Start presenting a renewed certificate.
+    ///
+    /// Renewal retires the old certificate the moment the new one is issued, so
+    /// anything still holding the old one is refused with "unknown certificate"
+    /// - and this loop would go on being refused for the life of the process,
+    /// because nothing here ever reloads. That is not hypothetical: it is what
+    /// this loop did after the first renewal on real hardware, while the fleet
+    /// view reported the machine as simply not holding what it was assigned.
+    public func present(_ replacement: any ControlPlaneClient) {
+        controlPlane = replacement
+    }
+
+    /// What this loop is presenting. Reachable only from a test, which is the
+    /// point: the last two times a renewal was not handed on, nothing could
+    /// see it until a machine had been locked out of the fleet for hours.
+    func presenting() -> any ControlPlaneClient { controlPlane }
 
     /// Where job content lives on this machine.
     ///

@@ -424,10 +424,21 @@ public actor Worker {
             renewRequested = false
             controlPlane = replacement
             log("now presenting the renewed certificate")
-            // Anything else in this process holding the old certificate has to
-            // be told, because nothing else will notice: the serving loop kept
-            // presenting a retired certificate and was refused every five
-            // seconds until the daemon was restarted.
+            // Everything else in this process holding the old certificate has
+            // to be told, because nothing else will notice. Renewal retires the
+            // old certificate the moment the new one is issued, so every loop
+            // still holding it is refused with "unknown certificate" until the
+            // daemon restarts.
+            //
+            // This list is the whole of it, and it has been wrong twice. The
+            // serving loop was missed first and reconnected every five seconds
+            // to be refused; the sync loop was missed next and spent the time
+            // reporting "could not ask what to hold", which the fleet view
+            // showed as a machine not holding its models rather than as a
+            // machine that had been locked out.
+            await modelSync?.present(replacement)
+            await scenes?.present(replacement)
+            await attachments?.present(replacement)
             await onRenewed?(replacement)
         }
     }

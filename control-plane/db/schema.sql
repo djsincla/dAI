@@ -80,6 +80,22 @@ CREATE TABLE IF NOT EXISTS pools (
     enabled boolean NOT NULL DEFAULT true
 );
 
+-- Sockets that belonged to a group that has been deleted.
+--
+-- Held back rather than handed straight to the next group created. A client
+-- left pointing at the old URL would otherwise start talking to somebody else's
+-- machines without anything having changed at its end - which is the one
+-- failure a port-per-group is supposed to make impossible.
+--
+-- Reused only when the range has nothing else left, oldest first, because a
+-- range that has filled with retirements is a fleet that cannot make a group at
+-- all - and that is worse than a stale URL somebody has had weeks to notice.
+CREATE TABLE IF NOT EXISTS retired_sockets (
+    port       int PRIMARY KEY,
+    at         timestamptz NOT NULL DEFAULT now(),
+    was        text NOT NULL
+);
+
 -- Pool-scoped role bindings. A group's role differs per pool, so membership is
 -- not global.
 CREATE TABLE IF NOT EXISTS role_bindings (

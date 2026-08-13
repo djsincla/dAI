@@ -217,3 +217,72 @@ describe('what a stood-down group is left out of', () => {
     expect(freed.find((n) => n.hostname === 'rotorua').suspended).toBe(null)
   })
 })
+
+describe('deleting a group', () => {
+  const del = (poolId: string, confirm = false) =>
+    fetch(`${base}/admin/v1/pools/${poolId}${confirm ? '?confirm=true' : ''}`,
+          { method: 'DELETE', headers: asUser(fx.operatorToken) })
+
+  it('says what would be lost, and loses nothing', async () => {
+    await db.query(
+      `INSERT INTO models (id, runtime, kind, size_bytes) VALUES ('org/m','mlx','generate',1)
+       ON CONFLICT DO NOTHING`)
+    await db.query(
+      `INSERT INTO pool_models (pool_id, model_id) VALUES ($1,'org/m')`, [fx.poolId])
+    await fetch(`${base}/admin/v1/jobs`, {
+      method: 'POST', headers: asUser(fx.operatorToken),
+      body: JSON.stringify({ poolId: fx.poolId, kind: 'embed', items: [{ text: 'hi' }] }),
+    })
+
+    const r = await del(fx.poolId)
+    const body = await r.json() as any
+    expect(r.status).toBe(409)
+    expect(body.error).toBe('confirm_required')
+    expect(body.detail).toContain('1 job')
+    expect(body.detail).toContain('1 model assignment')
+    // And the reversible alternative, because taking the machines back is
+    // usually what somebody actually wants.
+    expect(body.detail).toContain('stand it down instead')
+    expect(body.frees).toContain('rotorua')
+
+    const still = await db.query(`SELECT 1 FROM pools WHERE id = $1`, [fx.poolId])
+    expect(still.rows).toHaveLength(1)
+  })
+
+  it('retires the socket rather than handing it to the next group', async () => {
+    // A client left pointing at the old URL would otherwise start talking to a
+    // different group's machines with nothing having changed at its end.
+    const first = await (await fetch(`${base}/admin/v1/pools`, {
+      method: 'POST', headers: asUser(fx.ownerToken),
+      body: JSON.stringify({ name: 'first' }),
+    })).json() as any
+    await db.query(
+      `INSERT INTO role_bindings (group_id, pool_id, role)
+       SELECT group_id, $1, 'admin' FROM role_bindings LIMIT 1`, [first.id])
+
+    const gone = await del(first.id, true)
+    expect(gone.status).toBe(200)
+    expect((await gone.json() as any).retiredPort).toBe(first.servingPort)
+
+    const next = await (await fetch(`${base}/admin/v1/pools`, {
+      method: 'POST', headers: asUser(fx.ownerToken),
+      body: JSON.stringify({ name: 'second' }),
+    })).json() as any
+    expect(next.servingPort).not.toBe(first.servingPort)
+  })
+
+  it('frees the machines it was holding', async () => {
+    const made = await (await fetch(`${base}/admin/v1/pools`, {
+      method: 'POST', headers: asUser(fx.ownerToken),
+      body: JSON.stringify({ name: 'temporary' }),
+    })).json() as any
+    await db.query(
+      `INSERT INTO role_bindings (group_id, pool_id, role)
+       SELECT group_id, $1, 'admin' FROM role_bindings LIMIT 1`, [made.id])
+    const r = await del(made.id, true)
+    expect((await r.json() as any).frees).toContain('rotorua')
+    // Nothing to tidy on the machines: membership lived on the group's row.
+    const left = await db.query(`SELECT 1 FROM pools WHERE id = $1`, [made.id])
+    expect(left.rows).toHaveLength(0)
+  })
+})

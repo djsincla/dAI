@@ -8,7 +8,7 @@ import { COMPLETE_ENOUGH, holdsModel } from '../lib/possession.js'
 import { coupledWith, effectiveModel, violations, type Group } from '../lib/groupRules.js'
 import { runnability, shapeOf, whyGroupCannotHost } from '../lib/shape.js'
 import { costOfServing, suspensions } from '../lib/suspension.js'
-import { capacity, nextFree, rangeFrom } from '../lib/ports.js'
+import { allocate, capacity, rangeFrom } from '../lib/ports.js'
 import type { GroupListeners } from '../lib/groupSockets.js'
 import { existsSync } from 'node:fs'
 import { Router } from 'express'
@@ -585,7 +585,10 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
       const range = rangeFrom(process.env.DAI_GROUP_PORT_RANGE)
       const { rows: held } = await db.query(
         `SELECT serving_port FROM pools WHERE serving_port IS NOT NULL`)
-      const port = nextFree(held.map((r) => Number(r.serving_port)), range)
+      const { rows: retired } = await db.query(`SELECT port, at FROM retired_sockets`)
+      const chosen = allocate(held.map((r) => Number(r.serving_port)),
+                              retired as { port: number; at: string }[], range)
+      const port = chosen?.port ?? null
       if (port === null) {
         res.status(409).json({
           error: 'conflict',
@@ -594,6 +597,11 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
             + 'or DAI_GROUP_PORT_RANGE is widened',
         })
         return
+      }
+      // A reused port stops being retired. Leaving the row would hold it back
+      // from the group that is now using it the next time somebody allocates.
+      if (chosen?.reused) {
+        await db.query(`DELETE FROM retired_sockets WHERE port = $1`, [port])
       }
       const { rows } = await db.query(
         `INSERT INTO pools (name, tier, schedule, preempt, serving_port)
@@ -643,6 +651,73 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
       }
       throw e
     }
+  })
+
+  /**
+   * Delete a group.
+   *
+   * Everything scoped to it goes with it: its jobs and their work units, which
+   * models it was pushing, and who had a role on it. Its machines are freed,
+   * because membership lives on this row - there is nothing to tidy up on them.
+   *
+   * Said before it is done, because none of that is recoverable and the machines
+   * are the only part an operator is usually thinking about. Standing the group
+   * down is the reversible version, and the message says so.
+   *
+   * The socket is retired rather than freed. A client left pointing at the old
+   * URL would otherwise start talking to a different group's machines without
+   * anything having changed at its end.
+   */
+  r.delete('/pools/:poolId', async (req, res) => {
+    const { poolId } = req.params as { poolId: string }
+    if (!(await requireRole(db, req.user!.id, poolId, 'admin'))) {
+      res.status(403).json({ error: 'forbidden', detail: 'admin role required on this pool' })
+      return
+    }
+    const { rows } = await db.query(
+      `SELECT name, tier, serving_port, membership FROM pools WHERE id = $1`, [poolId])
+    const pool = rows[0] as {
+      name: string; tier: string; serving_port: number | null; membership: unknown
+    } | undefined
+    if (!pool) { res.status(404).json({ error: 'not_found', detail: 'no such group' }); return }
+
+    const { rows: counts } = await db.query(
+      `SELECT (SELECT count(*)::int FROM jobs WHERE pool_id = $1) AS jobs,
+              (SELECT count(*)::int FROM pool_models WHERE pool_id = $1) AS models`, [poolId])
+    const { jobs, models } = counts[0] as { jobs: number; models: number }
+    const { rows: nodes } = await db.query(
+      `SELECT id, hostname, tier, chip, memory_gb FROM nodes WHERE state = 'active'`)
+    const freed = (nodes as never[])
+      .filter((n: never) => poolsFor(n, [pool] as never).length > 0)
+      .map((n: { hostname: string }) => n.hostname)
+
+    if ((req.query.confirm as string) !== 'true') {
+      const goes = [
+        jobs > 0 ? `${jobs} job${jobs === 1 ? '' : 's'} and their work` : null,
+        models > 0 ? `${models} model assignment${models === 1 ? '' : 's'}` : null,
+        'every role anybody holds on it',
+      ].filter(Boolean).join(', ')
+      res.status(409).json({
+        error: 'confirm_required',
+        detail: `deleting ${pool.name} also deletes ${goes}, and none of it comes back. `
+          + `${freed.length} machine${freed.length === 1 ? '' : 's'} would be freed`
+          + `${pool.serving_port ? `, and port ${pool.serving_port} retired rather than reused` : ''}`
+          + '. To take its machines back without losing any of this, stand it down instead.',
+        frees: freed,
+      })
+      return
+    }
+
+    if (pool.serving_port !== null) {
+      await db.query(
+        `INSERT INTO retired_sockets (port, was) VALUES ($1, $2) ON CONFLICT (port) DO NOTHING`,
+        [pool.serving_port, pool.name])
+      await listeners?.()?.close(Number(pool.serving_port))
+    }
+    await db.query(`DELETE FROM pools WHERE id = $1`, [poolId])
+    await audit(db, req.user!.id, 'pool.delete', pool.name,
+                { jobs, models, freed, retiredPort: pool.serving_port })
+    res.json({ name: pool.name, frees: freed, retiredPort: pool.serving_port })
   })
 
   /**
@@ -725,7 +800,10 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
     const range = rangeFrom(process.env.DAI_GROUP_PORT_RANGE)
     const { rows: held } = await db.query(
       `SELECT serving_port FROM pools WHERE serving_port IS NOT NULL`)
-    const port = nextFree(held.map((r) => Number(r.serving_port)), range)
+    const { rows: retired } = await db.query(`SELECT port, at FROM retired_sockets`)
+    const chosen = allocate(held.map((r) => Number(r.serving_port)),
+                            retired as { port: number; at: string }[], range)
+    const port = chosen?.port ?? null
     if (port === null) {
       res.status(409).json({
         error: 'conflict',
@@ -733,6 +811,9 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
           + `${capacity(range)} groups is the limit until the range is widened`,
       })
       return
+    }
+    if (chosen?.reused) {
+      await db.query(`DELETE FROM retired_sockets WHERE port = $1`, [port])
     }
     await db.query(`UPDATE pools SET serving_port = $2 WHERE id = $1`, [poolId, port])
     try {

@@ -1000,6 +1000,9 @@ function renderGroups(nodes, pools, models) {
     // Standing a group down keeps everything it has and asserts none of it,
     // which is how its machines are handed back without dismantling the group.
     const off = g.pool.enabled === false
+    const remove = `<button class="link danger" data-delete="${escape(g.pool.id)}"
+              title="Delete this group: its jobs, model assignments and roles go with it"
+              >delete</button>`
     const stand = `<button class="link" data-enabled="${escape(g.pool.id)}"
               data-to="${off ? 'true' : 'false'}"
               title="${off
@@ -1008,7 +1011,7 @@ function renderGroups(nodes, pools, models) {
               >${off ? 'bring it back' : 'stand it down'}</button>`
     const state = off ? 'stood down, ' : ''
     return card(g.pool.name, `${state}${g.pool.tier} tier, ${mode}${at}`, g.nodes, g.pool.id,
-                warning, socket + stand, off)
+                warning, socket + stand + remove, off)
   }).join('') + (ungrouped.length > 0
     ? card('In no group', 'not scheduled by any pool, and holding no assigned models',
       ungrouped, null, null)
@@ -1017,6 +1020,30 @@ function renderGroups(nodes, pools, models) {
   // Groups made before sockets existed. Asked for rather than backfilled: the
   // schema will not open ports nobody requested during an upgrade, so somebody
   // has to say so once per group.
+  // Deleting asks first, and what it asks with is the control plane's own
+  // sentence rather than a generic "are you sure": the refusal names the jobs,
+  // the assignments and the machines, which is the part somebody needs to weigh.
+  box.querySelectorAll('[data-delete]').forEach((btn) =>
+    btn.addEventListener('click', async (ev) => {
+      ev.stopPropagation()
+      const id = btn.dataset.delete
+      try {
+        await api(`/pools/${id}`, { method: 'DELETE' })
+        toast('deleted')
+        refresh()
+      } catch (err) {
+        // The 409 is the question. Anything else is a real failure.
+        if (!/would be freed|comes back/.test(err.message)) { toast(err.message, true); return }
+        if (!confirm(`${err.message}\n\nDelete it anyway?`)) return
+        try {
+          const gone = await api(`/pools/${id}?confirm=true`, { method: 'DELETE' })
+          toast(`deleted ${gone.name}${gone.retiredPort
+            ? `, port ${gone.retiredPort} retired` : ''}`)
+          refresh()
+        } catch (e) { toast(e.message, true) }
+      }
+    }))
+
   box.querySelectorAll('[data-enabled]').forEach((btn) =>
     btn.addEventListener('click', async (ev) => {
       ev.stopPropagation()

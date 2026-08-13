@@ -1802,6 +1802,55 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '401': { $ref: '#/components/responses/Unauthorized' }
 
+  /admin/v1/pools/{poolId}:
+    parameters:
+      - name: poolId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      tags: [admin]
+      summary: Delete a group
+      description: >
+        Everything scoped to the group goes with it: its jobs and their work
+        units, which models it was pushing, and every role anybody holds on it.
+        Its machines are freed, because membership lives on the group's own row.
+
+        Refused without `confirm=true`, with a sentence naming what would be
+        lost - none of it comes back, and standing the group down is the
+        reversible way to take its machines back.
+
+        The group's socket is retired rather than freed: a client left pointing
+        at the old URL would otherwise start talking to a different group's
+        machines without anything having changed at its end.
+      parameters:
+        - name: confirm
+          in: query
+          schema: { type: string, enum: ['true'] }
+          description: Required. Without it the request is refused and nothing is deleted.
+      responses:
+        '200':
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  name: { type: string }
+                  frees:
+                    type: array
+                    items: { type: string }
+                    description: Machines that are no longer in any group because of this.
+                  retiredPort: { type: integer, nullable: true }
+        '409':
+          description: Not confirmed, and nothing was deleted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
   /admin/v1/pools/{poolId}/enabled:
     parameters:
       - name: poolId

@@ -148,7 +148,10 @@ struct PipelineChannelSocketTests {
         }
     }
 
-    private func fixture() throws -> Fixture {
+    /// Not private: the bridge tests need a real mutually authenticated pair
+    /// to call the transport over, and a second copy of an openssl fixture is a
+    /// second thing to keep in step with the contexts it builds.
+    func fixture() throws -> Fixture {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("dai-pipe-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -223,6 +226,37 @@ struct PipelineChannelSocketTests {
 
         await earlier.close()
         await later.close()
+        try? await group.shutdownGracefully()
+    }
+
+    @Test("a peer that goes quiet mid-handshake ends the link rather than waiting")
+    func handshakeDeadlineEndsTheLink() async throws {
+        let fx = try fixture()
+        defer { try? FileManager.default.removeItem(at: fx.dir) }
+
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
+        // A socket that accepts and then says nothing, which is what the other
+        // end of a dropped cable looks like: no refusal, no close, no bytes.
+        // The fleet's Thunderbolt bridge did exactly this in the middle of a
+        // split, and both machines sat holding half a model until they timed
+        // out two minutes later on a message that said only that the peer had
+        // not answered.
+        let silent = try await ServerBootstrap(group: group)
+            .childChannelInitializer { ch in ch.eventLoop.makeSucceededVoidFuture() }
+            .bind(host: "127.0.0.1", port: 0).get()
+        let port = try #require(silent.localAddress?.port)
+
+        let dialer = PipelineChannel(group: group, handshakeDeadline: .milliseconds(300))
+        try await dialer.connect(host: "127.0.0.1", port: port,
+                                 tls: fx.clientContext, serverName: "localhost")
+
+        let started = Date()
+        await #expect(throws: (any Error).self) { _ = try await dialer.receive() }
+        // Bounded by the deadline, not by whatever the caller happened to set.
+        #expect(Date().timeIntervalSince(started) < 5)
+
+        await dialer.close()
+        try? await silent.close().get()
         try? await group.shutdownGracefully()
     }
 

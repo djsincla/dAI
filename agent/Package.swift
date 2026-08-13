@@ -39,6 +39,9 @@ let package = Package(
             dependencies: [
                 .product(name: "NIOSSL", package: "swift-nio-ssl"),
                 .product(name: "NIOPosix", package: "swift-nio"),
+                // For the handshake events, which are how a peer link says
+                // whether the two machines agreed to talk at all.
+                .product(name: "NIOTLS", package: "swift-nio"),
                 .product(name: "AsyncHTTPClient", package: "async-http-client"),
             ]
         ),

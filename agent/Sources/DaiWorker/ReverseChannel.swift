@@ -113,7 +113,11 @@ public actor ReverseChannel {
         (controlPlane, splitIdentity)
     }
 
-    private func log(_ message: String) {
+    /// Nonisolated because the peer link logs from an event loop thread, and
+    /// hopping onto this actor to print would put the transport's own reports
+    /// behind whatever the actor is doing - which, when a split is stuck, is
+    /// waiting for the very thing the log line is about.
+    nonisolated private func log(_ message: String) {
         let stamp = ISO8601DateFormatter().string(from: Date()).suffix(9).prefix(8)
         print("[\(stamp)] serve: \(message)")
     }
@@ -255,7 +259,10 @@ public actor ReverseChannel {
         let ca = credentials.peerCAPEM
 
         await publish(mayServe().state, activity: "rank \(split.rank) of a split model")
-        let channel = PipelineChannel()
+        // The link logs through this loop's own logger, so what the two halves
+        // said to each other reads in order beside everything else the node was
+        // doing at the time.
+        let channel = PipelineChannel(log: { [log] in log($0) })
         let started = Date()
         do {
             switch split.role {

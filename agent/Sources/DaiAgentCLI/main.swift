@@ -707,7 +707,7 @@ case "split":
         let ca = try? String(contentsOf: dir.appendingPathComponent("node-ca.crt"),
                              encoding: .utf8)
 
-        let channel = PipelineChannel()
+        let channel = PipelineChannel(log: { print($0) })
         // Nothing to connect when the model is not split. Useful as a baseline:
         // the same code path, the same loop, one machine.
         if size == 1 {

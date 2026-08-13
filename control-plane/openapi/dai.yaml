@@ -1646,6 +1646,89 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
 
         '401': { $ref: '#/components/responses/Unauthorized' }
+  /admin/v1/pools/{poolId}/serving-model:
+    parameters:
+      - name: poolId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      tags: [admin]
+      summary: What this group's machines run
+      description: >
+        Distinct from pushing a model to a group, which says what its machines
+        should hold. A machine holds many models and loads one, so this is the
+        only part two groups sharing a machine may not disagree about.
+
+
+        409 when they would. The reply names the machine, because the coupling
+        is transitive and the group it names may not be one the caller was
+        thinking about.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                modelId:
+                  type: string
+                  nullable: true
+                  description: Null clears it, which is not the same as none.
+      responses:
+        '204': { description: Set }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: A machine's groups would disagree about what it runs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
+                  detail: { type: string }
+                  violations:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        rule:
+                          type: string
+                          enum: [one-group-per-tier, groups-must-agree]
+                        detail: { type: string }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /admin/v1/pools/{poolId}/coupled:
+    parameters:
+      - name: poolId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [admin]
+      summary: Groups forced to agree with this one
+      description: >
+        Agreement spreads through shared machines, so a group can be constrained
+        by one it shares nothing with.
+      responses:
+        '200':
+          description: The coupled groups
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    name: { type: string }
+                    tier: { type: string }
+                    servingModelId: { type: string, nullable: true }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
   /admin/v1/pools/{poolId}/agent:
     parameters:
       - name: poolId
@@ -2589,6 +2672,12 @@ components:
         priority: { type: integer }
         agentChannel: { type: string, enum: [managed, external] }
         desiredAgentVersion: { type: string, nullable: true }
+        servingModelId:
+          type: string
+          nullable: true
+          description: >
+            What this group's machines run, as against what they hold. Null
+            means nobody has said, which is not the same as none.
 
     Model:
       type: object

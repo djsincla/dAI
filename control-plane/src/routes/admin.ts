@@ -5,6 +5,7 @@ import {
 import { resolve as resolveOpenJD, frameOf, type JobTemplate } from '../lib/openjd.js'
 import { repositoryRoot, safePath, verifyModel } from '../lib/repository.js'
 import { COMPLETE_ENOUGH, holdsModel } from '../lib/possession.js'
+import { coupledWith, violations, type Group } from '../lib/groupRules.js'
 import { existsSync } from 'node:fs'
 import { Router } from 'express'
 import { type Db, tx } from '../lib/db.js'
@@ -463,7 +464,7 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
   r.get('/pools', async (_req, res) => {
     const { rows } = await db.query(
       `SELECT id, name, tier, schedule, preempt, priority,
-              agent_channel, desired_agent_version
+              agent_channel, desired_agent_version, serving_model_id
          FROM pools ORDER BY name`,
     )
     res.json(rows.map((p) => ({
@@ -471,6 +472,8 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
       preempt: p.preempt, priority: p.priority,
       agentChannel: p.agent_channel,
       desiredAgentVersion: p.desired_agent_version ?? null,
+      // What this group's machines run, as against what they hold.
+      servingModelId: p.serving_model_id ?? null,
     })))
   })
 
@@ -523,6 +526,81 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker): Router {
    * machines belong. It needs saying rather than doing quietly, which is what
    * `confirm` is for.
    */
+  /**
+   * What this group's machines run.
+   *
+   * Distinct from pushing a model to a group, which says what they should
+   * hold. A machine holds many models and loads one, so this is the only part
+   * that two groups sharing a machine are not allowed to disagree about.
+   *
+   * Refused with the machine named, because the alternative is an operator
+   * discovering the coupling from a behaviour rather than a message - and the
+   * coupling is transitive, so the group they are told about may not be one
+   * they were thinking about.
+   */
+  r.put('/pools/:poolId/serving-model', async (req, res) => {
+    const poolId = req.params.poolId!
+    const modelId = (req.body as { modelId?: string | null })?.modelId ?? null
+
+    const { rows: pools } = await db.query(
+      `SELECT id, name, tier, membership, serving_model_id FROM pools`)
+    const current = pools.find((p) => p.id === poolId)
+    if (!current) { res.status(404).json({ error: 'not_found', detail: 'no such group' }); return }
+
+    if (modelId !== null) {
+      const { rows: known } = await db.query(`SELECT 1 FROM models WHERE id = $1`, [modelId])
+      if (known.length === 0) {
+        res.status(404).json({ error: 'not_found', detail: `no model called ${modelId}` })
+        return
+      }
+    }
+
+    const { rows: nodes } = await db.query(
+      `SELECT id, hostname, tier, chip, memory_gb FROM nodes WHERE state = 'active'`)
+
+    // Checked against the state this would create, not against the change, so
+    // every reason it cannot exist comes back at once.
+    const proposed: Group[] = pools.map((p) => ({
+      id: p.id, name: p.name, tier: p.tier, membership: p.membership,
+      servingModelId: p.id === poolId ? modelId : p.serving_model_id,
+    }))
+    const broken = violations(nodes as never, proposed)
+    if (broken.length > 0) {
+      res.status(409).json({
+        error: 'conflict',
+        detail: broken.map((v) => v.detail).join('; '),
+        violations: broken,
+      })
+      return
+    }
+
+    await db.query(`UPDATE pools SET serving_model_id = $2 WHERE id = $1`, [poolId, modelId])
+    await audit(db, req.user!.id, 'pool.serving-model', current.name, { modelId })
+    res.status(204).end()
+  })
+
+  /**
+   * Which other groups are forced to agree with this one.
+   *
+   * Agreement spreads through shared machines, so a group can be constrained by
+   * one it shares nothing with. Asked for rather than discovered.
+   */
+  r.get('/pools/:poolId/coupled', async (req, res) => {
+    const { rows: pools } = await db.query(
+      `SELECT id, name, tier, membership, serving_model_id FROM pools`)
+    const groups: Group[] = pools.map((p) => ({
+      id: p.id, name: p.name, tier: p.tier, membership: p.membership,
+      servingModelId: p.serving_model_id,
+    }))
+    const mine = groups.find((g) => g.id === req.params.poolId)
+    if (!mine) { res.status(404).json({ error: 'not_found', detail: 'no such group' }); return }
+
+    const { rows: nodes } = await db.query(
+      `SELECT id, hostname, tier, chip, memory_gb FROM nodes WHERE state = 'active'`)
+    res.json(coupledWith(mine, nodes as never, groups)
+      .map((g) => ({ id: g.id, name: g.name, tier: g.tier, servingModelId: g.servingModelId })))
+  })
+
   r.put('/pools/:poolId/nodes/:nodeId', async (req, res) => {
     const { poolId, nodeId } = req.params as { poolId: string; nodeId: string }
     if (!(await requireRole(db, req.user!.id, poolId, 'operator'))) {

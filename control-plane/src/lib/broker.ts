@@ -42,6 +42,17 @@ interface Pending {
   timer: NodeJS.Timeout
 }
 
+/**
+ * How long the other ranks get to speak once one of them has failed.
+ *
+ * Short on purpose. The gang is already dead - a pipeline missing a rank
+ * produces nothing - so this is only about naming every machine in the report
+ * rather than the first one to notice. Waiting properly would mean holding the
+ * caller for the full dispatch timeout on account of a machine that has gone to
+ * sleep, which is ten minutes for a request that was over in ten seconds.
+ */
+const GANG_GRACE_MS = 2_000
+
 export class Broker {
   /** Nodes currently holding a long-poll open, by node id. */
   private waiters = new Map<string, Waiter>()
@@ -194,10 +205,33 @@ export class Broker {
       result: this.dispatch(m.nodeId, kind, modelHash, body(m.rank), signal),
     }))
 
-    const settled = await Promise.all(started.map(async (s) => ({
-      member: s.member,
-      outcome: await s.result,
-    })))
+    // The first rank to fail ends the gang, rather than every rank being waited
+    // out. A pipeline that has lost a rank is not going to produce an answer, so
+    // the remaining ranks are only being waited on out of politeness - and one
+    // of them may be a machine that has gone to sleep, which is ten minutes of
+    // a caller holding a connection for a request that was dead in ten seconds.
+    //
+    // The survivors are still awaited afterwards, so the report names every
+    // rank rather than only the one that spoke first: a gang that broke is
+    // worth seeing in full, and the ranks that did their share should not read
+    // as though they were the problem.
+    const wrapped = started.map(async (s) => ({ member: s.member, outcome: await s.result }))
+    const firstFailure = new Promise<void>((resolve) => {
+      for (const w of wrapped) void w.then((r) => { if (!r.outcome.ok) resolve() })
+    })
+    await Promise.race([Promise.all(wrapped), firstFailure])
+
+    // Whatever has arrived by now, plus a moment for ranks that were about to
+    // speak. Anything still silent is reported as silent rather than waited out:
+    // it is usually the machine that caused the failure in the first place.
+    const settled = await Promise.all(wrapped.map((w, i) => Promise.race([
+      w,
+      new Promise<{ member: typeof members[number]; outcome: { ok: false; error: string } }>(
+        (resolve) => setTimeout(() => resolve({
+          member: started[i]!.member,
+          outcome: { ok: false, error: 'did not report before the gang was released' },
+        }), GANG_GRACE_MS).unref?.()),
+    ])))
 
     const failed = settled.filter((s) => !s.outcome.ok)
     if (failed.length > 0) {

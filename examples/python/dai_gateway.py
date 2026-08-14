@@ -337,16 +337,41 @@ def provenance(gateway: "Gateway", completion: dict) -> str:
     return "\n".join(lines)
 
 
+def is_embedding(model: dict) -> bool:
+    """Whether this entry embeds text rather than generating it.
+
+    Two signals, because the two model endpoints carry different fields.
+    `/api/v0/models` states the type outright and is believed when present.
+    `/v1/models` is OpenAI's shape, which has nowhere to put it, so there the
+    `ane:` prefix is the signal - assigned by the code that publishes a CoreML
+    embedding package rather than chosen by whoever named the weights.
+
+    Neither is a guess at the name. A chat model called "embed-something" would
+    be caught by a substring match and is not caught by either of these.
+    """
+    if model.get("type"):
+        return model["type"] == "embeddings"
+    return model.get("id", "").startswith("ane:")
+
+
 def pick_model(gateway: Gateway, preferred: str | None = None) -> str:
     """Whatever is loaded, preferring what the caller asked for.
 
     These scripts are meant to run on a fleet whose resident models are not
     known in advance, so none of them hardcode a name.
+
+    Embedding models are excluded. They are listed alongside the rest because
+    they are resident, but they generate nothing, and taking the first entry
+    picked `ane:embed` for a chat completion on this fleet. The answer came back
+    anyway - the node serves the chat model it has loaded whatever the request
+    names - so nothing failed and the provenance line quietly reported the wrong
+    model. A wrong answer about which model answered is worse than an error,
+    because nobody goes looking for it.
     """
-    available = [m["id"] for m in gateway.models()]
+    available = [m["id"] for m in gateway.models() if not is_embedding(m)]
     if not available:
         raise GatewayError(0, None,
-            "No model is resident anywhere in the fleet.\n"
+            "No model that generates text is resident anywhere in the fleet.\n"
             "  Push one from the console, or check that a node is approved and idle.")
     if preferred:
         if preferred in available:

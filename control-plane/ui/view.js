@@ -1079,3 +1079,19 @@ export function effectiveModelFor(node, groups) {
   const cluster = mine.find((g) => g.tier === 'cluster')
   return (cluster ?? mine[0])?.servingModelId ?? null
 }
+
+/**
+ * How wide a model is, for a list where every other row is one machine.
+ *
+ * A repository path says nothing about this. `Qwen2.5-14B-Instruct-4bit` looks
+ * like every other model and is not: serving it engages two machines at once,
+ * needs a group set up for it, and takes those machines out of harvesting while
+ * it stands.
+ *
+ * Empty for the ordinary case, so a listing is not decorated with "1 machine"
+ * on every row - the whole point is that the split ones stand out.
+ */
+export function splitNote(machines) {
+  const n = Math.max(1, Math.trunc(Number(machines) || 1))
+  return n > 1 ? `${n} machines` : ''
+}

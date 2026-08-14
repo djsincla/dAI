@@ -39,8 +39,18 @@ async function servableModels(db: Db, broker: Broker, groupId?: string | null) {
           AND (paused_until IS NULL OR paused_until < now())
           AND last_heartbeat > now() - interval '2 minutes'`)
 
+    // How wide each model is, so the catalogue can say so. A model that runs
+    // across machines is a different proposition from one that does not - it
+    // needs a group set up for it and it takes those machines out of harvesting
+    // - and a name alone does not tell anybody that.
+    const { rows: shapes } = await db.query(`SELECT id, machines FROM models`)
+    const machines = new Map((shapes as { id: string; machines: number }[])
+      .map((m) => [m.id, Math.max(1, Number(m.machines ?? 1))]))
+
     const scope = groupId ? await membersOf(db, groupId) : null
-    const models = new Map<string, { context: number; resident: boolean; live: boolean }>()
+    const models = new Map<string, {
+      context: number; resident: boolean; live: boolean; machines: number
+    }>()
     for (const row of rows as any[]) {
       if (scope !== null && !scope.has(row.node_id as string)) continue
       // Recent heartbeat, not currently parked on the channel.
@@ -61,6 +71,7 @@ async function servableModels(db: Db, broker: Broker, groupId?: string | null) {
         // exists and is momentarily unreachable - which is the truth while a
         // node reads a long prompt.
         live: (seen?.live ?? false) || broker.isConnected(row.node_id),
+        machines: machines.get(row.name as string) ?? 1,
       })
     }
     return models
@@ -92,7 +103,33 @@ async function gangFor(
   const shape = shapeOf(rows[0] as never)
   if (shape.machines <= 1) return null
 
-  const gang = selectGang(connected, 'generate', modelId, shape.machines)
+  // A split runs where an operator said it should, and nowhere else.
+  //
+  // Without this the request decides: name a model that happens to need two
+  // machines and any cluster group would be assembled into a pipeline for it.
+  // That is the wrong way round. Running a split is a decision about the fleet -
+  // it takes those machines out of harvesting for as long as it stands, which is
+  // why assigning one already has to be confirmed - and a caller should be able
+  // to use what an operator has set up, not to set it up by asking.
+  //
+  // The declaration is the group's serving model. There is no separate switch
+  // to keep in step with it, and no way to declare a split for a model that is
+  // not one.
+  const { rows: serving } = await db.query(
+    `SELECT id, name FROM pools
+      WHERE tier = 'cluster' AND enabled AND serving_model_id = $1`, [modelId])
+  if (serving.length === 0) {
+    return { refusal: {
+      refused: 'not-offered',
+      detail: `${modelId} runs across ${shape.machines} machines, and no cluster group `
+        + 'is serving it. A split runs where an operator has assigned it, because it '
+        + 'takes those machines out of harvesting for as long as it stands.',
+    } }
+  }
+  const offered = new Set(serving.map((p) => p.id as string))
+  const eligible = connected.filter((c) => c.group_id != null && offered.has(c.group_id))
+
+  const gang = selectGang(eligible, 'generate', modelId, shape.machines)
   if (isRefusal(gang)) return { refusal: gang }
 
   // Where each machine can be reached for pipeline traffic. Declared by the
@@ -227,6 +264,11 @@ export function servingRoutes(db: Db, broker: Broker): Router {
         context_length: m.context || null,
         max_context_length: m.context || null,
         context_window: m.context || null,
+        // What this model is, in the shape this surface reserves for things
+        // OpenAI never had. A client that ignores it is unaffected; one that
+        // reads it learns that asking for this model engages more than one
+        // machine, which is not something the name says.
+        dai: shapeNote(m.machines),
       })),
     })
   })
@@ -376,7 +418,8 @@ export function servingRoutes(db: Db, broker: Broker): Router {
     if (isRefusal(choice)) {
       res.status(503).json({
         type: 'error',
-        error: { type: 'overloaded_error', message: choice.detail },
+        error: { type: 'overloaded_error', message: choice.detail,
+                 dai: { code: choice.refused } },
       })
       return
     }
@@ -456,7 +499,14 @@ export function servingRoutes(db: Db, broker: Broker): Router {
     if (gang && 'refusal' in gang) {
       res.status(503).json({
         type: 'error',
-        error: { type: 'overloaded_error', message: gang.refusal.detail },
+        // The refusal's own name, alongside the sentence. Anthropic's error
+        // shape has no code, so a caller wanting to tell "nobody assigned this"
+        // from "the machines cannot reach each other" would otherwise have to
+        // match on prose that is written to be read and rewritten to be
+        // clearer. An unknown field is ignored by any client that does not want
+        // it, which is the same bargain the model catalogue's `dai` block makes.
+        error: { type: 'overloaded_error', message: gang.refusal.detail,
+                 dai: { code: gang.refusal.refused } },
       })
       return
     }
@@ -484,6 +534,7 @@ export function servingRoutes(db: Db, broker: Broker): Router {
               + 'all mid-request. A large prompt occupies a node for the whole '
               + 'time it takes to read it.'
             : choice.detail,
+          dai: { code: busy ? 'all-in-use' : choice.refused },
         },
       })
       return
@@ -834,6 +885,10 @@ export function compatRoutes(db: Db, broker: Broker): Router {
         // fleet disagreeing, and it is exactly what makes a listing-based
         // health check untrustworthy.
         state: !m.live ? 'busy' : m.resident ? 'loaded' : 'not-loaded',
+        // Same note as the OpenAI surface. A tool written against LM Studio
+        // will ignore it; a person reading the JSON will not, and this is the
+        // one thing about a split model that its name never says.
+        dai: shapeNote(m.machines),
       })),
     })
   })
@@ -851,4 +906,27 @@ export function compatRoutes(db: Db, broker: Broker): Router {
    * are often the larger half of it.
    */
   return r
+}
+
+/**
+ * How wide a model is, said in the catalogue rather than left to the name.
+ *
+ * `mlx-community/Qwen2.5-14B-Instruct-4bit` looks like every other model and is
+ * not: serving it engages two machines at once, needs a cluster group set up for
+ * it, and takes those machines out of harvesting while it stands. None of that
+ * is visible in a repository path, and a caller choosing between models on a
+ * list has no way to tell them apart.
+ *
+ * Both a number and a sentence. The number is for anything deciding; the
+ * sentence is for the console and for a person reading a response by hand.
+ */
+export function shapeNote(machines: number): {
+  machines: number; split: boolean; shape: string
+} {
+  const n = Math.max(1, Math.trunc(machines || 1))
+  return {
+    machines: n,
+    split: n > 1,
+    shape: n > 1 ? `runs across ${n} machines` : 'runs on one machine',
+  }
 }

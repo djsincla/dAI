@@ -15,7 +15,7 @@
 import {
   attentionItems, capacityOf, copyState, distributionOf, humanBytes, importCost,
   bucketFor, certificateStanding, clampWindow, describeTier, describeWindow,
-  effectiveModelFor, suspensionNote,
+  effectiveModelFor, splitNote, suspensionNote,
   groupMachines, groupMismatches,
   inBothTiers, tierMachines, tiersAfter,
   groupMode, groupWarning, importProgress, isSynthetic, kindsFor,
@@ -595,7 +595,8 @@ function renderModels(models, pools) {
     return `<tr data-model="${escape(m.id)}">
       <td class="mono">${escape(m.id)}</td>
       <td>${escape(m.runtime)} &middot; ${escape(m.kind)}</td>
-      <td class="num">${humanBytes(m.sizeBytes)}</td>
+      <td class="num">${humanBytes(m.sizeBytes)}${
+        splitNote(m.machines) ? `<div class="split-badge">${escape(splitNote(m.machines))}</div>` : ''}</td>
       <td class="num">${m.contextLength ? m.contextLength.toLocaleString() : '—'}</td>
       <td>${assigned.length ? assigned.map(escape).join(', ') : '<span class="dim">nowhere</span>'}</td>
       <td><span class="pill ${d.state}">${escape(d.label)}</span></td>
@@ -1009,8 +1010,17 @@ function renderGroups(nodes, pools, models) {
                 ? 'Bring this group back: it starts deciding what its machines serve again'
                 : 'Stand this group down: it keeps its machines, model and socket, and asserts none of them'}"
               >${off ? 'bring it back' : 'stand it down'}</button>`
+    // What this group serves, on the line somebody reads to know what a group
+    // is. A split model is a different proposition from a whole one and the
+    // name does not say so.
+    const model = models.find((m) => m.id === g.pool.servingModelId)
+    const wide = model ? splitNote(model.machines) : ''
+    const serves = g.pool.servingModelId
+      ? `, serving ${g.pool.servingModelId.split('/').pop()}${wide ? ` across ${wide}` : ''}`
+      : ''
     const state = off ? 'stood down, ' : ''
-    return card(g.pool.name, `${state}${g.pool.tier} tier, ${mode}${at}`, g.nodes, g.pool.id,
+    return card(g.pool.name, `${state}${g.pool.tier} tier, ${mode}${at}${serves}`,
+                g.nodes, g.pool.id,
                 warning, socket + stand + remove, off)
   }).join('') + (ungrouped.length > 0
     ? card('In no group', 'not scheduled by any pool, and holding no assigned models',

@@ -170,6 +170,55 @@ describe('serving over HTTP', () => {
     node.stop()
   })
 
+  it('says in the catalogue how many machines a model needs', async () => {
+    // The one thing a model's name never says. A caller choosing from this list
+    // has no other way to tell that asking for one of them engages two machines.
+    await db.query(
+      `INSERT INTO models (id, runtime, kind, size_bytes, machines)
+       VALUES ('org/wide','mlx','generate',1000,2) ON CONFLICT DO NOTHING`)
+    await db.query(
+      `UPDATE nodes SET resident_models = '{"org/wide": 4, "org/narrow": 2}'::jsonb,
+                        last_heartbeat = now() WHERE id = $1`, [fx.nodeId])
+
+    const listed = await (await fetch(`${base}/v1/models`,
+                                      { headers: asUser(fx.operatorToken) })).json() as any
+    const wide = listed.data.find((m: any) => m.id === 'org/wide')
+    const narrow = listed.data.find((m: any) => m.id === 'org/narrow')
+
+    expect(wide.dai).toEqual({ machines: 2, split: true, shape: 'runs across 2 machines' })
+    // And a model nobody has declared a shape for is one machine, not unknown.
+    expect(narrow.dai).toEqual({ machines: 1, split: false, shape: 'runs on one machine' })
+  })
+
+  it('refuses a split model no operator has assigned, rather than assembling one', async () => {
+    // The decision to run a split belongs to the operator. It takes those
+    // machines out of harvesting for as long as it stands, which is why
+    // assigning one already has to be confirmed - so a caller naming a model
+    // that happens to need two machines must not be able to set that up by
+    // asking for it.
+    await db.query(
+      `INSERT INTO models (id, runtime, kind, size_bytes, machines)
+       VALUES ('org/wide','mlx','generate',1000,2) ON CONFLICT DO NOTHING`)
+    await db.query(
+      `UPDATE nodes SET tiers = ARRAY['harvest','cluster']::text[] WHERE id = $1`, [fx.nodeId])
+    const node = attachNode(() => ({ text: 'x', promptTokens: 1, completionTokens: 1 }))
+    await new Promise((r) => setTimeout(r, 150))
+
+    const r = await fetch(`${base}/v1/chat/completions`, {
+      method: 'POST', headers: asUser(fx.operatorToken),
+      body: JSON.stringify({ model: 'org/wide',
+                             messages: [{ role: 'user', content: 'hello' }], max_tokens: 8 }),
+    })
+    const body = await r.json() as any
+    node.stop()
+
+    expect(r.status).toBe(503)
+    expect(body.error.code).toBe('not-offered')
+    // The reason names the decision that is missing, not a machine that is.
+    expect(body.error.message).toContain('no cluster group is serving it')
+    expect(body.error.message).toContain('out of harvesting')
+  })
+
   it('says which machine answered on the Anthropic surface too', async () => {
     // The provenance block was on /v1/chat/completions and not here, so a
     // caller using the Anthropic shape could not tell which machine had served

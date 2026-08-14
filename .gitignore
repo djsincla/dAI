@@ -84,3 +84,6 @@ control-plane/blobs/
 # Source maps for the minified package build. They undo the minification,
 # so they never ship - see control-plane/scripts/minify-dist.sh.
 control-plane/.maps/
+
+# The status app's build products.
+control-plane/app/.build/

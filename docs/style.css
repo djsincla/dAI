@@ -1,0 +1,200 @@
+  /* The console's own palette, so the guide and the thing it documents read as
+     one system. Teal is the only accent; amber marks a gap rather than an
+     error, because nothing here is broken. */
+  :root {
+    --teal-200: #8fd9cd;
+    --teal-500: #0f8c7e;
+    --teal-700: #0a5a53;
+
+    --ground: #f4f7f7;
+    --panel: #ffffff;
+    --panel-2: #fbfdfd;
+    --shell: #10201f;
+    --shell-ink: #d6e7e4;
+    --rule: #dde5e5;
+    --rule-strong: #c6d3d3;
+    --ink: #17232a;
+    --ink-soft: #4c5d66;
+    --muted: #5b6b73;
+
+    --accent: var(--teal-500);
+    --accent-soft: #e6f7f4;
+    --gap: #8a4b06;
+    --gap-soft: #fdf1e3;
+
+    --measure: 66ch;
+    --font-display: "SF Pro Display", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    --font-body: "SF Pro Text", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0b1416; --panel: #101d20; --panel-2: #14252a;
+      --shell: #071012; --shell-ink: #cfe4e1;
+      --rule: #1e343a; --rule-strong: #2a464e;
+      --ink: #e4efee; --ink-soft: #b7cbc9; --muted: #8aa3a5;
+      --accent: var(--teal-200); --accent-soft: #0c2a2a;
+      --gap: #f0b968; --gap-soft: #3a2810;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #0b1416; --panel: #101d20; --panel-2: #14252a;
+    --shell: #071012; --shell-ink: #cfe4e1;
+    --rule: #1e343a; --rule-strong: #2a464e;
+    --ink: #e4efee; --ink-soft: #b7cbc9; --muted: #8aa3a5;
+    --accent: var(--teal-200); --accent-soft: #0c2a2a;
+    --gap: #f0b968; --gap-soft: #3a2810;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0; background: var(--ground); color: var(--ink);
+    font: 16.5px/1.6 var(--font-body); -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 1000px; margin: 0 auto; padding: 54px 26px 96px; display: grid; gap: 40px; }
+
+  .kicker {
+    font-family: var(--font-mono); font-size: 11.5px; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--accent);
+  }
+  h1 {
+    font-family: var(--font-display); font-size: clamp(29px, 4.2vw, 40px);
+    line-height: 1.1; letter-spacing: -.025em; font-weight: 640; margin: 0;
+    text-wrap: balance; max-width: 20ch;
+  }
+  .standfirst {
+    font-size: 18.5px; line-height: 1.5; color: var(--ink-soft);
+    max-width: var(--measure); margin: 0; text-wrap: pretty;
+  }
+  .masthead { display: grid; gap: 16px; }
+
+  section { display: grid; gap: 18px; }
+  .sec-head { display: grid; gap: 7px; border-top: 1px solid var(--rule-strong); padding-top: 22px; }
+  h2 {
+    font-family: var(--font-mono); font-size: 11.5px; letter-spacing: .13em;
+    text-transform: uppercase; color: var(--muted); font-weight: 600; margin: 0;
+  }
+  h3 {
+    font-family: var(--font-display); font-size: 24px; line-height: 1.2;
+    letter-spacing: -.015em; font-weight: 620; margin: 0; text-wrap: balance; max-width: 28ch;
+  }
+  p { margin: 0; max-width: var(--measure); text-wrap: pretty; }
+
+  code {
+    font-family: var(--font-mono); font-size: .87em; background: var(--panel-2);
+    border: 1px solid var(--rule); border-radius: 3px; padding: 1px 5px;
+    word-break: break-word;
+  }
+
+  /* ---------------------------------------------------------------- steps
+     Numbered because installation genuinely is a sequence: doing step four
+     before step three fails, and the number is the reader's place in it. */
+  .steps { display: grid; gap: 26px; counter-reset: step; }
+  .step {
+    display: grid; grid-template-columns: 34px 1fr; gap: 18px;
+    counter-increment: step;
+  }
+  .step::before {
+    content: counter(step);
+    font-family: var(--font-mono); font-size: 12px; font-weight: 600;
+    color: var(--accent); background: var(--accent-soft);
+    border-radius: 50%; width: 28px; height: 28px;
+    display: grid; place-items: center; margin-top: 2px;
+  }
+  .step-body { display: grid; gap: 12px; min-width: 0; }
+  .step-body h4 {
+    margin: 0; font-family: var(--font-display); font-size: 18px;
+    font-weight: 620; letter-spacing: -.01em; text-wrap: balance;
+  }
+
+  /* ------------------------------------------------------------ terminal */
+  .cmd {
+    background: var(--shell); color: var(--shell-ink);
+    border-radius: 5px; padding: 15px 17px; overflow-x: auto;
+    font-family: var(--font-mono); font-size: 13px; line-height: 1.65;
+    white-space: pre; tab-size: 2;
+  }
+  .cmd .c { color: #7f9c98; }        /* comment */
+  .cmd .p { color: var(--teal-200); } /* prompt marker */
+  .cmd .v { color: #e8c07d; }        /* value the reader must change */
+
+  /* ------------------------------------------------------------ callouts */
+  .note {
+    border-left: 3px solid var(--accent); background: var(--panel);
+    border-radius: 0 4px 4px 0; padding: 15px 18px;
+    display: grid; gap: 6px; max-width: var(--measure);
+  }
+  .note.gap { border-left-color: var(--gap); background: var(--gap-soft); }
+  .note b {
+    font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .09em;
+    text-transform: uppercase; color: var(--accent); font-weight: 600;
+  }
+  .note.gap b { color: var(--gap); }
+  .note p { font-size: 14.5px; color: var(--ink-soft); max-width: none; }
+  .note.gap p { color: var(--ink); }
+
+  /* -------------------------------------------------------------- tables */
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 14.5px; }
+  th {
+    text-align: left; font-family: var(--font-mono); font-size: 10.5px;
+    letter-spacing: .08em; text-transform: uppercase; color: var(--muted);
+    font-weight: 600; padding: 0 16px 9px 0;
+    border-bottom: 1px solid var(--rule-strong); white-space: nowrap;
+  }
+  td { padding: 11px 16px 11px 0; border-bottom: 1px solid var(--rule); vertical-align: baseline; }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.mono, .mono { font-family: var(--font-mono); font-size: 13px; }
+
+  .toc {
+    background: var(--panel); border: 1px solid var(--rule); border-radius: 4px;
+    padding: 18px 22px; display: grid; gap: 7px; max-width: var(--measure);
+  }
+  .toc a {
+    color: var(--ink-soft); text-decoration: none; font-size: 15px;
+    display: flex; gap: 12px; align-items: baseline;
+  }
+  .toc a:hover { color: var(--accent); }
+  .toc .n { font-family: var(--font-mono); font-size: 11px; color: var(--muted); min-width: 4.2em; }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+
+  ul { margin: 0; padding-left: 1.15em; max-width: var(--measure); display: grid; gap: 7px; }
+  li { padding-left: .2em; }
+
+  footer {
+    border-top: 1px solid var(--rule-strong); padding-top: 18px;
+    font-size: 13.5px; color: var(--muted); max-width: var(--measure);
+  }
+
+  @media (max-width: 620px) {
+    .wrap { padding: 34px 18px 64px; gap: 32px; }
+    .step { grid-template-columns: 26px 1fr; gap: 13px; }
+    .step::before { width: 24px; height: 24px; font-size: 11px; }
+  }
+
+/* ------------------------------------------------------------------ added
+   for the engineering and operations set, which needs two things the
+   installation guide did not: a decision entry that carries its evidence,
+   and a definition list for things that have a name and a meaning. */
+.entry {
+  border: 1px solid var(--rule); border-radius: 4px; background: var(--panel);
+  padding: 20px 22px; display: grid; gap: 12px; max-width: var(--measure);
+}
+.entry h4 {
+  margin: 0; font-family: var(--font-display); font-size: 18px;
+  font-weight: 620; letter-spacing: -.01em; text-wrap: balance;
+}
+.entry .because {
+  font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .09em;
+  text-transform: uppercase; color: var(--muted); font-weight: 600;
+}
+.entry .evidence {
+  border-left: 2px solid var(--rule-strong); padding-left: 14px;
+  font-size: 14.5px; color: var(--ink-soft);
+}
+dl { margin: 0; display: grid; gap: 14px; max-width: var(--measure); }
+dt { font-family: var(--font-mono); font-size: 13px; color: var(--accent); }
+dd { margin: 4px 0 0; color: var(--ink-soft); font-size: 15px; }

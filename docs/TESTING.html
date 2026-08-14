@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dAI testing</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+<header class="masthead">
+  <div class="kicker">Engineering &middot; testing</div>
+  <h1>What is proven, how, and what a test cannot reach</h1>
+  <p class="standfirst">
+    879 tests across two suites, a third that runs only under xcodebuild, and a
+    set of claims that only real hardware can settle. This says which is which,
+    because a suite that looks comprehensive and skips the hard parts is worse
+    than one that admits its edges.
+  </p>
+</header>
+
+<div class="toc">
+  <a href="#running"><span class="n">1</span> Running them</a>
+  <a href="#shape"><span class="n">2</span> What is tested where</a>
+  <a href="#gated"><span class="n">3</span> The tests that need Metal</a>
+  <a href="#hardware"><span class="n">4</span> What only hardware proves</a>
+  <a href="#style"><span class="n">5</span> How tests are written here</a>
+  <a href="#traps"><span class="n">6</span> Traps that cost an afternoon</a>
+</div>
+
+<section id="running">
+  <div class="sec-head"><h2>1</h2><h3>Running them</h3></div>
+  <div class="cmd"><span class="c"># control plane - 628 tests, ~3 min. Needs Postgres on 5433.</span>
+<span class="p">$</span> cd control-plane &amp;&amp; npm test
+<span class="p">$</span> npx tsc --noEmit          <span class="c"># the suite does not typecheck; this does</span>
+
+<span class="c"># agent - 251 tests, ~50s</span>
+<span class="p">$</span> cd agent &amp;&amp; swift test
+
+<span class="c"># the 15 that swift test skips, because SwiftPM cannot build MLX's shaders</span>
+<span class="p">$</span> xcodebuild test -scheme dai-agent -destination 'platform=OS X' \
+    -derivedDataPath .xcbuild-test \
+    -only-testing:DaiAgentTests/PipelineBridgeTests \
+    -only-testing:DaiAgentTests/PipelineFaultTests \
+    -only-testing:DaiAgentTests/SyncBridgeTests \
+    -only-testing:DaiAgentTests/ServingModelTests \
+    -only-testing:DaiAgentTests/SplitUsageTests</div>
+  <div class="note gap">
+    <b>Do not run two suites at once</b>
+    <p>
+      Both vitest runs share one test database. A second one produces
+      <code>Hook timed out in 30000ms</code>, which looks exactly like a real
+      failure and is not.
+    </p>
+  </div>
+  <p>
+    <code>scripts/release.sh</code> runs both suites first and refuses to build
+    if either fails. That is the whole reason it exists rather than being a line
+    in a README: the two packages are built by separate scripts, and a release
+    where one of them came from a tree that did not pass is a release nobody can
+    reason about.
+  </p>
+</section>
+
+<section id="shape">
+  <div class="sec-head"><h2>2</h2><h3>What is tested where</h3></div>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Layer</th><th>Where</th><th>What it holds in place</th></tr></thead>
+    <tbody>
+      <tr><td>Rules</td><td class="mono">control-plane/src/lib/*.test</td>
+        <td>membership, group agreement and override, suspension, model shape,
+            port allocation, gang admission, possession</td></tr>
+      <tr><td>HTTP</td><td class="mono">test/api, serving, enabled, groupSockets</td>
+        <td>every route through the real Express stack and the OpenAPI validator,
+            including refusals and their codes</td></tr>
+      <tr><td>Console</td><td class="mono">test/ui.test.ts</td>
+        <td>the judgements the fleet view makes on a reader's behalf - what a
+            machine is offered, whether a pause may be lifted, whether a
+            certificate can still be renewed</td></tr>
+      <tr><td>Backup</td><td class="mono">test/backup.test.ts</td>
+        <td>a real round trip: fill a scratch database, back it up, drop
+            everything, restore, check against the manifest</td></tr>
+      <tr><td>Agent loops</td><td class="mono">agent/Tests/DaiAgentTests</td>
+        <td>presence, leasing, renewal and its handover, model sync and its
+            faults, upgrade and rollback, the split's framing and layer division</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>
+    The console's judgements live in <code>ui/view.js</code> rather than in the
+    rendering, precisely so they can be tested. Before that they were reachable
+    only by loading a page against a live control plane, so nothing checked them -
+    and they are exactly the claims somebody trusts without checking. A fleet view
+    that is confidently wrong is worse than no fleet view.
+  </p>
+</section>
+
+<section id="gated">
+  <div class="sec-head"><h2>3</h2><h3>The tests that need Metal</h3></div>
+  <p>
+    SwiftPM cannot compile MLX's Metal shaders, so under <code>swift test</code>
+    anything that creates an <code>MLXArray</code> aborts in C++ rather than
+    throwing. Those tests are gated on the shader bundle being present and run
+    under xcodebuild, which produces it.
+  </p>
+  <p>
+    The gate searches every loaded bundle rather than looking next to
+    <code>argv[0]</code>: under xctest that is the runner, not the build
+    products directory, so the obvious check skipped these tests
+    <i>everywhere</i> - five tests that looked like coverage and had never
+    executed once.
+  </p>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Suite</th><th>What it would have caught</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">PipelineBridgeTests</td><td>a tensor arriving with the
+        wrong shape or element type, which feeds the second half of a model and
+        produces a confident answer from the wrong numbers</td></tr>
+      <tr><td class="mono">PipelineFaultTests</td><td>a broken link killing the
+        daemon; these run the shipped forward pass with a transport that refuses,
+        and before the fix they took the test process down with them</td></tr>
+      <tr><td class="mono">SyncBridgeTests</td><td>the transport called
+        synchronously from inside an actor - the shape the model actually uses,
+        and the one nothing else exercised</td></tr>
+      <tr><td class="mono">ServingModelTests</td><td>a machine failing to take up
+        its group's model, or churning between models on every beat</td></tr>
+      <tr><td class="mono">SplitUsageTests</td><td>a split under-reporting its
+        cost, or two ranks both reporting the prompt</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section id="hardware">
+  <div class="sec-head"><h2>4</h2><h3>What only hardware proves</h3></div>
+  <p>
+    Some claims cannot be held in place by a test at all, and pretending
+    otherwise is how they rot. These are verified by running them on the fleet and
+    reading the logs.
+  </p>
+  <ul>
+    <li><b>The Enclave key as a TLS server.</b> The key cannot be created in a
+      test process, so the socket tests use a file-based key pair. Whether a node
+      can act as a TLS <i>server</i> with an Enclave key was only ever going to be
+      answered on a machine.</li>
+    <li><b>A split answering.</b> 48 layers divided 24/24, handshake in about a
+      second, 205 tokens in 15.4s across two Macs.</li>
+    <li><b>Self-update convergence.</b> Both machines taking a new build by
+      fingerprint, including the case where the version string in the plist stays
+      stale and only the hash tells the truth.</li>
+    <li><b>Certificate renewal.</b> That the daemon can renew itself, that the
+      node CA arrives with it, and that every loop starts presenting the new
+      certificate.</li>
+    <li><b>Presence and sleep.</b> What a Mac does when its owner walks away,
+      which is not something a unit test has an opinion about.</li>
+  </ul>
+  <div class="note">
+    <b>The rule</b>
+    <p>
+      When a hardware run finds something, the fix gets a test at whatever level
+      can hold it - and where the failure was invisible, the test is usually an
+      accessor added for the purpose. Both certificate handovers and the split's
+      usage reporting are tested that way: not because the code is complicated,
+      but because the failure was silent for hours.
+    </p>
+  </div>
+</section>
+
+<section id="style">
+  <div class="sec-head"><h2>5</h2><h3>How tests are written here</h3></div>
+  <ul>
+    <li><b>The name is the claim.</b> "a request renews a certificate the clock
+      would refuse", not "testRenew". A failing test should read as a sentence
+      about the system.</li>
+    <li><b>The comment says what it cost to learn.</b> Most tests here exist
+      because something broke; the test carries the story so the next person does
+      not delete it as redundant.</li>
+    <li><b>Exhaustive where the space is small.</b> Layer division is checked for
+      every count from 1 to 100 across 1 to 8 machines, because the failure mode -
+      one layer owned by nobody - does not fail, it answers fluently from the
+      wrong network.</li>
+    <li><b>Fakes implement the surface the loops actually use</b>, not a tidier
+      one. A mock of an imagined interface tests the imagination.</li>
+    <li><b>Tests bind real sockets where the thing under test is a socket</b>, in
+      their own port range so a control plane running on the same machine is not
+      in the way.</li>
+  </ul>
+</section>
+
+<section id="traps">
+  <div class="sec-head"><h2>6</h2><h3>Traps that cost an afternoon</h3></div>
+
+  <div class="entry">
+    <h4>A protocol extension can satisfy the requirement it was meant to call</h4>
+    <p class="evidence">
+      When a conforming type's signature drifts, an extension with the same base
+      name becomes the witness and recurses forever. Two fakes compiled happily
+      while returning the wrong type. If a fake stops matching the protocol,
+      check that the compiler is not quietly resolving to the extension.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>A Task created inside an actor inherits its isolation</h4>
+    <p class="evidence">
+      It then queues behind the very call it was meant to interrupt. The cancel
+      watcher and the channel close are both <code>Task.detached</code> for this
+      reason, and it is worth suspecting first whenever something never runs.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>Foundation's waitUntilExit spins a run loop on the calling thread</h4>
+    <p class="evidence">
+      Unusable from an actor across a suspension point. It hung <code>swift
+      test</code> about one run in five, for an hour and fifty-four minutes on one
+      occasion, and a stack sample found it in a minute.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>A test that takes two minutes is telling you something</h4>
+    <p class="evidence">
+      "Closing a link gives the port back" took 120 seconds because closing a
+      listener waited out its accept timeout twice. The test was right; the
+      duration was the finding.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>An empty schema-change list is not the same as no schema changes</h4>
+    <p class="evidence">
+      The release notes claimed "this is the first release" over twelve
+      migrations, because the repository had no tags. A tool that cannot compute
+      an answer should say so rather than print an empty one.
+    </p>
+  </div>
+</section>
+
+<footer>
+  Current counts: 628 control plane, 251 agent, 15 under xcodebuild.
+  See <a href="DECISIONS.html">decisions</a> for why the system is shaped this
+  way and <a href="OPERATIONS.html">operations</a> for running it.
+</footer>
+
+</div>
+</body>
+</html>

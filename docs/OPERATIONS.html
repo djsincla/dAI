@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dAI operations</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+<header class="masthead">
+  <div class="kicker">Operations &middot; running a fleet</div>
+  <h1>Every gesture, what it costs, and how to undo it</h1>
+  <p class="standfirst">
+    Day-two operations: the things you do after the fleet exists. Each one says
+    what it changes, what it takes away from somebody, and whether it can be
+    reversed. Installation is a separate document.
+  </p>
+</header>
+
+<div class="toc">
+  <a href="#daily"><span class="n">1</span> Looking at the fleet</a>
+  <a href="#machines"><span class="n">2</span> Machines</a>
+  <a href="#groups"><span class="n">3</span> Groups</a>
+  <a href="#models"><span class="n">4</span> Models</a>
+  <a href="#split"><span class="n">5</span> Running a split</a>
+  <a href="#agents"><span class="n">6</span> Agent versions</a>
+  <a href="#certs"><span class="n">7</span> Certificates</a>
+  <a href="#backup"><span class="n">8</span> Backup and restore</a>
+</div>
+
+<section id="daily">
+  <div class="sec-head"><h2>1</h2><h3>Looking at the fleet</h3></div>
+  <p>
+    The console is the fleet view; everything below has an equivalent there. The
+    API is shown because it is what a script uses and what an error message can
+    be pasted into.
+  </p>
+  <div class="cmd"><span class="c"># sign in once; every call below uses $TOK</span>
+<span class="p">$</span> TOK=$(curl -sk https://<span class="v">host</span>:8452/admin/v1/auth/login \
+    -H 'content-type: application/json' \
+    -d '{"username":"admin","password":"<span class="v">...</span>"}' | jq -r .token)
+
+<span class="p">$</span> curl -sk https://<span class="v">host</span>:8452/admin/v1/nodes   -H "authorization: Bearer $TOK" | jq
+<span class="p">$</span> curl -sk https://<span class="v">host</span>:8452/admin/v1/pools   -H "authorization: Bearer $TOK" | jq
+<span class="p">$</span> curl -sk https://<span class="v">host</span>:8452/monitor/v1/health   <span class="c"># from a permitted range</span></div>
+  <p>
+    <code>/monitor/v1/health</code> answers 503 when a group has a socket that
+    nothing is listening on, naming the group and the port. That is the failure
+    it exists for: the group is there, its models are assigned, its machines are
+    holding them, and nothing answers.
+  </p>
+</section>
+
+<section id="machines">
+  <div class="sec-head"><h2>2</h2><h3>Machines</h3></div>
+
+  <div class="entry">
+    <h4>Approve a machine</h4>
+    <p>
+      A newly enrolled machine is <code>pending</code> and runs nothing until
+      approved. Nothing happens on it before that, which is the point.
+    </p>
+    <div class="cmd"><span class="p">$</span> curl -sk -X POST https://<span class="v">host</span>:8452/admin/v1/nodes/<span class="v">id</span>/approve \
+    -H "authorization: Bearer $TOK" -d '{}'</div>
+  </div>
+
+  <div class="entry">
+    <h4>Pause a machine, and who can</h4>
+    <p>
+      An operator's pause is administrative and liftable. <b>The machine owner's
+      pause is not</b> - there is no admin control for it, and the console shows a
+      disabled label rather than a button that would have to lie.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>Change which tiers a machine offers</h4>
+    <p>
+      The Tiers view in the console. Dragging there changes what the box is
+      willing to be, which is different from which group claims it.
+    </p>
+    <div class="note gap">
+      <b>Worth knowing</b>
+      <p>
+        A machine that offers both tiers reads as cluster everywhere, including
+        for the presence exemption when serving - so an interactive request can
+        land on it while somebody is using it. If that matters for a particular
+        workstation, give it only the harvest tier.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section id="groups">
+  <div class="sec-head"><h2>3</h2><h3>Groups</h3></div>
+
+  <div class="entry">
+    <h4>Create one</h4>
+    <p>
+      It is allocated a socket immediately, bound before the response is sent,
+      and the port is in the response and on the group's card. Point applications
+      at that port; nothing else selects a group.
+    </p>
+    <div class="cmd"><span class="p">$</span> curl -sk -X POST https://<span class="v">host</span>:8452/admin/v1/pools \
+    -H "authorization: Bearer $TOK" -H 'content-type: application/json' \
+    -d '{"name":"<span class="v">split-cluster</span>","tier":"cluster"}'
+{"id":"...","name":"split-cluster","tier":"cluster","servingPort":8461}</div>
+    <p>
+      Creating a cluster group sets <code>schedule = gang</code> and
+      <code>preempt = never</code> automatically. A cluster group admits only
+      cluster-tier machines; a harvest group admits anyone, because a dedicated
+      box is strictly more reliable than a harvested one.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>Give an older group a socket</h4>
+    <p>
+      Groups made before sockets existed do not get one during an upgrade -
+      binding listeners nobody asked for, on a machine nobody is watching, is how
+      a control plane comes back holding ports somebody else wanted. Ask once:
+    </p>
+    <div class="cmd"><span class="p">$</span> curl -sk -X PUT https://<span class="v">host</span>:8452/admin/v1/pools/<span class="v">id</span>/socket \
+    -H "authorization: Bearer $TOK"
+{"servingPort":8460,"allocated":true}</div>
+  </div>
+
+  <div class="entry">
+    <h4>Stand a group down, and bring it back</h4>
+    <p class="because">Reversible</p>
+    <p>
+      A disabled group keeps its machines, model, socket and roles and asserts
+      none of them: it decides nothing about what its machines serve, suspends
+      nobody, hands out no work, forms no gangs, and refuses on its own socket
+      with <code>group-disabled</code>. The response says which machines are
+      affected and what each will serve now.
+    </p>
+    <div class="cmd"><span class="p">$</span> curl -sk -X PUT https://<span class="v">host</span>:8452/admin/v1/pools/<span class="v">id</span>/enabled \
+    -H "authorization: Bearer $TOK" -H 'content-type: application/json' \
+    -d '{"enabled":false}'</div>
+    <p>
+      This is how you hand a cluster group's machines back to their harvest group
+      for an evening without dismantling anything.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>Delete a group</h4>
+    <p class="because">Not reversible</p>
+    <p>
+      Its jobs and their work, its model assignments and every role on it go with
+      it. Its machines are freed - membership lives on the group's own row, so
+      there is nothing to tidy on them. Its socket is retired rather than reused,
+      so a client left pointing at the old URL cannot quietly reach a different
+      group.
+    </p>
+    <div class="cmd"><span class="p">$</span> curl -sk -X DELETE "https://<span class="v">host</span>:8452/admin/v1/pools/<span class="v">id</span>?confirm=true" \
+    -H "authorization: Bearer $TOK"</div>
+    <p>
+      Without <code>confirm=true</code> it refuses and tells you exactly what
+      would be lost. Read that before repeating the call.
+    </p>
+  </div>
+</section>
+
+<section id="models">
+  <div class="sec-head"><h2>4</h2><h3>Models</h3></div>
+
+  <div class="entry">
+    <h4>Push weights to a group</h4>
+    <p>
+      Declares that every machine in the group should <i>hold</i> these weights.
+      Holding is not loading: a machine holds many models and serves one.
+    </p>
+    <div class="cmd"><span class="p">$</span> curl -sk -X PUT https://<span class="v">host</span>:8452/admin/v1/pools/<span class="v">pool</span>/models/<span class="v">model</span> \
+    -H "authorization: Bearer $TOK" -d '{}'</div>
+  </div>
+
+  <div class="entry">
+    <h4>Say what a group serves</h4>
+    <p>
+      This is the one that reaches the machines. Each node learns it on its next
+      heartbeat and swaps its runtime - the old model's weights are released, and
+      both loops on the machine take the same new runtime.
+    </p>
+    <div class="cmd"><span class="p">$</span> curl -sk -X PUT https://<span class="v">host</span>:8452/admin/v1/pools/<span class="v">id</span>/serving-model \
+    -H "authorization: Bearer $TOK" -H 'content-type: application/json' \
+    -d '{"modelId":"<span class="v">mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit</span>"}'</div>
+    <p>
+      Setting it to <code>null</code> means nobody has said, which is not an
+      instruction to unload: machines keep serving what they have.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>Declare a model's shape</h4>
+    <p>
+      How many machines it runs across, and how much each needs. Checked at
+      assignment, so a two-machine model assigned to a group with one is refused
+      with a sentence rather than discovered at dispatch as a hang.
+    </p>
+    <div class="cmd"><span class="p">$</span> curl -sk -X PUT https://<span class="v">host</span>:8452/admin/v1/models/<span class="v">id</span>/shape \
+    -H "authorization: Bearer $TOK" -H 'content-type: application/json' \
+    -d '{"machines":2}'</div>
+  </div>
+</section>
+
+<section id="split">
+  <div class="sec-head"><h2>5</h2><h3>Running a split</h3></div>
+  <p>
+    Four things must be true, and the fleet will tell you which one is not.
+  </p>
+  <div class="steps">
+    <div class="step"><div class="step-body">
+      <h4>The model declares it needs more than one machine</h4>
+      <p><code>PUT /models/{id}/shape {"machines": 2}</code>. Otherwise it is
+        routed as an ordinary model and answered by one machine.</p>
+    </div></div>
+    <div class="step"><div class="step-body">
+      <h4>A cluster group is serving it</h4>
+      <p><code>PUT /pools/{id}/serving-model</code> with <code>confirm: true</code>.
+        The confirmation is not a formality: it names the machines that stop being
+        available to their harvest group for as long as this stands.</p>
+    </div></div>
+    <div class="step"><div class="step-body">
+      <h4>The machines can reach each other</h4>
+      <p>Each node says which of its interfaces its peers should use, with
+        <code>DAI_PIPELINE_INTERFACE</code> in the agent's plist - the link a
+        split runs over is deliberately not the one used to reach the control
+        plane. A node whose link is down reports no address at all, and a gang
+        with nowhere to dial is refused in milliseconds.</p>
+    </div></div>
+    <div class="step"><div class="step-body">
+      <h4>All of them are connected at once</h4>
+      <p>A gang is admitted whole or not at all. A model that runs across every
+        machine in its group leaves no spare rank, so any other request in flight -
+        including a token count - blocks it for that moment.</p>
+    </div></div>
+  </div>
+  <div class="cmd"><span class="c"># then ask, on the group's own socket</span>
+<span class="p">$</span> curl -sk https://<span class="v">host</span>:8461/v1/chat/completions \
+    -H "authorization: Bearer $TOK" -H 'content-type: application/json' \
+    -d '{"model":"<span class="v">...</span>","max_tokens":40,"messages":[{"role":"user","content":"hello"}]}'</div>
+  <p>
+    Both machines log their share: <code>rank 0 (layers 24..&lt;48) finished 205
+    tokens in 15.4s</code>. The answer comes from rank 0, which holds the output
+    head.
+  </p>
+</section>
+
+<section id="agents">
+  <div class="sec-head"><h2>6</h2><h3>Agent versions</h3></div>
+  <p>
+    A pool is either <b>managed</b> - the control plane hands out the binary and
+    machines self-update - or <b>external</b>, where it records what it expects
+    and never acts, which is what makes it safe to run beside an MDM. Two systems
+    racing to own one executable is worse than either owning it alone.
+  </p>
+  <div class="cmd"><span class="c"># register a build from a file on the control plane's disk</span>
+<span class="p">$</span> curl -sk -X POST https://<span class="v">host</span>:8452/admin/v1/agent/builds \
+    -H "authorization: Bearer $TOK" -H 'content-type: application/json' \
+    -d '{"version":"<span class="v">2026.08.13-7</span>","path":"<span class="v">/path/to/dai-agent</span>","notes":"..."}'
+
+<span class="c"># tell a pool which one to run</span>
+<span class="p">$</span> curl -sk -X PUT https://<span class="v">host</span>:8452/admin/v1/pools/<span class="v">id</span>/agent \
+    -H "authorization: Bearer $TOK" -H 'content-type: application/json' \
+    -d '{"channel":"managed","version":"<span class="v">2026.08.13-7</span>"}'
+
+<span class="c"># watch it converge - upToDate is compared by hash, not version string</span>
+<span class="p">$</span> curl -sk https://<span class="v">host</span>:8452/admin/v1/agent/rollout -H "authorization: Bearer $TOK" | jq</div>
+  <p>
+    Machines pick it up within 120 seconds. The version a node reports comes from
+    its plist and can stay stale after a self-update; the fingerprint is the hash
+    of the running executable and is the thing to read.
+  </p>
+</section>
+
+<section id="certs">
+  <div class="sec-head"><h2>7</h2><h3>Certificates</h3></div>
+  <p>
+    Certificates last thirty days and renew on their own at two thirds of life.
+    You cannot renew one for a node: the key lives in the Secure Enclave and signs
+    only inside that machine's daemon, so <code>dai-agent renew</code> over ssh
+    fails even as root. You can ask.
+  </p>
+  <div class="cmd"><span class="p">$</span> curl -sk -X POST https://<span class="v">host</span>:8452/admin/v1/nodes/<span class="v">id</span>/renew \
+    -H "authorization: Bearer $TOK"
+{"hostname":"orca","asked":true}</div>
+  <p>
+    The node acts on its next heartbeat and the request clears itself. The
+    machine drawer shows the expiry, whether a request is outstanding, and offers
+    the control only when it could work - an expired certificate cannot
+    authenticate, so it can never be told to renew, and that machine needs
+    re-enrolling instead.
+  </p>
+  <p>
+    Renewal is also how a machine acquires the <b>node CA</b> - the trust anchor
+    for machine-to-machine links. A node enrolled before peer links existed
+    cannot join a split until it renews.
+  </p>
+</section>
+
+<section id="backup">
+  <div class="sec-head"><h2>8</h2><h3>Backup and restore</h3></div>
+  <p>
+    What the archive protects is disproportionate to its size: the CA private key
+    is 1.7 KB, every node certificate traces to it, and enrolment needs the
+    Secure Enclave - which will not generate a key over ssh. Losing it means
+    walking to every machine in the building.
+  </p>
+  <div class="cmd"><span class="p">$</span> ./scripts/backup.sh <span class="v">/path/to/archives</span>
+<span class="p">$</span> ./scripts/restore.sh <span class="v">/path/to/archive.tar.gz</span></div>
+  <div class="note gap">
+    <b>Restore replaces the CA</b>
+    <p>
+      Every certificate issued by the CA being discarded stops being trusted the
+      moment it finishes. The old material is moved aside rather than
+      overwritten, so a wrong archive is recoverable - but this is not a routine
+      operation and it asks you to type the word.
+    </p>
+  </div>
+</section>
+
+<footer>
+  <a href="TROUBLESHOOTING.html">Troubleshooting</a> for when one of these says
+  no, <a href="OPERATOR_GUIDE.html">the operator guide</a> for installation, and
+  <a href="ARCHITECTURE.html">architecture</a> for what the words mean.
+</footer>
+
+</div>
+</body>
+</html>

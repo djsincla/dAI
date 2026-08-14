@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dAI decisions</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+<header class="masthead">
+  <div class="kicker">Engineering &middot; decisions</div>
+  <h1>Every decision that is load-bearing, and what settled it</h1>
+  <p class="standfirst">
+    Each entry is a choice that could reasonably have gone the other way, the
+    alternative that was rejected, and the measurement or the failure that
+    decided it. These are the parts not to simplify later: most of them look
+    arbitrary until you know what they cost to learn.
+  </p>
+</header>
+
+<div class="toc">
+  <a href="#premise"><span class="n">1</span> The premise</a>
+  <a href="#scheduling"><span class="n">2</span> Scheduling and presence</a>
+  <a href="#split"><span class="n">3</span> Splitting a model</a>
+  <a href="#groups"><span class="n">4</span> Groups, tiers and sockets</a>
+  <a href="#identity"><span class="n">5</span> Identity and trust</a>
+  <a href="#failure"><span class="n">6</span> How things fail</a>
+  <a href="#models"><span class="n">7</span> Models and storage</a>
+  <a href="#open"><span class="n">8</span> Open, and deliberately not done</a>
+</div>
+
+<section id="premise">
+  <div class="sec-head"><h2>1</h2><h3>The premise</h3></div>
+
+  <div class="entry">
+    <h4>Sold on sovereignty and sunk cost, not price-performance</h4>
+    <p class="because">Because</p>
+    <p>
+      The machines are already bought and idle sixteen hours a day, and the data
+      never leaves the building. Competing on cost per token against a
+      hyperscaler is a race this cannot win and does not need to enter.
+    </p>
+    <p class="evidence">
+      Everything downstream follows from it: the owner's pause cannot be
+      overridden, presence gating is strict, and a machine is never taken from
+      the person sitting at it.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>Two tiers: harvest and cluster</h4>
+    <p class="because">Because a gang-scheduled job cannot be preempted</p>
+    <p>
+      Harvest machines may be taken away the moment somebody touches a keyboard.
+      Cluster machines never are. That distinction exists <i>for</i> split work:
+      a job spanning N machines dies if any one yields, and preemption is the
+      entire premise of harvesting.
+    </p>
+    <p class="evidence">
+      The alternative - one tier with a priority number - cannot express "this
+      machine will still be here in a minute", which is the only thing an
+      interactive conversation or a pipeline actually needs.
+    </p>
+  </div>
+</section>
+
+<section id="scheduling">
+  <div class="sec-head"><h2>2</h2><h3>Scheduling and presence</h3></div>
+
+  <div class="entry">
+    <h4>No GPU work while anyone is logged in</h4>
+    <p class="because">Measured, not assumed</p>
+    <p class="evidence">
+      E2 swept QoS against duty cycle and found every configuration perceptible.
+      The gentlest tested - background QoS at 25% duty - still cost 46% of
+      viewport p95. There is no setting at which a user does not notice, so the
+      answer is none.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>Sample presence every 0.5s while active, 5s when idle</h4>
+    <p class="because">The sampling interval is the dominant term in yield latency</p>
+    <p class="evidence">
+      E4 measured memory release at ~20ms and model reload at 1-3s. Sampling is
+      cheap; tune this rather than the release path.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>Batch work is pulled, interactive work is pushed</h4>
+    <p class="because">A queue suits polling; a conversation does not</p>
+    <p>
+      Nodes lease batch units when ready. Interactive requests go down a reverse
+      channel the node holds open, so there is no poll interval in the request
+      path.
+    </p>
+    <p class="evidence">
+      It also gives the fleet its liveness signal for free: a node holding the
+      channel is available, and one mid-request is neither idle nor gone -
+      conflating those made a healthy node reading a large prompt look like a
+      dead one. 19,243 tokens took 377 seconds, during which the node was
+      answering the whole time.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>Capability is measured per workload class, never inferred from the chip</h4>
+    <p class="because">The newer machine is sometimes the slower one</p>
+    <p class="evidence">
+      The same two machines differed 7.5% on a 1.5B model and 26.3% on a 7B, and
+      the newer one was slower on one of them. A scheduler that reasons from
+      model names and chip names will be confidently wrong.
+    </p>
+  </div>
+</section>
+
+<section id="split">
+  <div class="sec-head"><h2>3</h2><h3>Splitting a model</h3></div>
+
+  <div class="entry">
+    <h4>Pipeline parallelism, not tensor parallelism</h4>
+    <p class="because">The link is latency-bound, not bandwidth-bound</p>
+    <p>
+      Pipeline moves one hidden state per token. Tensor parallelism pays roughly
+      two all-reduces per layer per token.
+    </p>
+    <p class="evidence">
+      E7 measured the fleet's best link at 0.48 ms (USB gigabit) against
+      Thunderbolt's 0.85 ms for this purpose. The conclusion inverts the
+      intuition the name invites: Thunderbolt is a bandwidth upgrade and would
+      make tensor parallelism <i>slower</i>.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>Rank 0 holds the last layers and the output head</h4>
+    <p class="because">The machine that produces a token is the one a scheduler addresses</p>
+    <p>
+      Ranks are numbered in reverse. Rank 0 answers the request; the others do
+      their share and return nothing anybody reads.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>Layer boundaries are accumulated, not multiplied</h4>
+    <p class="because">The obvious formula silently loses a layer</p>
+    <p class="evidence">
+      Giving each rank <code>perRank</code> layers starting at
+      <code>(size - rank - 1) * perRank</code> is only correct when every rank
+      holds the same number. With 80 layers over 3 machines the ranks hold 27, 27
+      and 26 - and layer 26 is owned by nobody. A skipped layer does not fail:
+      the model computes without it and answers fluently from the wrong network.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>The model is built with a reduced layer count, not trimmed after loading</h4>
+    <p class="because">MLXNN.Module snapshots its children during init</p>
+    <p class="evidence">
+      Removing layers after construction leaves the parameter tree and the KV
+      cache still sized for the whole model. One machine ran twelve layers while
+      being quantised and verified as twenty-four.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>Every rank is told what to be; nothing is inferred from the rank number</h4>
+    <p class="because">Implicit agreement survives until somebody renumbers the ranks</p>
+    <p>
+      Rank, size, listen-or-dial, port, peer address and model all arrive in one
+      dispatch. A dialer with nowhere to dial is refused rather than started.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>A split runs where an operator assigned it, never because a request asked</h4>
+    <p class="because">Running a split is a decision about the fleet</p>
+    <p>
+      It takes machines out of harvesting for as long as it stands, which is why
+      assigning one requires confirmation. Before this, naming a two-machine
+      model in a request would assemble a gang out of any cluster group.
+    </p>
+    <p class="evidence">
+      The declaration is the group's serving model, so there is no second switch
+      to keep in step and no way to declare a split for a model that is not one.
+      A model nobody assigned is refused with <code>not-offered</code>: the fleet
+      is not short of anything, what is missing is a decision.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>A lost rank fails the request, releases every member, and says so loudly</h4>
+    <p class="because">On a tier defined by never being preempted, this should not happen</p>
+    <p>
+      Holding the survivors and betting the peer returns costs memory on machines
+      doing nothing, for a bet nothing bounds. Resuming on a replacement needs
+      the lost rank's KV cache, which is not transferable.
+    </p>
+    <p class="evidence">
+      Building recovery machinery would be admitting the tier does not work. If
+      ranks are being lost, the answer is to find out why - which requires the
+      failure to be loud rather than absorbed. A silently retried gang failure is
+      how a cluster tier quietly becomes a harvest tier with extra steps.
+    </p>
+  </div>
+</section>
+
+<section id="groups">
+  <div class="sec-head"><h2>4</h2><h3>Groups, tiers and sockets</h3></div>
+
+  <div class="entry">
+    <h4>A socket per group, allocated at creation</h4>
+    <p class="because">The address is the whole of the routing</p>
+    <p>
+      Nothing in a request names a group, so nothing in a request can name the
+      wrong one. A port is also something you can firewall, monitor and hand to a
+      team.
+    </p>
+    <p class="evidence">
+      The rejected alternative - one socket and a group named in the request -
+      makes routing a property of what somebody remembered to send. The rule that
+      must hold alongside it: <b>the port selects which group serves you; it does
+      not establish that you are allowed to.</b> Credentials are still checked
+      per request.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>Where a machine's groups disagree, the cluster group wins</h4>
+    <p class="because">Refusing the pair made the order of operations decide the outcome</p>
+    <p>
+      The first version refused two groups that named different models. That
+      meant assigning a model to a cluster group could fail because somebody had
+      given a harvest group a different one weeks earlier.
+    </p>
+    <p class="evidence">
+      The tiers are not equal claims: cluster promises never to be preempted and
+      is the only place a split runs; harvest promises the machine can be taken
+      away. Only one survives on a single machine. What is still refused is a
+      disagreement nothing can resolve - two groups of the same tier.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>The serving model belongs to the group and reaches the machine on its heartbeat</h4>
+    <p class="because">A declaration with no path to the machine is not a decision</p>
+    <p class="evidence">
+      A node used to run whatever argument its daemon was started with - one
+      plist per box, changed by hand. This fleet ran for a day with a group
+      declaring it served a 14B while its two machines ran a 32B and a 30B, and
+      nothing anywhere disagreed, because nothing was comparing them.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>A machine holding part of a split is suspended from harvesting</h4>
+    <p class="because">No machine can promise both</p>
+    <p>
+      Suspended rather than removed: nothing is written to membership, and the
+      machine is available again the moment the group stops serving that model.
+    </p>
+    <p class="evidence">
+      Read from what is assigned, not from what is running - a gang that formed a
+      second after a harvest unit was leased is a gang that dies. The refusal
+      says <code>holding-a-split</code> rather than <code>no-pool</code>, because
+      the machine <i>is</i> in that group and an operator sent to look at
+      membership would find nothing wrong and no explanation.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>Standing a group down is not deleting it</h4>
+    <p class="because">Handing machines back should not cost the configuration</p>
+    <p>
+      A disabled group keeps its machines, model, socket and roles and asserts
+      none of them. Deleting takes its jobs, assignments and roles with it and
+      retires its port so a client left pointing at the old URL cannot quietly
+      reach a different group.
+    </p>
+  </div>
+</section>
+
+<section id="identity">
+  <div class="sec-head"><h2>5</h2><h3>Identity and trust</h3></div>
+
+  <div class="entry">
+    <h4>The node key lives in the Secure Enclave, and the HTTP client is NIO</h4>
+    <p class="because">URLSession can only present a SecIdentity</p>
+    <p class="evidence">
+      A SecIdentity is a certificate plus a SecKey, and a CryptoKit Enclave key is
+      not a SecKey. Making one would mean storing the key in the keychain, which
+      needs the entitlement and provisioning profile the Enclave route was chosen
+      to avoid. NIO's TLS stack takes a signing callback and does not care where
+      the key lives.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>An operator can ask a node to renew; nobody can do it for the node</h4>
+    <p class="because">The Enclave key signs only inside the launchd daemon</p>
+    <p class="evidence">
+      <code>dai-agent renew</code> over ssh fails with "unable to sign digest"
+      even as root. So the request rides the heartbeat the node already sends, and
+      the node renews itself. This is also how a machine enrolled before nodes had
+      to trust each other acquires the node CA it needs to join a split.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>A renewal is handed to every loop that holds a certificate</h4>
+    <p class="because">Renewal retires the old certificate immediately</p>
+    <p class="evidence">
+      This has been wrong twice. The serving loop was missed first and reconnected
+      every five seconds to be refused - loud, at least. The model sync loop was
+      missed next and failed quietly, showing in the console as a machine not
+      holding its models, which reads as a transfer problem rather than a machine
+      locked out by a renewal it performed on itself.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>A superseded certificate is refused, and unknown states fail closed</h4>
+    <p class="because">A genuine certificate that was really issued is exactly the one nothing else stops</p>
+    <p class="evidence">
+      Node states are an allowlist: active, paused and offline are admitted;
+      pending, cordoned and superseded are refused with a reason; anything
+      unrecognised fails closed. A re-enrolled machine's previous identity
+      verifies perfectly and must not work.
+    </p>
+  </div>
+</section>
+
+<section id="failure">
+  <div class="sec-head"><h2>6</h2><h3>How things fail</h3></div>
+
+  <div class="entry">
+    <h4>A failed split fails the request, not the node</h4>
+    <p class="because">The first version called fatalError</p>
+    <p class="evidence">
+      The reasoning was that a pipeline carrying on with the wrong hidden state
+      answers fluently from the wrong numbers, which is worse than stopping. That
+      is right about continuing and wrong about stopping: on real hardware a peer
+      whose handshake never completed killed the daemon on both machines, took
+      unrelated harvest work with it, and told the control plane nothing. A
+      forward pass cannot throw, so the failure is latched and the caller checks.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>A gang ends when a rank fails, with two seconds' grace for the others</h4>
+    <p class="because">A pipeline missing a rank produces nothing</p>
+    <p class="evidence">
+      One split failed in ten seconds and the caller waited ten minutes for a
+      machine that had gone away. The grace is long enough that a rank about to
+      report is still named, short enough that nobody waits on a sleeping machine.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>A link that goes quiet mid-handshake is given ten seconds, not two minutes</h4>
+    <p class="because">Neither TCP nor TLS reports a peer that simply stops</p>
+    <p class="evidence">
+      Both machines sat holding half a model each for the full transport timeout
+      and then said only that the other had not answered. Ten seconds is generous
+      for a link measured in fractions of a millisecond.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>A split gives its port back when it ends</h4>
+    <p class="because">A leaked listener does not merely waste a port - it answers</p>
+    <p class="evidence">
+      One attempt left its listener bound for the life of the daemon; the next
+      could not bind, and the dialer connected to the corpse of the first and
+      completed a handshake with it. Closing also had to stop waiting out the
+      accept timeout: a listener whose peer never arrived held the port for a
+      further sixty seconds while "closing".
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>A node that has no pipeline address says so, rather than being remembered</h4>
+    <p class="because">A stale address forms a gang over a cable that is not there</p>
+    <p>
+      Present-and-null clears it; an absent field leaves it alone, so an older
+      agent is unaffected.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>Refusals are named, not just worded</h4>
+    <p class="because">Messages are written to be read and rewritten to be clearer</p>
+    <p class="evidence">
+      <code>gang-short</code>, <code>not-offered</code>,
+      <code>group-disabled</code>, <code>holding-a-split</code>. A caller wanting
+      to tell "nobody assigned this" from "the machines cannot reach each other"
+      should not have to match on prose. The Anthropic error shape has no code
+      field, so the name travels in a <code>dai</code> block beside the message.
+    </p>
+  </div>
+</section>
+
+<section id="models">
+  <div class="sec-head"><h2>7</h2><h3>Models and storage</h3></div>
+
+  <div class="entry">
+    <h4>Nodes do not reach the hub for weights by default</h4>
+    <p class="because">99 seconds against 3.85</p>
+    <p class="evidence">
+      Consulting the hub costs 99s on a model already present on disk, against
+      3.85s offline - a network round trip per file, on every load, forever. E4
+      sized the entire preemption design around a 1-3s reload, so this does not
+      merely miss that, it inverts it. The product reason agrees: a fleet sold on
+      data never leaving the building should not have every node fetching from the
+      internet.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>A model declares how many machines it needs; the catalogue says so</h4>
+    <p class="because">A repository path tells you nothing</p>
+    <p class="evidence">
+      Whether a 40 GB model runs on one machine or two is a decision about the
+      fleet, not a property of the weights. <code>Qwen2.5-14B-Instruct-4bit</code>
+      looks like every other model and is not: serving it engages two machines and
+      takes them out of harvesting.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>Residency is compared by size, not by key</h4>
+    <p class="because">A partial transfer counted as holding the model</p>
+    <p class="evidence">
+      <code>stored_models ? id</code> only tests that a key exists. A node that
+      had fetched one file of forty reported the model as held. Units differ
+      either side - the node reports GiB, the catalogue bytes - which is its own
+      trap.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>What a machine is running is proven by hash, not by version string</h4>
+    <p class="because">A version is a claim the binary makes about itself</p>
+    <p class="evidence">
+      Two deploys in one day left both machines on a build from hours earlier, and
+      the only way to find out was to compare file sizes over ssh. The fingerprint
+      is the sha256 of the running executable; the version is what somebody typed.
+      Rollout compares hashes.
+    </p>
+  </div>
+</section>
+
+<section id="open">
+  <div class="sec-head"><h2>8</h2><h3>Open, and deliberately not done</h3></div>
+  <ul>
+    <li><b>Nine mutating admin routes have no authorisation check</b>, including
+      node approval. Not exploitable while only the bootstrap admin can sign in,
+      but an installer's whole job is to create the second user. It needs a
+      fleet-level role, which is a design decision rather than a patch.</li>
+    <li><b>A machine in both tiers reads as cluster everywhere</b>, including for
+      the presence exemption when serving. See
+      <a href="ARCHITECTURE.html#presence">architecture</a>.</li>
+    <li><b>Builds are not reproducible.</b> Two runs of the release script from
+      one commit produce different bytes, so a checksum verifies <i>a</i> build
+      rather than <i>the</i> build.</li>
+    <li><b>No <code>/v1/embeddings</code>.</b> The fleet schedules embed work and
+      measures it, but the ANE model produces no usable embedding - see
+      <a href="EMBEDDINGS.md">that note</a>.</li>
+    <li><b>Deleting a group does not yet hold its port back over time</b>, only
+      until the range is exhausted, at which point the longest-retired is reused.</li>
+  </ul>
+</section>
+
+<footer>
+  See <a href="ARCHITECTURE.html">architecture</a> for what the system is, and
+  <a href="TESTING.html">testing</a> for which of these claims are held in place
+  by a test rather than by care.
+</footer>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dAI architecture</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+<header class="masthead">
+  <div class="kicker">Engineering &middot; architecture</div>
+  <h1>What the system is, and which part holds what</h1>
+  <p class="standfirst">
+    A control plane on one machine, an agent on every machine that lends
+    capacity, and a link between machines that the control plane never touches.
+    This describes what is built and running, not what is planned.
+  </p>
+</header>
+
+<div class="toc">
+  <a href="#shape"><span class="n">1</span> The shape of it</a>
+  <a href="#surfaces"><span class="n">2</span> Surfaces and who may reach them</a>
+  <a href="#agent"><span class="n">3</span> The agent: two loops, one process</a>
+  <a href="#presence"><span class="n">4</span> Presence, and what it permits</a>
+  <a href="#groups"><span class="n">5</span> Tiers, groups and sockets</a>
+  <a href="#split"><span class="n">6</span> A model across several machines</a>
+  <a href="#identity"><span class="n">7</span> Identity</a>
+  <a href="#state"><span class="n">8</span> Where state lives</a>
+</div>
+
+<section id="shape">
+  <div class="sec-head"><h2>1</h2><h3>The shape of it</h3></div>
+  <p>
+    Three kinds of process, and a fourth that only exists during a split.
+  </p>
+  <div class="cmd"><span class="c"># one machine</span>
+control plane        Postgres, an HTTP surface, the scheduler, the console
+
+<span class="c"># every machine that lends capacity</span>
+dai-agent work       the daemon: batch loop + serving loop, one process
+dai-agent updater    a separate launchd job, every 120s
+
+<span class="c"># only while a split model is answering</span>
+rank 0 &lt;-&gt; rank 1     a direct mTLS link between two agents, port 7710</div>
+  <p>
+    Work reaches an agent in two ways and they are not alike. <b>Batch work is
+    pulled</b>: the node asks when it is ready, which suits a queue and means a
+    machine that goes away simply stops asking. <b>Interactive work is pushed</b>
+    down a reverse channel the node holds open, because a conversation cannot
+    wait for the next poll.
+  </p>
+  <div class="note">
+    <b>The direction matters</b>
+    <p>
+      A harvested machine dials out and never listens. Everything the control
+      plane wants to tell a node - renew your certificate, serve this model -
+      travels on a beat the node itself sent. There is no other way in.
+    </p>
+  </div>
+</section>
+
+<section id="surfaces">
+  <div class="sec-head"><h2>2</h2><h3>Surfaces and who may reach them</h3></div>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Surface</th><th>Path</th><th>Who</th><th>Authenticated by</th></tr></thead>
+    <tbody>
+      <tr><td>agent</td><td class="mono">/agent/v1</td><td>nodes</td><td>mTLS client certificate</td></tr>
+      <tr><td>admin</td><td class="mono">/admin/v1</td><td>people</td><td>session token, pool-scoped roles</td></tr>
+      <tr><td>serving</td><td class="mono">/v1, /api</td><td>applications</td><td>API key or session</td></tr>
+      <tr><td>monitor</td><td class="mono">/monitor/v1</td><td>scrapers</td><td>network range only, closed by default</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>
+    Each is also separable at the listener: <code>AGENT_PORT</code> runs the
+    worker API on its own port so it can be firewalled apart and kept up while
+    the human-facing side restarts. Network ACLs run before authentication, so a
+    request from a disallowed range is refused without touching the database.
+  </p>
+  <p>
+    Every group gets a further listener of its own - see
+    <a href="#groups">tiers, groups and sockets</a>.
+  </p>
+</section>
+
+<section id="agent">
+  <div class="sec-head"><h2>3</h2><h3>The agent: two loops, one process</h3></div>
+  <p>
+    Batch and serving run side by side in one daemon because a node does both
+    and they cannot share a loop: an interactive request must not wait for a
+    batch unit to finish, and a batch unit must not be held behind a
+    conversation. Keeping them in separate commands meant installing the daemon
+    quietly turned serving off.
+  </p>
+  <dl>
+    <dt>batch loop</dt>
+    <dd>Reads presence, heartbeats, leases work, syncs models and scenes, renews
+      the certificate. It owns renewal and the model swap.</dd>
+    <dt>serving loop</dt>
+    <dd>Holds the reverse channel open, answers dispatches, and is the half that
+      becomes a rank of a split.</dd>
+  </dl>
+  <p>
+    They share a runtime and an identity, which is the source of a whole class of
+    bug: anything the batch loop replaces has to be handed to the serving loop and
+    to the three sync loops, or they go on using what was replaced. That has been
+    wrong twice - once for a renewed certificate, once for the model sync loop -
+    so the handover now lives in one place, in the loop that does the replacing.
+  </p>
+</section>
+
+<section id="presence">
+  <div class="sec-head"><h2>4</h2><h3>Presence, and what it permits</h3></div>
+  <p>
+    The policy table is measured, not estimated. GPU work is forbidden wherever a
+    user is logged in: every configuration tested was perceptible, and the
+    gentlest - background QoS at 25% duty - still cost 46% of viewport p95.
+  </p>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>State</th><th>GPU</th><th>ANE</th><th>QoS</th><th>Duty</th><th>Memory</th><th>Max completion</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">ACTIVE</td><td>no</td><td>yes</td><td>background</td><td>0.00</td><td>0%</td><td>256</td></tr>
+      <tr><td class="mono">PASSIVE</td><td>no</td><td>yes</td><td>background</td><td>0.00</td><td>15%</td><td>256</td></tr>
+      <tr><td class="mono">IDLE</td><td>no</td><td>yes</td><td>background</td><td>0.00</td><td>35%</td><td>256</td></tr>
+      <tr><td class="mono">LOCKED</td><td>yes</td><td>yes</td><td>standard</td><td>1.00</td><td>70%</td><td>2048</td></tr>
+      <tr><td class="mono">ABSENT</td><td>yes</td><td>yes</td><td>standard</td><td>1.00</td><td>85%</td><td>4096</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>
+    Cluster-tier machines are exempt from presence gating for serving. The gate
+    exists to keep work off a machine somebody is using, and a dedicated box has
+    nobody at it; more importantly, a conversation needs a model still resident a
+    minute from now, which the harvest tier cannot promise by design.
+  </p>
+  <div class="note gap">
+    <b>Known sharp edge</b>
+    <p>
+      <code>nodes.tier</code> is generated as <i>cluster if cluster is in
+      tiers</i>. A machine that volunteers for both reads as cluster everywhere,
+      including for that exemption - so an interactive request can land on
+      somebody's workstation while they are using it. The fleet view warns about
+      it; the model has not been fixed.
+    </p>
+  </div>
+</section>
+
+<section id="groups">
+  <div class="sec-head"><h2>5</h2><h3>Tiers, groups and sockets</h3></div>
+  <dl>
+    <dt>tier</dt>
+    <dd>A promise a <i>machine</i> makes about preemption. <b>harvest</b>: may be
+      taken away the moment somebody touches a keyboard. <b>cluster</b>: never
+      preempted, and the only place a split can run.</dd>
+    <dt>group</dt>
+    <dd>A set of machines, the one model they serve, and a socket. A group has a
+      tier; a machine has tiers.</dd>
+    <dt>socket</dt>
+    <dd>A port per group, allocated at creation from 8460-8499. Pointing an
+      application at it addresses that group's machines and no others.</dd>
+  </dl>
+  <p>
+    A machine may be in at most one group per tier. Where its cluster and harvest
+    groups disagree about what it should serve, <b>the cluster group wins</b> -
+    the two tiers are not equal claims, and only one of the two promises survives
+    on a single machine.
+  </p>
+  <p>
+    The serving model is a property of the group and reaches the machine on its
+    heartbeat; the agent swaps its runtime to match. A group can be
+    <b>stood down</b>, which keeps its machines, model and socket and asserts
+    none of them, or <b>deleted</b>, which takes its jobs, assignments and roles
+    with it and retires its port.
+  </p>
+</section>
+
+<section id="split">
+  <div class="sec-head"><h2>6</h2><h3>A model across several machines</h3></div>
+  <p>
+    Pipeline parallelism: the layers are divided, and one hidden state crosses
+    the boundary per token. How many machines is a property of the <i>model</i>
+    (<code>models.machines</code>), declared by an operator, not inferred from
+    how many machines a group happens to have.
+  </p>
+  <div class="cmd"><span class="c"># a request naming a 2-machine model, on a group's socket</span>
+control plane   selects a gang: all ranks or none, one group, cluster tier
+                tells each rank: rank, size, listen or dial, port, peer, model
+rank 1          holds layers 0..&lt;24, dials rank 0, sends a hidden state per token
+rank 0          holds layers 24..&lt;48 plus the norm and the output head,
+                samples the token, sends it back, and answers the request</div>
+  <p>
+    Ranks are numbered in reverse so rank 0 owns the head and is therefore the
+    machine that answers. Layer boundaries are accumulated rather than
+    multiplied, because the obvious formula loses a layer whenever the count does
+    not divide evenly - 80 layers over 3 machines drops layer 26, and a model
+    computes happily without it.
+  </p>
+  <p>
+    A split runs only where an operator assigned it. The declaration is the
+    group's serving model, so there is no second switch to keep in step and no
+    way to declare a split for a model that is not one.
+  </p>
+  <div class="note">
+    <b>What it buys</b>
+    <p>
+      Capacity, not speed. With one request in flight the machines run in
+      sequence, so a 72B costs about 14% of its throughput and halves what each
+      machine must hold - 41.10 GB on one machine against 21.31 GB on each of
+      two. The reason to do it is that the model would not fit at all otherwise.
+    </p>
+  </div>
+</section>
+
+<section id="identity">
+  <div class="sec-head"><h2>7</h2><h3>Identity</h3></div>
+  <p>
+    Every node has a key in the Secure Enclave and a certificate signed by the
+    fleet's node CA. The key cannot leave the machine and cannot be used outside
+    the daemon that created it - which is why the agent's HTTP client is NIO
+    rather than URLSession, and why a certificate renewal can only be performed
+    by the daemon itself.
+  </p>
+  <p>
+    Peer links between nodes present the same node certificate and pin the
+    <i>node</i> CA - not the server CA used to reach the control plane. Pinning
+    the wrong root fails the handshake with "unknown CA", which reads as a broken
+    network rather than the wrong trust anchor.
+  </p>
+</section>
+
+<section id="state">
+  <div class="sec-head"><h2>8</h2><h3>Where state lives</h3></div>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>What</th><th>Where</th><th>Note</th></tr></thead>
+    <tbody>
+      <tr><td>fleet, groups, models, jobs</td><td class="mono">Postgres</td><td>schema.sql is re-runnable; the installers apply it every time</td></tr>
+      <tr><td>CA private key</td><td class="mono">control-plane/certs</td><td>on disk, never in the database, so a database compromise cannot mint members</td></tr>
+      <tr><td>node key</td><td class="mono">Secure Enclave</td><td>cannot be exported, cannot sign outside the daemon</td></tr>
+      <tr><td>model weights</td><td class="mono">/var/db/dai/models</td><td>fetched from the catalogue, verified by hash, never from the internet by default</td></tr>
+      <tr><td>job content</td><td class="mono">blobs, scenes</td><td>held while a job runs and deleted after</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<footer>
+  Companion documents: <a href="DECISIONS.html">decisions</a> for why any of this
+  is the way it is, <a href="TESTING.html">testing</a> for what is proven and how,
+  <a href="OPERATIONS.html">operations</a> for running it.
+</footer>
+
+</div>
+</body>
+</html>

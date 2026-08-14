@@ -105,10 +105,28 @@ CONTROL_PKG="$(cd "$OUT" && ls dai-control-*.pkg)"
 # file, so this is not a list of steps to run - it is the answer to "what is
 # about to happen to my database", which is the question somebody asks before
 # they let an installer near it.
-PREVIOUS="$(git -C "$ROOT" describe --tags --abbrev=0 2>/dev/null || true)"
-SCHEMA_CHANGES="(no previous tag; this is the first release)"
-if [[ -n "$PREVIOUS" ]]; then
-  SCHEMA_CHANGES="$(git -C "$ROOT" diff --stat "$PREVIOUS" -- control-plane/db/schema.sql || true)"
+# The highest tag that is not the one being built. `git describe` would answer
+# with this release's own tag once it exists, and then diff the schema against
+# itself and report that nothing changed - which is the most confident way to be
+# wrong about a database.
+PREVIOUS="$(git -C "$ROOT" tag --list --sort=-v:refname \
+              | grep -vx "$VERSION" | head -1 || true)"
+if [[ -z "$PREVIOUS" ]]; then
+  # Not "this is the first release", which this cannot know. A repository with
+  # no tags is a repository nobody has tagged, and an empty list of schema
+  # changes reads as "nothing will happen to your database" in exactly the
+  # place somebody needs the truth.
+  SCHEMA_CHANGES="(nothing to compare against: no other release is tagged in this
+repository, so the schema changes could not be computed. Tag releases as they are
+built - git tag $VERSION - and this section fills itself in.)"
+else
+  # The statements themselves rather than a diffstat. "schema.sql | 14 +++-" is
+  # a fact about a file; the question being asked is what is about to happen to
+  # a database that already has data in it.
+  SCHEMA_CHANGES="$(git -C "$ROOT" diff "$PREVIOUS" -- control-plane/db/schema.sql \
+      | grep -E '^\+' | grep -vE '^\+\+\+' \
+      | grep -iE 'ALTER TABLE|CREATE TABLE|CREATE INDEX|ADD CONSTRAINT|DROP ' \
+      | sed 's/^+/  /' || true)"
   [[ -n "$SCHEMA_CHANGES" ]] || SCHEMA_CHANGES="(no schema changes since $PREVIOUS)"
 fi
 

@@ -178,6 +178,22 @@ if ! DATABASE_URL="$DB" "$HERE/node" "$HERE/dist/migrate.js"; then
   exit 1
 fi
 
+# ------------------------------------------------------------------ status app
+#
+# Copied rather than loaded. It is a menu bar app for whoever is sitting at this
+# machine, not a service, so it starts when somebody opens it - installing a
+# LaunchAgent would put it in the menu bar of every account on the machine
+# including ones that will never administer anything.
+if [[ -d "$HERE/dAI Control.app" ]]; then
+  # Quit a running copy first: replacing the bundle underneath a live process
+  # leaves it running the old binary with no way to tell, and the operator sees
+  # an upgrade that did not take.
+  pkill -f '/Applications/dAI Control.app' 2>/dev/null || true
+  rm -rf "/Applications/dAI Control.app"
+  cp -R "$HERE/dAI Control.app" "/Applications/dAI Control.app"
+  echo "status app installed at /Applications/dAI Control.app"
+fi
+
 # ----------------------------------------------------------------------- plist
 echo "==> installing $LABEL"
 sed -e "s|@BINARY_DIR@|$BINARY_DIR|g" \

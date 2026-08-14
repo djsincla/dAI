@@ -23,6 +23,11 @@ PURGE=0
 echo "==> stopping $LABEL"
 launchctl bootout "system/$LABEL" 2>/dev/null || true
 rm -f "$PLIST"
+# The status app goes with the daemon it reports on, with or without --purge. An
+# uninstaller that leaves an app in /Applications leaves something that opens,
+# says nothing is installed, and looks broken rather than absent.
+pkill -f '/Applications/dAI Control.app' 2>/dev/null || true
+rm -rf "/Applications/dAI Control.app"
 rm -rf "$BINARY_DIR"
 
 if [[ $PURGE -eq 1 ]]; then

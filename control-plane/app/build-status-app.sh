@@ -25,5 +25,11 @@ mkdir -p "$APP/Contents/MacOS"
 sed "s|@VERSION@|$VERSION|g" "$HERE/bundle/Info.plist" > "$APP/Contents/Info.plist"
 cp "$BIN" "$APP/Contents/MacOS/dai-control-status"
 
-codesign --force --options runtime --sign "$SIGN_ID" "$APP"
+# --timestamp only for a real identity: notarisation requires a secure timestamp
+# and rejects a bundle without one, but requesting it for an ad-hoc signature
+# means a network round trip on every local build for a signature Apple will
+# never be asked about.
+TS=(--timestamp); [[ "$SIGN_ID" == "-" ]] && TS=(--timestamp=none)
+codesign --force "${TS[@]}" --options runtime --sign "$SIGN_ID" "$APP"
+codesign --verify --strict "$APP"
 echo "$APP"

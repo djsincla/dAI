@@ -80,3 +80,7 @@ control-plane/outputs/
 # Content that arrived with a job. Held while the job runs and deleted after,
 # which is the point of it - nothing here should ever reach a commit.
 control-plane/blobs/
+
+# Source maps for the minified package build. They undo the minification,
+# so they never ship - see control-plane/scripts/minify-dist.sh.
+control-plane/.maps/

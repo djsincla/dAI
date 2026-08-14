@@ -25,7 +25,8 @@
   <a href="#tags"><span class="n">3</span> Tags, and why they matter here</a>
   <a href="#paths"><span class="n">4</span> Two delivery paths</a>
   <a href="#upgrade"><span class="n">5</span> Upgrading a live fleet</a>
-  <a href="#repro"><span class="n">6</span> What a checksum does not prove</a>
+  <a href="#ship"><span class="n">6</span> What the package gives away</a>
+  <a href="#repro"><span class="n">7</span> What a checksum does not prove</a>
 </div>
 
 <section id="one">
@@ -194,8 +195,59 @@
   </div>
 </section>
 
+<section id="ship">
+  <div class="sec-head"><h2>6</h2><h3>What the package gives away</h3></div>
+  <p>
+    The code here is routing and Postgres and anybody can write it. The comments
+    are the expensive half - the measurements, the failures, the reasons a layer
+    ends up owned by nobody. Until this was addressed, <code>dist/</code> shipped
+    every word of it in plaintext to everyone who ran the installer.
+  </p>
+  <div class="scroll">
+  <table>
+    <thead><tr><th></th><th><code>npm run build</code></th><th><code>npm run build:packaged</code></th></tr></thead>
+    <tbody>
+      <tr><td>Used by</td><td>development, <code>npm run migrate</code></td>
+        <td><code>build-control-pkg.sh</code>, nothing else</td></tr>
+      <tr><td>Comments</td><td>kept</td><td>stripped by <code>removeComments</code></td></tr>
+      <tr><td>Names</td><td>kept</td><td>mangled by esbuild</td></tr>
+      <tr><td>Source maps</td><td>n/a</td><td>archived beside the .pkg, never inside it</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>
+    Not a bundle, deliberately. Every runtime path is relative to the compiled
+    file - <code>server.js</code> reads <code>../openapi</code>,
+    <code>lib/db.js</code> reads <code>../../db</code> - so collapsing the tree
+    into one file moves <code>../../db</code> a directory too high and produces a
+    control plane that installs cleanly and then cannot find its schema. Each
+    file is minified where it stands.
+  </p>
+  <div class="note gap">
+    <b>Keep the source maps, and do not distribute them</b>
+    <p>
+      <code>dai-control-&lt;version&gt;-sourcemaps.tar.gz</code> is written beside
+      the package and is gitignored. A map next to a minified file undoes the
+      minification for anybody who looks, so it must not ship - but without one a
+      stack trace from a customer reads <code>f (server.js:1:8420)</code> and says
+      nothing at all. Archive it somewhere that outlives the checkout, per
+      release. It is the only way back from a minified trace.
+    </p>
+  </div>
+  <p>
+    Worth being straight about what this is. Minification is a deterrent, not a
+    protection: strings survive intact, the control flow is unchanged, and anyone
+    sufficiently motivated reads it anyway. The same is true of the agent -
+    Swift embeds type metadata and demanglable symbols, so a Mach-O binary gives
+    up structure and names to a competent reverse engineer. The difference
+    between shipped JavaScript and a shipped binary is effort, not possibility.
+    What actually says no is the <a href="../LICENSE">licence</a>, and the fact
+    that the control plane does not have to be shipped at all.
+  </p>
+</section>
+
 <section id="repro">
-  <div class="sec-head"><h2>6</h2><h3>What a checksum does not prove</h3></div>
+  <div class="sec-head"><h2>7</h2><h3>What a checksum does not prove</h3></div>
   <p>
     Two runs of the release script from one commit produce <b>different bytes</b>.
     Package timestamps, staged file mtimes and a fresh compile each time are all

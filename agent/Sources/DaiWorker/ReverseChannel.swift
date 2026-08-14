@@ -275,6 +275,18 @@ public actor ReverseChannel {
         // said to each other reads in order beside everything else the node was
         // doing at the time.
         let channel = PipelineChannel(log: { [log] in log($0) })
+        // Closed however this ends, including the ways it ends badly.
+        //
+        // Without this the listening rank holds port 7710 for the life of the
+        // daemon, and the *next* split on that machine fails to bind - which is
+        // what happened here: one attempt left its socket behind, the second
+        // could not listen, and the dialer connected to the corpse of the first
+        // and completed a handshake with it. A leaked listener does not merely
+        // waste a port; it answers.
+        // Detached, because a Task made inside an actor inherits its isolation
+        // and would queue behind whatever this loop does next - which is take
+        // the following request, on the port it has not released yet.
+        defer { let c = channel; Task.detached { await c.close() } }
         let started = Date()
         do {
             switch split.role {

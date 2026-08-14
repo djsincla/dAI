@@ -735,3 +735,55 @@ describe('the pipeline interface', () => {
     expect(install).toContain('@PIPELINE_IF@')
   })
 })
+
+/**
+ * The control plane's package, held to the same standard as the agent's.
+ *
+ * Its installer reaches for files beside itself, exactly as the agent's does,
+ * and nothing was checking that the build put them there. The first real
+ * install failed for that reason: install.sh called reload-daemon.sh, the
+ * build did not stage it - and the failure arrived as launchd's
+ * `5: Input/output error`, which says nothing about a missing file.
+ */
+describe('the control plane package stages what its installer needs', () => {
+  const here = join(import.meta.dirname, '..', 'packaging')
+  const install = readFileSync(join(here, 'install.sh'), 'utf8')
+  const build = readFileSync(join(here, 'build-control-pkg.sh'), 'utf8')
+
+  const needed = [...install.matchAll(/\$HERE\/([A-Za-z0-9._-]+)/g)]
+    .map((m) => m[1]!)
+    .filter((n) => n !== '..')
+
+  it('finds at least the files we know it needs', () => {
+    // Guards the regex: a silent mismatch here would make every assertion
+    // below pass while checking nothing.
+    expect(needed).toContain('reload-daemon.sh')
+    expect(needed).toContain('make-certs.sh')
+    expect(needed).toContain('node')
+    expect(needed.length).toBeGreaterThan(3)
+  })
+
+  it('stages every file install.sh expects beside itself', () => {
+    const missing = needed.filter((n) => !build.includes(n))
+    expect(missing, `build-control-pkg.sh does not stage: ${missing.join(', ')}`).toEqual([])
+  })
+
+  it('reloads the daemon through the script that waits for the old one', () => {
+    // Not `bootout` followed straight by `bootstrap`. Bootout returns when the
+    // job has been asked to stop, not when it has stopped, and bootstrapping
+    // into a label that still exists fails with an error that reads as a broken
+    // plist. This installer did exactly that on its first real run.
+    expect(install).toContain('reload-daemon.sh')
+    expect(install).not.toMatch(/launchctl bootout[^\n]*\n\s*launchctl bootstrap/)
+  })
+
+  it('refuses to mint an authority without asking the database first', () => {
+    // The order is the safety: preflight runs before make-certs, or an install
+    // that succeeds locks out every machine already enrolled.
+    const preflight = install.indexOf('preflight.js')
+    const generate = install.indexOf('make-certs.sh" --out')
+    expect(preflight).toBeGreaterThan(-1)
+    expect(generate).toBeGreaterThan(-1)
+    expect(preflight).toBeLessThan(generate)
+  })
+})

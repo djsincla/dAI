@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dAI documentation</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+<header class="masthead">
+  <div class="kicker">dAI &middot; documentation</div>
+  <h1>What each document is for, and how much to trust it</h1>
+  <p class="standfirst">
+    Documents here are one of four kinds, and mixing them up is how a repository
+    ends up with a specification nobody believes. Each entry says which it is and
+    when it was last true.
+  </p>
+</header>
+
+<section>
+  <div class="sec-head"><h2>Kinds</h2><h3>Read this first</h3></div>
+  <dl>
+    <dt>reference</dt>
+    <dd>Describes what is built and running. If it disagrees with the code, the
+      document is wrong and should be fixed.</dd>
+    <dt>decision</dt>
+    <dd>Why something is the way it is, with the measurement or failure that
+      settled it. Still true even when the code moves on - superseded decisions
+      get an entry saying what replaced them.</dd>
+    <dt>findings</dt>
+    <dd>A measurement taken on a date. Not maintained: it says what was true when
+      it was run, and the date is part of the claim.</dd>
+    <dt>plan</dt>
+    <dd>Something intended. The parts that have been built say so; the rest is
+      not a description of the system.</dd>
+  </dl>
+</section>
+
+<section>
+  <div class="sec-head"><h2>Engineering</h2><h3>How it works and why</h3></div>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Document</th><th>Kind</th><th>What it covers</th></tr></thead>
+    <tbody>
+      <tr><td><a href="ARCHITECTURE.html">Architecture</a></td><td>reference</td>
+        <td>Processes, surfaces, the two loops in the agent, presence policy,
+            tiers and groups, how a split is arranged, where state lives.</td></tr>
+      <tr><td><a href="DECISIONS.html">Decisions</a></td><td>decision</td>
+        <td>Every load-bearing choice, the alternative rejected, and the
+            measurement or failure that decided it. Ends with what is open and
+            what was deliberately not built.</td></tr>
+      <tr><td><a href="TESTING.html">Testing</a></td><td>reference</td>
+        <td>What is tested and where, the tests that only run under xcodebuild,
+            what only hardware can prove, and the traps that cost an
+            afternoon.</td></tr>
+      <tr><td><a href="CONTROL_PLANE.md">Control plane specification</a></td><td>plan</td>
+        <td>The original specification, grounded in the Phase 0 spike. Large, and
+            ahead of the code in places.</td></tr>
+      <tr><td><a href="SERVING.md">Interactive serving</a></td><td>decision</td>
+        <td>The design note behind pushing single requests to nodes, and what was
+            deliberately left out.</td></tr>
+      <tr><td><a href="GROUPS.md">Groups</a></td><td>reference</td>
+        <td>Tiers, group sockets, the override rule, suspension, standing a group
+            down and deleting one. Current.</td></tr>
+      <tr><td><a href="SPLIT_SERVING.md">Split serving</a></td><td>reference</td>
+        <td>Serving a model that fits on no single machine, and what the last
+            mile actually turned out to be. Current.</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><h2>Operations</h2><h3>Running it</h3></div>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Document</th><th>Kind</th><th>What it covers</th></tr></thead>
+    <tbody>
+      <tr><td><a href="OPERATOR_GUIDE.html">Operator guide</a></td><td>reference</td>
+        <td>Installing a control plane and agents from nothing. Predates groups
+            and sockets; installation itself is unchanged.</td></tr>
+      <tr><td><a href="OPERATIONS.html">Operations</a></td><td>reference</td>
+        <td>Day-two: approving machines, groups and their sockets, serving
+            models, running a split, agent versions, certificates, backup.</td></tr>
+      <tr><td><a href="TROUBLESHOOTING.html">Troubleshooting</a></td><td>reference</td>
+        <td>Every refusal the system produces, what it means and what to do -
+            organised by the message you are looking at.</td></tr>
+      <tr><td><a href="RELEASING.html">Releasing</a></td><td>reference</td>
+        <td>Building packages, signing, tagging, the two delivery paths, and
+            upgrading a live fleet.</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><h2>Findings</h2><h3>Measurements, on a date</h3></div>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>Document</th><th>Taken</th><th>What it answers</th></tr></thead>
+    <tbody>
+      <tr><td><a href="STORAGE.md">Storage</a></td><td>2026-08-12</td>
+        <td>Where model weights actually live, and why one 4-bit 72B occupied
+            76 GB across two machines.</td></tr>
+      <tr><td><a href="EMBEDDINGS.md">Embeddings</a></td><td>2026-08</td>
+        <td>Why there is no <code>/v1/embeddings</code>, despite the fleet
+            scheduling and measuring embed work.</td></tr>
+      <tr><td><a href="SPLIT_MODEL_ERRORS.md">Split model errors</a></td><td>2026-08</td>
+        <td>Getting a model split across two machines in Swift, written around
+            the failures because the failures are the part that transfers.</td></tr>
+      <tr><td><a href="PLAN.md">Plan</a></td><td>origin</td>
+        <td>The original context and premise. Kept for the reasoning, not as a
+            description of what exists.</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section>
+  <div class="sec-head"><h2>Also</h2><h3>Outside this directory</h3></div>
+  <ul>
+    <li><a href="index.html">The capabilities page</a> - what the system can do,
+      with every figure a measurement, and unproven things marked as unproven in
+      the same table as the proven ones. A capabilities page that only lists
+      successes is advertising.</li>
+    <li><code>examples/python/</code> - five scripts against the serving gateway
+      and a RAG index over California's Lanterman Act, including one that answers
+      through a group's socket using a model split across two machines.</li>
+    <li><code>spike/*/FINDINGS.md</code> - the Phase 0 measurements the design is
+      grounded in. Where a choice exists only because a measurement forced it,
+      the decision record cites the spike.</li>
+  </ul>
+</section>
+
+<footer>
+  If a reference document disagrees with the code, the document is wrong. If a
+  decision looks arbitrary, it is probably load-bearing - the entry says what it
+  cost to learn.
+</footer>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dAI releasing</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+<header class="masthead">
+  <div class="kicker">Operations &middot; releasing</div>
+  <h1>Building something somebody else can install</h1>
+  <p class="standfirst">
+    One command builds both packages and refuses to build either if the tests do
+    not pass. This is what it does, what it needs, and the two ways software
+    actually reaches a machine - which are not the same.
+  </p>
+</header>
+
+<div class="toc">
+  <a href="#one"><span class="n">1</span> One command</a>
+  <a href="#signing"><span class="n">2</span> Signing</a>
+  <a href="#tags"><span class="n">3</span> Tags, and why they matter here</a>
+  <a href="#paths"><span class="n">4</span> Two delivery paths</a>
+  <a href="#upgrade"><span class="n">5</span> Upgrading a live fleet</a>
+  <a href="#repro"><span class="n">6</span> What a checksum does not prove</a>
+</div>
+
+<section id="one">
+  <div class="sec-head"><h2>1</h2><h3>One command</h3></div>
+  <div class="cmd"><span class="p">$</span> ./scripts/release.sh <span class="v">0.3.0</span> --unsigned
+
+<span class="c"># or, for something installable elsewhere</span>
+<span class="p">$</span> ./scripts/release.sh <span class="v">0.3.0</span> \
+    --app-id       "<span class="v">Developer ID Application: Example Inc (TEAMID)</span>" \
+    --installer-id "<span class="v">Developer ID Installer: Example Inc (TEAMID)</span>" \
+    --notary-profile <span class="v">dai-notary</span></div>
+  <p>In order:</p>
+  <div class="steps">
+    <div class="step"><div class="step-body">
+      <h4>Both suites, with a clock on them</h4>
+      <p>A failure stops the build. So does a suite that stops making progress -
+        it is killed at ten minutes and a stack sample is taken <i>while the
+        process is still there to sample</i>, because that sample is the artifact
+        that identifies a hang and is gone the moment the process is killed.</p>
+    </div></div>
+    <div class="step"><div class="step-body">
+      <h4>The agent package</h4>
+      <p>Built with <code>xcodebuild</code>, not <code>swift build</code>:
+        SwiftPM cannot compile MLX's Metal shaders, so a package built that way
+        ships a binary that aborts on the first GPU work unit. Coverage is
+        explicitly off, or the shipped binary tries to write
+        <code>default.profraw</code> next to wherever it is running - a
+        permission error on every start, for a file nobody wants.</p>
+    </div></div>
+    <div class="step"><div class="step-body">
+      <h4>The control plane package</h4>
+      <p><code>npm ci --omit=dev</code>, a TypeScript build, and the official Node
+        runtime staged alongside so Node is not a prerequisite on the target.</p>
+    </div></div>
+    <div class="step"><div class="step-body">
+      <h4>Checksums and notes</h4>
+      <p><code>SHA256SUMS</code>, and a <code>RELEASE.md</code> naming the
+        versions, the schema changes since the previous tag, and any manual step
+        an upgrade needs.</p>
+    </div></div>
+  </div>
+</section>
+
+<section id="signing">
+  <div class="sec-head"><h2>2</h2><h3>Signing</h3></div>
+  <p>
+    Three credentials, and they are separate things that get confused:
+  </p>
+  <dl>
+    <dt>Developer ID Application</dt><dd>signs the binary</dd>
+    <dt>Developer ID Installer</dt><dd>signs the .pkg</dd>
+    <dt>a notarytool profile</dt><dd>submits to Apple for notarisation</dd>
+  </dl>
+  <p>
+    The "Apple Development" certificate that comes with a normal Xcode setup is
+    none of these. It signs code for local use only and Apple will not notarise
+    anything signed with it, so the script checks up front rather than failing
+    after a long build.
+  </p>
+  <div class="note gap">
+    <b>Unsigned means local only</b>
+    <p>
+      Gatekeeper will refuse an unsigned package on every machine except the one
+      that built it, and the failure is silent enough to waste a day. Unsigned
+      builds are for checking that the build works, nothing else.
+    </p>
+  </div>
+</section>
+
+<section id="tags">
+  <div class="sec-head"><h2>3</h2><h3>Tags, and why they matter here</h3></div>
+  <div class="cmd"><span class="p">$</span> git tag <span class="v">0.3.0</span> &amp;&amp; git push origin <span class="v">0.3.0</span></div>
+  <p>
+    Tag as you build. The release notes compute schema changes by diffing
+    <code>control-plane/db/schema.sql</code> against the previous tag, so an
+    untagged repository produces an empty list - and an empty list reads as
+    "nothing will happen to your database" in precisely the place somebody wants
+    the truth before letting an installer near it.
+  </p>
+  <p>
+    The script asks for the highest tag that is <i>not</i> the one being built.
+    <code>git describe</code> would answer with this release's own tag the moment
+    it exists, then diff the schema against itself and report no changes - the
+    most confident way to be wrong about a database.
+  </p>
+</section>
+
+<section id="paths">
+  <div class="sec-head"><h2>4</h2><h3>Two delivery paths</h3></div>
+  <p>
+    Software reaches a machine two ways, and they are worth telling apart because
+    only one of them involves a package.
+  </p>
+  <div class="scroll">
+  <table>
+    <thead><tr><th></th><th>Package</th><th>Self-update</th></tr></thead>
+    <tbody>
+      <tr><td>What moves</td><td>the whole install: daemon, plists, service
+        account, uninstaller</td><td>one binary</td></tr>
+      <tr><td>Triggered by</td><td><code>installer -pkg</code>, usually MDM</td>
+        <td>the control plane, when a pool's desired version changes</td></tr>
+      <tr><td>Needs signing</td><td>yes</td><td>no - it is served over mTLS to a
+        node that already trusts the fleet</td></tr>
+      <tr><td>Verified by</td><td>Gatekeeper and notarisation</td>
+        <td>sha256 recorded when the build was registered</td></tr>
+      <tr><td>Rollback</td><td>install the older package</td>
+        <td>automatic: a machine that does not report in after upgrading puts the
+          previous binary back</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>
+    In practice a fleet is installed once from the package and updated thereafter
+    by self-update. Both end at the same binary; the fingerprint in the rollout
+    view is what proves it.
+  </p>
+</section>
+
+<section id="upgrade">
+  <div class="sec-head"><h2>5</h2><h3>Upgrading a live fleet</h3></div>
+  <div class="cmd"><span class="c"># control plane: install, migrate, restart</span>
+<span class="p">$</span> sudo installer -pkg dai-control-<span class="v">0.3.0</span>.pkg -target /
+<span class="p">$</span> npm run migrate          <span class="c"># re-runnable; the installer also does it</span>
+
+<span class="c"># agents: register the build and let the pool converge</span>
+<span class="p">$</span> curl -sk -X POST .../admin/v1/agent/builds  -d '{"version":"...","path":"..."}'
+<span class="p">$</span> curl -sk -X PUT  .../admin/v1/pools/<span class="v">id</span>/agent -d '{"channel":"managed","version":"..."}'</div>
+  <p>
+    <code>schema.sql</code> is written to be re-runnable: every change is
+    <code>IF NOT EXISTS</code> or wrapped in a guard that asks before acting. That
+    is how an upgrade reaches a database that already has data in it, and it is
+    why there is no separate list of migration steps to run in order.
+  </p>
+  <div class="note">
+    <b>Read the schema section of RELEASE.md first</b>
+    <p>
+      It lists the statements, not a diffstat - <code>ALTER TABLE pools ADD
+      COLUMN enabled</code> rather than <code>schema.sql | 14 +++-</code>. The
+      first is what is about to happen to your database; the second is a fact
+      about a file.
+    </p>
+  </div>
+</section>
+
+<section id="repro">
+  <div class="sec-head"><h2>6</h2><h3>What a checksum does not prove</h3></div>
+  <p>
+    Two runs of the release script from one commit produce <b>different bytes</b>.
+    Package timestamps, staged file mtimes and a fresh compile each time are all
+    enough on their own.
+  </p>
+  <p>
+    So <code>SHA256SUMS</code> verifies that the file you have is the file that
+    was built - not that it corresponds to a particular commit. Somebody handed a
+    tag and a checksum cannot confirm they match by rebuilding. That is a real
+    gap and it is written down here rather than discovered by somebody assuming
+    otherwise; closing it means pinned mtimes, <code>SOURCE_DATE_EPOCH</code> and
+    deterministic staging order, which is a piece of work nobody has needed yet.
+  </p>
+</section>
+
+<footer>
+  <a href="OPERATIONS.html">Operations</a> for running the fleet,
+  <a href="TESTING.html">testing</a> for what the gate at step one actually
+  covers.
+</footer>
+
+</div>
+</body>
+</html>

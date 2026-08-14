@@ -264,3 +264,36 @@ struct SyncBridgeTests {
         try? await group.shutdownGracefully()
     }
 }
+
+/// What a split request says it cost.
+///
+/// A split under-reported itself: `SplitRunner` returned only the tokens it
+/// produced, so a caller reading usage saw "0 in" and could not compare a split
+/// request with a single-machine one, or bill for either.
+struct SplitUsageTests {
+    static func done(isHead: Bool, prompt: Int, produced: Int) -> SplitRunner.Completed {
+        SplitRunner.Completed(
+            outcome: SplitRunner.Outcome(text: isHead ? "hello" : "", tokens: produced,
+                                         promptTokens: prompt, promptSeconds: 0.1,
+                                         decodeSeconds: 0.2, residentGb: 4.5),
+            isHead: isHead, layers: 0..<24)
+    }
+
+    @Test("the rank holding the head reports both counts")
+    func headReportsBoth() {
+        let reported = Self.done(isHead: true, prompt: 935, produced: 205).reported
+        #expect(reported.prompt == 935)
+        #expect(reported.completion == 205)
+    }
+
+    @Test("every other rank reports nothing")
+    func othersReportNothing() {
+        // Not because their work did not happen - they ran half the layers - but
+        // because the control plane answers from rank 0. Two ranks reporting the
+        // same prompt is the shape of a bill that says a request cost twice what
+        // it did.
+        let reported = Self.done(isHead: false, prompt: 935, produced: 205).reported
+        #expect(reported.prompt == 0)
+        #expect(reported.completion == 0)
+    }
+}

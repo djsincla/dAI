@@ -1,3 +1,4 @@
+import { version } from '../lib/version.js'
 import { Router } from 'express'
 import type { GroupListeners } from '../lib/groupSockets.js'
 import type { Db } from '../lib/db.js'
@@ -87,6 +88,13 @@ export function monitorRoutes(db: Db,
     ])
 
     const out: string[] = []
+    // build_info with the version in a label and a constant 1 for the value, the
+    // convention every Prometheus scraper already knows: a version is not a
+    // number to graph, it is a label to group by, so "which machines are behind"
+    // is a query rather than an expedition.
+    out.push('# HELP dai_build_info the version of the control plane, as a label')
+    out.push('# TYPE dai_build_info gauge')
+    out.push(`dai_build_info{version="${version}"} 1`)
     const metric = (name: string, help: string, type: string,
                     samples: [string, number][]) => {
       out.push(`# HELP dai_${name} ${help}`)

@@ -34,6 +34,15 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$VERSION" ]] || { echo "missing --version" >&2; exit 2; }
+# The version has to look like a release, because the one that got through by
+# hand was 2026.08.12-5 - a date, which sorts against 0.3.1 as nonsense and told
+# an operator nothing about what it was newer than. Leading zeros are rejected
+# too, which is what distinguishes a date from a version.
+if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]; then
+  echo "not a version: $VERSION (expected MAJOR.MINOR.PATCH, optionally -suffix)" >&2
+  exit 2
+fi
+
 if [[ $UNSIGNED -eq 0 ]]; then
   [[ -n "$APP_ID" ]] || { echo "missing --app-id (or --unsigned to test locally)" >&2; exit 2; }
   if ! security find-identity -v -p codesigning | grep -qF "$APP_ID"; then

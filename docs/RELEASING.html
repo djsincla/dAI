@@ -159,6 +159,30 @@
     is how an upgrade reaches a database that already has data in it, and it is
     why there is no separate list of migration steps to run in order.
   </p>
+  <div class="note gap">
+    <b>Moving a control plane that already has a fleet</b>
+    <p>
+      Off a working tree, or onto a replacement machine: it must bring the
+      certificate authority those machines trust. Every node certificate traces
+      to it, and a new one locks all of them out at once - they would each need
+      re-enrolling by hand, with somebody at the machine, because the Secure
+      Enclave will not generate a key over ssh.
+    </p>
+    <p>
+      <code>--adopt-certs /path/to/certs</code> - the directory holding
+      <code>ca.crt</code>, <code>ca.key</code>, <code>server.crt</code>,
+      <code>server.key</code> and <code>srv-ca.crt</code>. In a working-tree
+      deployment that is <code>control-plane/certs</code>. It reads from
+      <code>control.json</code> as <code>adoptCerts</code> too, for an install
+      nobody is standing at.
+    </p>
+    <p>
+      The installer refuses to mint an authority when the database it was given
+      already holds enrolled machines. It asks before it writes anything, so a
+      refusal costs nothing.
+    </p>
+  </div>
+
   <div class="note">
     <b>Read the schema section of RELEASE.md first</b>
     <p>

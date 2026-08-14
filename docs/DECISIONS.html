@@ -322,6 +322,24 @@
   </div>
 
   <div class="entry">
+    <h4>An installer refuses to mint an authority beside an existing fleet</h4>
+    <p class="because">The dangerous branch is the one that reports success</p>
+    <p>
+      Generating a CA when none is found is right on a new machine and
+      catastrophic next to a database that already holds a fleet: every node's
+      certificate was issued by an authority that lives somewhere else.
+    </p>
+    <p class="evidence">
+      The signal is the pairing - no CA here, and nodes there. Neither half means
+      anything alone: an empty state directory is a first install and a populated
+      one is an upgrade, and the installer was looking at only one of them. It
+      now asks the database before writing anything, and offers
+      <code>--adopt-certs</code>, which is also the only path from a working-tree
+      deployment to a packaged one.
+    </p>
+  </div>
+
+  <div class="entry">
     <h4>A superseded certificate is refused, and unknown states fail closed</h4>
     <p class="because">A genuine certificate that was really issued is exactly the one nothing else stops</p>
     <p class="evidence">

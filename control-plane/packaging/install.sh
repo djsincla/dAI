@@ -13,6 +13,17 @@
 #
 #   sudo ./install.sh --config "/Library/Application Support/dAI/control.json"
 #
+# Moving a control plane that already has a fleet - off a working tree, or onto
+# a replacement machine - has to bring the certificate authority those machines
+# trust. Every node certificate traces to it, and a new one locks all of them
+# out at once:
+#
+#   sudo ./install.sh --adopt-certs /path/to/control-plane/certs --db ...
+#
+# The installer refuses to mint an authority when the database it was given
+# already holds enrolled machines, rather than succeeding and taking the fleet
+# down.
+#
 # Postgres is the one prerequisite. Bundling a database server is a much larger
 # commitment than bundling an interpreter - it owns data, it needs its own
 # upgrade story, and every platform already has a good way to install one - so
@@ -26,7 +37,7 @@ PLIST=/Library/LaunchDaemons/com.dai.control.plist
 CONFIG_DIR="/Library/Application Support/dAI"
 LABEL=com.dai.control
 
-DB=""; PORT="8452"; SVC_USER="_daictl"; CONFIG=""
+DB=""; PORT="8452"; SVC_USER="_daictl"; CONFIG=""; ADOPT=""
 AGENT_CIDRS=""; ADMIN_CIDRS=""; MONITOR_CIDRS=""; HOSTNAME_FOR_CERT=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -43,6 +54,10 @@ while [[ $# -gt 0 ]]; do
     # The name agents will use to reach this machine, which has to be in the
     # certificate or every one of them refuses the connection.
     --hostname) HOSTNAME_FOR_CERT="$2"; shift 2 ;;
+    # Bring an existing certificate authority rather than minting one. The path
+    # out of a working-tree deployment, and the answer when this machine is
+    # replacing a control plane that lived somewhere else.
+    --adopt-certs) ADOPT="$2"; shift 2 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -60,6 +75,11 @@ if [[ -n "$CONFIG" ]]; then
   if [[ -z "$ADMIN_CIDRS" ]];   then ADMIN_CIDRS="$(cfg adminCidrs)"; fi
   if [[ -z "$MONITOR_CIDRS" ]]; then MONITOR_CIDRS="$(cfg monitorCidrs)"; fi
   if [[ -z "$HOSTNAME_FOR_CERT" ]]; then HOSTNAME_FOR_CERT="$(cfg hostname)"; fi
+  # Readable from the file too, because the install that most needs it is the
+  # one nobody is standing at: an MDM replacing a control plane cannot be handed
+  # a flag, and without this its only options are to mint an authority its fleet
+  # does not trust or to refuse and wait for somebody.
+  if [[ -z "$ADOPT" ]]; then ADOPT="$(cfg adoptCerts)"; fi
 fi
 
 [[ $EUID -eq 0 ]] || { echo "must run as root: sudo $0 ..." >&2; exit 1; }
@@ -106,11 +126,42 @@ chmod 700 "$STATE_DIR/node-ca" "$STATE_DIR/certs"
 # Generated once, and never regenerated. Replacing the server certificate on an
 # established fleet means every agent that pinned the old CA stops connecting,
 # which looks exactly like the network going away.
-if [[ ! -f "$STATE_DIR/certs/srv-ca.crt" ]]; then
+#
+# Adopting is the third case, and the one that has no other path: a control
+# plane moving from a working tree, or onto a replacement machine, has to bring
+# the authority its fleet already trusts. Five files, and a partial copy is
+# worse than none - a server certificate without its CA produces a fleet that
+# cannot verify anything, discovered one node at a time.
+if [[ -n "$ADOPT" ]]; then
+  echo "==> adopting the certificate authority from $ADOPT"
+  for f in ca.crt ca.key server.crt server.key srv-ca.crt; do
+    [[ -f "$ADOPT/$f" ]] || { echo "  $ADOPT is missing $f" >&2; exit 2; }
+  done
+  cp "$ADOPT/server.crt" "$ADOPT/server.key" "$ADOPT/srv-ca.crt" "$STATE_DIR/certs/"
+  [[ -f "$ADOPT/srv-ca.key" ]] && cp "$ADOPT/srv-ca.key" "$STATE_DIR/certs/"
+  cp "$ADOPT/ca.crt" "$ADOPT/ca.key" "$STATE_DIR/node-ca/"
+  chown -R "$SVC_USER":wheel "$STATE_DIR/certs" "$STATE_DIR/node-ca"
+  chmod 600 "$STATE_DIR/certs"/*.key "$STATE_DIR/node-ca"/*.key
+elif [[ ! -f "$STATE_DIR/node-ca/ca.crt" ]]; then
+  # No authority here. Whether that is a new machine or a disaster depends on
+  # something the shell cannot see: whether the database already holds a fleet
+  # whose certificates this machine could not honour. Asked before anything is
+  # written, because the alternative is an install that succeeds and locks every
+  # machine out.
+  if ! DATABASE_URL="$DB" "$HERE/node" "$HERE/dist/preflight.js" \
+        --ca "$STATE_DIR/node-ca/ca.crt" --state-dir "$STATE_DIR"; then
+    echo >&2
+    echo "Nothing has been changed." >&2
+    exit 3
+  fi
   echo "==> generating TLS material for $HOSTNAME_FOR_CERT"
   "$HERE/make-certs.sh" --out "$STATE_DIR/certs" --host "$HOSTNAME_FOR_CERT"
-  chown -R "$SVC_USER":wheel "$STATE_DIR/certs"
+  # make-certs writes both authorities into one directory; the daemon reads the
+  # node CA from its own, so it is moved rather than referenced twice.
+  cp "$STATE_DIR/certs/ca.crt" "$STATE_DIR/certs/ca.key" "$STATE_DIR/node-ca/" 2>/dev/null || true
+  chown -R "$SVC_USER":wheel "$STATE_DIR/certs" "$STATE_DIR/node-ca"
   chmod 600 "$STATE_DIR/certs"/*.key
+  [[ -f "$STATE_DIR/node-ca/ca.key" ]] && chmod 600 "$STATE_DIR/node-ca"/*.key
 else
   echo "==> keeping the TLS material already here"
 fi

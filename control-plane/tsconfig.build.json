@@ -3,7 +3,9 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "rootDir": "src",
-    "outDir": "dist"
+    "outDir": "dist",
+    "//removeComments": "The comments in this source are the design record - the measurements, the failures, the reasoning that took a year to acquire. They belong in the repository and not in a package handed to somebody else, where they are worth more than the code they explain. Development runs from source through tsx and is unaffected.",
+    "removeComments": true
   },
   "include": ["src/**/*"],
   "exclude": ["test/**/*"]

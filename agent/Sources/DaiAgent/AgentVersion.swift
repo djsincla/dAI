@@ -19,14 +19,69 @@ import Foundation
 /// binary on disk is the one the control plane believes it deployed. A version
 /// string is a claim; this is evidence.
 public enum AgentVersion {
-    /// Set with `-DDAI_VERSION=...` at build time; falls back to a name that is
-    /// obviously not a release, so an unversioned build cannot masquerade as one.
+    /// What this build is called, from the file beside the binary.
+    ///
+    /// The file first and the environment second, because the environment lies
+    /// after a self-update. `DAI_AGENT_VERSION` is written into the plist by
+    /// install.sh and launchd hands the daemon whatever was in it when the job
+    /// was loaded - so a machine that upgraded itself four times reported the
+    /// version it was originally installed with. Both nodes on this fleet
+    /// reported 2026.08.12-5 while running the binary from 2026.08.13-7, and
+    /// only the fingerprint gave it away.
+    ///
+    /// The file is written by whoever last put a binary here: the installer
+    /// stages it, and the updater rewrites it after a successful upgrade. That
+    /// makes it the same mechanism the control plane uses, which is worth more
+    /// than either being individually clever.
+    ///
+    /// Falls back to a name that is obviously not a release, so an unversioned
+    /// build cannot masquerade as one.
     public static let version: String = {
+        if let path = versionFile,
+           let raw = try? String(contentsOfFile: path, encoding: .utf8) {
+            let v = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !v.isEmpty { return v }
+        }
         if let v = ProcessInfo.processInfo.environment["DAI_AGENT_VERSION"], !v.isEmpty {
             return v
         }
         return "dev"
     }()
+
+    /// `VERSION`, beside the executable. Nil when there is no executable path to
+    /// work from, which is the test and REPL case rather than a deployment.
+    static var versionFile: String? {
+        guard let binary = Bundle.main.executablePath ?? CommandLine.arguments.first
+        else { return nil }
+        return URL(fileURLWithPath: binary).deletingLastPathComponent()
+            .appendingPathComponent("VERSION").path
+    }
+
+    /// Record what is now installed here, called by the updater once the new
+    /// binary is in place.
+    ///
+    /// Best effort and deliberately quiet: a machine that upgraded successfully
+    /// and could not write a text file has upgraded successfully. Reporting a
+    /// stale version is a smaller problem than refusing to run, and the
+    /// fingerprint still says what is actually there.
+    @discardableResult
+    public static func record(_ version: String, at directory: URL) -> Bool {
+        let file = directory.appendingPathComponent("VERSION")
+        guard (try? Data((version + "\n").utf8).write(to: file, options: .atomic)) != nil
+        else { return false }
+
+        // Readable by the service account, explicitly rather than by whatever
+        // umask the updater inherited. Only root writes this - the agent runs as
+        // _dai and deliberately cannot write to the directory its own binary
+        // lives in, because a process that executes fleet-supplied payloads must
+        // not be able to rewrite itself. But it has to *read* it, and a file
+        // that came out 0600 would send the version quietly back to the stale
+        // environment variable this exists to replace: the same wrong answer,
+        // with the fix apparently applied.
+        try? FileManager.default.setAttributes([.posixPermissions: 0o644],
+                                               ofItemAtPath: file.path)
+        return true
+    }
 
     /// sha256 of the executable this process is running from.
     ///

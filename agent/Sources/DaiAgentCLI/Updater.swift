@@ -102,6 +102,18 @@ enum Updater {
             rollbackPath: rollbackPath,
             deadline: Date().addingTimeInterval(waitSeconds)))
 
+        // Record what is now on disk, or the machine keeps reporting the version
+        // it was originally installed with. The plist carries DAI_AGENT_VERSION
+        // and launchd hands the daemon whatever was in it when the job loaded,
+        // so a node that upgraded itself four times still named its first build
+        // - which is how both machines on this fleet came to report 2026.08.12-5
+        // while running the binary from 2026.08.13-7. Only the fingerprint said
+        // otherwise, and a fingerprint is not something anybody reads.
+        //
+        // After writePending, which captures the version being replaced.
+        AgentVersion.record(version, at: URL(fileURLWithPath: binaryPath)
+                                        .deletingLastPathComponent())
+
         reloadAgent()
     }
 
@@ -128,6 +140,11 @@ enum Updater {
                 _ = try? fm.replaceItemAt(URL(fileURLWithPath: binaryPath),
                                           withItemAt: URL(fileURLWithPath: pending.rollbackPath))
             }
+            // The version follows the binary back. A machine that rolled back
+            // and kept naming the build it rejected is worse than one that never
+            // upgraded: the fleet view would show the bad version spreading.
+            AgentVersion.record(pending.fromVersion,
+                                at: URL(fileURLWithPath: binaryPath).deletingLastPathComponent())
             clearPending()
             reloadAgent()
             // Reported after the rollback, and best effort: the control plane

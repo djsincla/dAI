@@ -1,10 +1,10 @@
 {
   "//": "The shipped build. tsconfig.json covers src and test so a typecheck sees both, which makes the package root their common ancestor and emits dist/src/... - and every runtime asset path is relative to the compiled file, so openapi/, ui/ and db/ then resolve one directory too deep. Building from src alone keeps the compiled layout identical to the source layout, which is what lets the bundle ship those directories beside dist/ with no code changes.",
+  "//removeComments": "The comments in this source are the design record - the measurements, the failures, the reasoning that took a year to acquire. They belong in the repository and not in a package handed to somebody else, where they are worth more than the code they explain. Development runs from source through tsx and is unaffected. scripts/minify-dist.sh takes out the names as well, for the build that ships.",
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "rootDir": "src",
     "outDir": "dist",
-    "//removeComments": "The comments in this source are the design record - the measurements, the failures, the reasoning that took a year to acquire. They belong in the repository and not in a package handed to somebody else, where they are worth more than the code they explain. Development runs from source through tsx and is unaffected.",
     "removeComments": true
   },
   "include": ["src/**/*"],

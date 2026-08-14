@@ -816,6 +816,45 @@ describe('what the shipped build gives away', () => {
     expect(base.compilerOptions?.removeComments).toBeUndefined()
   })
 
+  it('minifies the shipped payload, and only the shipped payload', () => {
+    // Two scripts, and the difference is the whole point. `build` is what a
+    // developer runs and stays readable. `build:packaged` is what the installer
+    // is built from.
+    const pkg = JSON.parse(readFileSync(
+      join(import.meta.dirname, '..', 'package.json'), 'utf8'))
+    expect(pkg.scripts.build).not.toContain('minify')
+    expect(pkg.scripts['build:packaged']).toContain('minify-dist.sh')
+
+    const builder = readFileSync(
+      join(import.meta.dirname, '..', 'packaging', 'build-control-pkg.sh'), 'utf8')
+    expect(builder).toContain('npm run build:packaged')
+  })
+
+  it('never bundles, because the runtime paths are relative to the compiled file', () => {
+    // server.js reads ../openapi, lib/db.js reads ../../db. Collapsing lib into
+    // server.js moves ../../db up a directory, and the failure arrives as a
+    // control plane that installs cleanly and cannot find its schema.
+    const minify = readFileSync(
+      join(import.meta.dirname, '..', 'scripts', 'minify-dist.sh'), 'utf8')
+    expect(minify).not.toMatch(/--bundle\b/)
+    // And no map beside a minified file, which would undo it for anybody looking.
+    expect(minify).toContain('--sourcemap=external')
+  })
+
+  it('keeps the maps out of the package', () => {
+    const builder = readFileSync(
+      join(import.meta.dirname, '..', 'packaging', 'build-control-pkg.sh'), 'utf8')
+    // Written to $OUT, beside the .pkg, never to $PAYLOAD which is its contents.
+    const archive = builder.split('\n').find(l => l.includes('sourcemaps.tar.gz'))
+    expect(archive).toBeDefined()
+    expect(archive).toContain('$OUT/')
+    expect(archive).not.toContain('$PAYLOAD')
+
+    const ignored = readFileSync(
+      join(import.meta.dirname, '..', '..', '.gitignore'), 'utf8')
+    expect(ignored).toContain('control-plane/.maps')
+  })
+
   it('carries a licence', () => {
     // A package with no terms leaves a recipient guessing and the author with
     // nothing to point at.

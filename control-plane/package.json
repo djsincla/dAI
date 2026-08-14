@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.build.json",
+    "build:packaged": "npm run build && ./scripts/minify-dist.sh",
     "start": "tsx src/server.ts",
     "migrate": "node dist/migrate.js",
     "test": "vitest run",
@@ -29,6 +30,7 @@
     "@types/express": "^5.0.3",
     "@types/node": "^24.6.2",
     "@types/pg": "^8.15.5",
+    "esbuild": "^0.28.1",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
     "vitest": "^3.2.4"

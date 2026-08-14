@@ -50,7 +50,10 @@ OUT="$HERE/dist"
 PAYLOAD="$STAGING/usr/local/libexec/dai-control"
 
 echo "==> building"
-(cd "$ROOT" && npm run build >/dev/null)
+# build:packaged, not build: compiled without comments and then minified, because
+# this is the tree that goes to somebody else. `npm run build` stays readable for
+# development. The maps are archived below and stay here.
+(cd "$ROOT" && npm run build:packaged >/dev/null)
 
 echo "==> collecting production dependencies"
 rm -rf "$STAGING" && mkdir -p "$PAYLOAD"
@@ -74,6 +77,17 @@ cp "$HERE/install.sh" "$HERE/uninstall.sh" "$HERE/com.dai.control.plist.in" "$PA
 cp "$ROOT/../agent/packaging/reload-daemon.sh" "$PAYLOAD/"
 cp "$ROOT/scripts/make-certs.sh" "$PAYLOAD/"
 echo "$VERSION" > "$PAYLOAD/VERSION"
+
+# The maps for the minified payload. Kept beside the package and NOT inside it:
+# a map next to a minified file undoes the minification for anybody who looks.
+# Without one, a stack trace from a customer reads `f (server.js:1:8420)` and
+# says nothing, so this is the half that has to be kept to make the other half
+# survivable. It is gitignored; archive it somewhere that outlives this checkout
+# if the build is going to a real user.
+mkdir -p "$OUT"
+if [[ -d "$ROOT/.maps" ]]; then
+  tar -czf "$OUT/dai-control-$VERSION-sourcemaps.tar.gz" -C "$ROOT" .maps
+fi
 
 # ------------------------------------------------------------------ the runtime
 #

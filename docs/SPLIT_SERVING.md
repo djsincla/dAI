@@ -1,21 +1,36 @@
 # Serving a model that fits on no single machine
 
-A plan. Step 1 is built; the rest is not.
+**Built, and running.** A request on a group's socket is answered by two
+machines holding half a model each.
 
-## Where this stands
+    rotorua  rank 0 listening on 7710
+             peer connected from 192.168.99.2
+             handshake completed                     1 second
+             rank 0 (layers 24..<48) finished 8 tokens in 4.4s
 
-The split works and is measured. `SplitRunner` does pipeline parallelism -
-layers divided, one hidden state per token across the boundary - and E7 ran a
-72B across two Macs:
+    orca     rank 1 connected to 192.168.99.1
+             handshake completed
+             rank 1 (layers 0..<24) finished 8 tokens in 4.4s
+
+Qwen2.5-14B, 48 layers divided 24/24, one hidden state per token over a
+Thunderbolt bridge, 4.5 seconds for the whole request including the model load.
+The answer came back on port 8461 - the socket `split-cluster` was allocated
+when it was created.
+
+## What the split is
+
+Pipeline parallelism: layers divided, one hidden state per token across the
+boundary. E7 measured it across two Macs before any of the fleet machinery
+existed:
 
 | Model | One machine | Split | Peak memory |
 |---|---|---|---|
 | 32B dense | 16.5 tok/s | 14.2 | 9.83 GB each |
 | 72B dense | 7.3 tok/s | 6.3 | **21.31 GB each** |
 
-Memory halves almost exactly. Throughput costs about 14% on the large dense
-models, because with one request in flight the two machines run in sequence
-rather than in parallel: the split buys capacity, not speed.
+Memory halves almost exactly. Throughput costs about 14% on large dense models,
+because with one request in flight the two machines run in sequence rather than
+in parallel: **the split buys capacity, not speed.**
 
 Not tensor parallelism, and that was measured too. It pays ~2 all-reduces per
 layer per token, which is latency-bound, and the fleet's best link is 0.48 ms
@@ -23,20 +38,53 @@ layer per token, which is latency-bound, and the fleet's best link is 0.48 ms
 conclusion inverts the intuition the name invites: Thunderbolt is a bandwidth
 upgrade and would make tensor parallelism *slower*.
 
-**What is missing is not the split.** It is everything that would let the fleet
-start one:
+## What it took to get from that to a fleet
 
-- `Worker` has no reference to `SplitRunner`. The serving loop cannot start one.
-- The control plane has no concept of a split model - not in `router.ts`, not in
-  the serving routes, not in the schema.
-- The only way to run one today is by hand, one process per machine:
-  `dai-agent split <model-dir> <rank> <size> <peer>`.
+Every step below is built and proven on hardware.
 
-`main.swift` says why, and it is the right reason:
+1. **Gang admission.** `selectGang` admits every rank together or none, from
+   cluster-tier machines in one group, preferring a group that already holds the
+   weights. A gang that loses a rank fails the request, releases every member
+   and says which machine went - and now fails as soon as the first rank reports
+   rather than waiting out a machine that has gone to sleep.
+2. **A model that declares its shape.** `machines` and `min_memory_gb` on the
+   catalogue, checked at assignment: a two-machine model assigned to a group
+   with one is refused with a sentence, not discovered at dispatch as a hang.
+3. **The serving model belongs to the group.** It reaches the machine on the
+   heartbeat it already sends, and the agent swaps its runtime to match. Before
+   that a node ran whatever argument its daemon was started with, so a group
+   could declare one model while its machines ran two others.
+4. **Suspension.** A machine holding part of a split is not available to its
+   harvest group while it holds it, because a gang cannot be preempted and
+   harvest membership is the promise that it can be.
+5. **The peer link.** mTLS between nodes, pinned to the node CA, over whatever
+   link the machines share - declared by the node, because only it knows which
+   of its interfaces its peers can reach.
 
-> Wiring this into the fleet needs gang admission, which does not exist yet, and
-> starting a pipeline without it would hand out work that hangs when one machine
-> is missing.
+## What the last mile actually was
+
+Not the handshake, which was the standing theory for a day. The Secure Enclave
+key works as a TLS server and the handshake takes about a second. Two other
+things were making it look like a protocol failure:
+
+**A leaked listener.** `runSplit` never closed its channel, so rank 0 held 7710
+for the life of the daemon. Every attempt after the first could not bind - and
+the dialer connected to the corpse of the first listener and completed a
+handshake with it. A leaked listener does not merely waste a port; it answers.
+
+**A peer that kept going away.** orca is a MacBook Pro, and a laptop sleeps on
+lid close whatever power assertions are held. The Thunderbolt bridge goes
+inactive when its peer sleeps, so the address the fleet had on record stopped
+being reachable mid-handshake.
+
+Both are handled rather than hidden now: the node reports having no pipeline
+address the moment its link goes, a gang with nowhere to dial is refused in
+milliseconds rather than attempted, a broken gang fails in seconds rather than
+ten minutes, and a link that goes quiet mid-handshake says so after ten seconds
+instead of two minutes.
+
+**A split still needs both machines awake for its duration.** That is a property
+of the hardware, not something the fleet can promise around.
 
 ## The tier split already exists for this
 
@@ -66,10 +114,10 @@ admit any node - but it means nothing in the fleet is currently gang-scheduled
 or protected from preemption, including the interactive serving that `router.ts`
 says belongs on cluster nodes.
 
-## What has to be built
+## How it was built
 
-In dependency order. The UI is last and smallest, which is the opposite of where
-the question usually starts.
+In dependency order. Kept because the order turned out to matter: each step was
+unreachable until the one before it existed.
 
 ### 1. Gang admission
 
@@ -133,9 +181,18 @@ From a lease, rather than from a person at a terminal. This is where
 has TLS, SNI handling for IP literals, ordered frame delivery and a bounded
 handshake, all of which exist because the by-hand path needed them.
 
-The one open question here is who dials whom. Today the higher rank connects to
-the lower, which the control plane would have to arrange: both machines need to
-learn their rank, their peer's address, and the model, from the same dispatch.
+Who dials whom is arranged by the control plane rather than inferred: each rank
+is told whether to listen or to dial, which port, where its peer is, and which
+model, all in the same dispatch. Nothing is derived from the rank number,
+because that kind of implicit agreement survives right up until somebody
+renumbers the ranks. A dialer with nowhere to dial is refused rather than
+started.
+
+The listening rank closes its channel when the split ends, however it ends. It
+did not at first, and the consequence was worth writing down: it held the port
+for the life of the daemon, the next split could not bind, and the dialer
+connected to the corpse of the first listener and completed a handshake with
+it.
 
 ### 5. The UI
 

@@ -224,7 +224,8 @@ public actor ControlPlane {
                                promptTokens: Int = 0,
                                completionTokens: Int = 0,
                                cachedTokens: Int = 0,
-                               toolCalls: [ToolCall] = []) async throws {
+                               toolCalls: [ToolCall] = [],
+                               layerPlan: [[Int]] = []) async throws {
         var body: [String: JSONValue] = [:]
         // A count has no text and is still a success. Reported separately so
         // the control plane is not left deciding whether an empty answer means
@@ -248,6 +249,14 @@ public actor ControlPlane {
                 "completionTokens": .number(Double(completionTokens)),
                 // Prompt tokens answered from cache rather than read again.
                 "cachedTokens": .number(Double(cachedTokens)),
+                // Which layers each machine held, sent only by the rank with
+                // the output head and only when the model was divided. Empty on
+                // every ordinary completion, and the control plane reports the
+                // block only when it is not - so a caller asking "was this
+                // really split" has an answer that no declaration could fake.
+                "layerPlan": .array(layerPlan.map { range in
+                    .array(range.map { .number(Double($0)) })
+                }),
             ])
         }
         if let error { body["error"] = .string(error) }

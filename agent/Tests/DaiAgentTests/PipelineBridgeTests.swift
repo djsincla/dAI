@@ -271,12 +271,13 @@ struct SyncBridgeTests {
 /// produced, so a caller reading usage saw "0 in" and could not compare a split
 /// request with a single-machine one, or bill for either.
 struct SplitUsageTests {
-    static func done(isHead: Bool, prompt: Int, produced: Int) -> SplitRunner.Completed {
+    static func done(isHead: Bool, prompt: Int, produced: Int,
+                     totalLayers: Int = 48, size: Int = 2) -> SplitRunner.Completed {
         SplitRunner.Completed(
             outcome: SplitRunner.Outcome(text: isHead ? "hello" : "", tokens: produced,
                                          promptTokens: prompt, promptSeconds: 0.1,
                                          decodeSeconds: 0.2, residentGb: 4.5),
-            isHead: isHead, layers: 0..<24)
+            isHead: isHead, layers: 0..<24, totalLayers: totalLayers, size: size)
     }
 
     @Test("the rank holding the head reports both counts")

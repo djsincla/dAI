@@ -35,6 +35,11 @@ public actor SplitRunner {
     public struct Outcome: Sendable {
         public let text: String
         public let tokens: Int
+        /// What the prompt cost, which every rank knows because every rank
+        /// tokenises it. Reported so a split request states its cost the same
+        /// way a single-machine one does - without it a caller reads "0 in" and
+        /// cannot compare the two, or bill for either.
+        public let promptTokens: Int
         public let promptSeconds: Double
         public let decodeSeconds: Double
         public let residentGb: Double
@@ -167,6 +172,18 @@ public actor SplitRunner {
         /// text worth reporting.
         public let isHead: Bool
         public let layers: Range<Int>
+
+        /// What this rank reports as the request's cost.
+        ///
+        /// From the head only, and both numbers together. Every rank tokenises
+        /// the same prompt so every rank knows what it cost - but the control
+        /// plane answers the request from rank 0, so a count sent by any other
+        /// rank is a number nobody reads. Sending them anyway would not be
+        /// harmless either: two ranks reporting the same prompt is the shape of
+        /// a bill that says a request cost twice what it did.
+        public var reported: (prompt: Int, completion: Int) {
+            isHead ? (outcome.promptTokens, outcome.tokens) : (0, 0)
+        }
     }
 
     /// Load and generate without handing `Loaded` across an actor boundary.
@@ -211,6 +228,7 @@ public actor SplitRunner {
             // decoding, so it returns nothing rather than nonsense.
             text: split.isLast ? loaded.tokenizer.decode(tokens: produced) : "",
             tokens: produced.count,
+            promptTokens: promptTokens.count,
             promptSeconds: firstAt.timeIntervalSince(started),
             decodeSeconds: ended.timeIntervalSince(firstAt),
             residentGb: Double(GPU.peakMemory) / 1_073_741_824)

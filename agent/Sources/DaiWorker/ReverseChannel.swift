@@ -322,7 +322,9 @@ public actor ReverseChannel {
             try await controlPlane.reportDispatch(
                 id: dispatch.id,
                 text: done.isHead ? done.outcome.text : nil,
-                error: nil, completionTokens: done.outcome.tokens)
+                error: nil,
+                promptTokens: done.reported.prompt,
+                completionTokens: done.reported.completion)
         } catch {
             // A pipeline failure already names the rank that noticed, which is
             // not always this one: rank 0 timing out and rank 1 failing to send

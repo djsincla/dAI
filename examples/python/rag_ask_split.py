@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 
 import rag_embed
 from dai_gateway import Gateway, GatewayError, provenance, text_of, who_answered
@@ -167,6 +168,13 @@ def main() -> int:
     try:
         total = gateway.count_tokens(name, messages, system=prompt)
         print(f"prompt    {total} tokens ({len(prompt)} chars of statute)")
+        # Counting is itself a request, and it is answered by one of the very
+        # machines the split needs. A group whose model runs across every
+        # machine it has holds no spare rank, so for that moment the gang cannot
+        # be formed - the counting machine is mid-request rather than parked on
+        # the channel. A second is enough for it to come back.
+        if shape["machines"] > 1:
+            time.sleep(1.0)
     except GatewayError:
         pass  # a count is a convenience; not having it should not stop the answer
 

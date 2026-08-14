@@ -87,6 +87,17 @@ cp "$ROOT/../agent/packaging/reload-daemon.sh" "$PAYLOAD/"
 cp "$ROOT/scripts/make-certs.sh" "$PAYLOAD/"
 echo "$VERSION" > "$PAYLOAD/VERSION"
 
+# ------------------------------------------------------------- the status app
+#
+# The menu bar app that says whether the control plane is up. Staged inside the
+# payload and copied to /Applications by install.sh, rather than shipped as a
+# second package: it is useless without the daemon and versioning it separately
+# would mean an operator with two things to keep in step for one machine.
+echo "==> building the status app"
+STATUS_APP="$("$ROOT/app/build-status-app.sh" "$VERSION" "${APP_ID:--}")"
+rm -rf "$PAYLOAD/dAI Control.app"
+cp -R "$STATUS_APP" "$PAYLOAD/dAI Control.app"
+
 # The maps for the minified payload. Kept beside the package and NOT inside it:
 # a map next to a minified file undoes the minification for anybody who looks.
 # Without one, a stack trace from a customer reads `f (server.js:1:8420)` and

@@ -123,10 +123,27 @@ else
   # The statements themselves rather than a diffstat. "schema.sql | 14 +++-" is
   # a fact about a file; the question being asked is what is about to happen to
   # a database that already has data in it.
+  #
+  # Split on semicolons rather than on lines, because a statement that wraps -
+  # and several here do - is a statement whose column name is on the second
+  # line. Reading line by line printed `ALTER TABLE nodes ADD COLUMN IF NOT
+  # EXISTS` and stopped, which is exactly the word somebody needed.
+  #
+  # Guarded blocks are trimmed to the statement they guard: `DO $$ BEGIN IF NOT
+  # EXISTS (SELECT 1 FROM pg_constraint...) THEN` is how the file makes itself
+  # re-runnable and is not news about anybody's database. Table bodies are
+  # dropped for the same reason - the name is the fact.
   SCHEMA_CHANGES="$(git -C "$ROOT" diff "$PREVIOUS" -- control-plane/db/schema.sql \
-      | grep -E '^\+' | grep -vE '^\+\+\+' \
-      | grep -iE 'ALTER TABLE|CREATE TABLE|CREATE INDEX|ADD CONSTRAINT|DROP ' \
-      | sed 's/^+/  /' || true)"
+      | grep -E '^\+' | grep -vE '^\+\+\+' | sed 's/^+//' \
+      | grep -vE '^[[:space:]]*--' \
+      | awk 'BEGIN { RS = ";" }
+             { line = $0
+               gsub(/[\n\t]+/, " ", line); gsub(/  +/, " ", line)
+               sub(/^ +/, "", line); sub(/ +$/, "", line)
+               sub(/^DO \$\$.*THEN +/, "", line)
+               if (line ~ /^CREATE TABLE/) sub(/ *\(.*/, "", line)
+               if (toupper(line) ~ /ALTER TABLE|CREATE TABLE|CREATE INDEX|DROP /)
+                 print "  " line ";" }' || true)"
   [[ -n "$SCHEMA_CHANGES" ]] || SCHEMA_CHANGES="(no schema changes since $PREVIOUS)"
 fi
 

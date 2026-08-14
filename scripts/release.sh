@@ -82,15 +82,49 @@ run_suite "control plane" "$ROOT/control-plane" \
 run_suite "agent" "$ROOT/agent" swift test
 echo "    both suites green"
 
-echo "==> agent package"
-(cd "$ROOT/agent/packaging" && ./build-pkg.sh --version "$VERSION" "${SIGNING[@]}" >/dev/null)
+# Kept, not discarded. The build output used to go to /dev/null, which meant a
+# release said nothing whatever about notarisation - and a step that is silent
+# when it works is a step that is silent when it stops working, discovered by
+# whoever tries to install the result.
+build_package() {
+  local what="$1" dir="$2" script="$3"
+  local log="$LOGS/${what// /-}-pkg.log"
+  echo "==> $what package"
+  if ! (cd "$dir" && "./$script" --version "$VERSION" "${SIGNING[@]}") >"$log" 2>&1; then
+    echo "    $what package failed; last of $log:" >&2
+    tail -20 "$log" >&2
+    exit 1
+  fi
+  # What Apple was asked and what it said. notarytool prints the submission id
+  # and status; the staple is what makes the ticket travel with the file, so a
+  # machine can verify it without asking Apple anything.
+  if grep -q "^ *id: " "$log"; then
+    grep -E "^ *(id|status): " "$log" | sed 's/^ */    notarisation /' | head -4
+    grep -q "staple and validate action worked" "$log" \
+      && echo "    ticket stapled" \
+      || echo "    NOT STAPLED - the package will need Apple reachable to verify" >&2
+  else
+    echo "    not notarised"
+  fi
+}
 
-echo "==> control plane package"
-(cd "$ROOT/control-plane/packaging" && ./build-control-pkg.sh --version "$VERSION" "${SIGNING[@]}" >/dev/null)
+build_package "agent" "$ROOT/agent/packaging" build-pkg.sh
+build_package "control plane" "$ROOT/control-plane/packaging" build-control-pkg.sh
+
+# Copied by name rather than by glob. `dai-control-$VERSION*.pkg` also matches
+# `dai-control-$VERSION-unsigned.pkg`, so an unsigned build left over from an
+# earlier attempt was swept into a signed release - and it did not sit there
+# quietly: the install instructions in RELEASE.md came out naming both files on
+# two lines, telling a reader to install the one Gatekeeper refuses.
+SUFFIX=""; [[ $UNSIGNED -eq 1 ]] && SUFFIX="-unsigned"
+AGENT_SRC="$ROOT/agent/packaging/dist/dai-agent-$VERSION$SUFFIX.pkg"
+CONTROL_SRC="$ROOT/control-plane/packaging/dist/dai-control-$VERSION$SUFFIX.pkg"
+for f in "$AGENT_SRC" "$CONTROL_SRC"; do
+  [[ -f "$f" ]] || { echo "the build did not produce $f" >&2; exit 1; }
+done
 
 rm -rf "$OUT" && mkdir -p "$OUT"
-cp "$ROOT"/agent/packaging/dist/dai-agent-"$VERSION"*.pkg "$OUT/"
-cp "$ROOT"/control-plane/packaging/dist/dai-control-"$VERSION"*.pkg "$OUT/"
+cp "$AGENT_SRC" "$CONTROL_SRC" "$OUT/"
 
 echo "==> checksums"
 (cd "$OUT" && shasum -a 256 ./*.pkg > SHA256SUMS)
@@ -98,8 +132,8 @@ echo "==> checksums"
 # The names as built, not as predicted. An unsigned build carries -unsigned in
 # the filename, and a note telling somebody to install a file that is not there
 # is worse than no note.
-AGENT_PKG="$(cd "$OUT" && ls dai-agent-*.pkg)"
-CONTROL_PKG="$(cd "$OUT" && ls dai-control-*.pkg)"
+AGENT_PKG="$(basename "$AGENT_SRC")"
+CONTROL_PKG="$(basename "$CONTROL_SRC")"
 
 # What changed in the schema since the last tag. An upgrade applies the whole
 # file, so this is not a list of steps to run - it is the answer to "what is

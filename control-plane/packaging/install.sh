@@ -193,10 +193,17 @@ sed -e "s|@BINARY_DIR@|$BINARY_DIR|g" \
 chown root:wheel "$PLIST"
 chmod 644 "$PLIST"
 
-# bootout first, so re-running upgrades in place rather than failing on a label
-# that is already loaded.
-launchctl bootout "system/$LABEL" 2>/dev/null || true
-launchctl bootstrap system "$PLIST"
+# Through reload-daemon.sh, which waits for the old job to actually be gone.
+#
+# `launchctl bootout` returns when the job has been asked to stop, not when it
+# has stopped, and bootstrapping into a label that still exists fails with
+# `5: Input/output error` - which says nothing about what happened and reads as
+# a broken plist. This installer did exactly that on its first real run.
+#
+# The agent's installer had already learned this. Sharing the script rather than
+# writing a second one is the point: the next person to hit it should find one
+# answer, not two that have drifted.
+"$HERE/reload-daemon.sh" system "$LABEL" "$PLIST"
 launchctl enable "system/$LABEL"
 
 echo

@@ -68,6 +68,10 @@ cp -R "$ROOT/openapi" "$PAYLOAD/openapi"
 cp -R "$ROOT/ui" "$PAYLOAD/ui"
 cp -R "$ROOT/db" "$PAYLOAD/db"
 cp "$HERE/install.sh" "$HERE/uninstall.sh" "$HERE/com.dai.control.plist.in" "$PAYLOAD/"
+# Shared with the agent's packaging rather than copied, so a fix to how a daemon
+# is reloaded reaches both installers. It is the script that knows bootout is
+# asynchronous, which is not obvious and cost a failed install to learn.
+cp "$ROOT/../agent/packaging/reload-daemon.sh" "$PAYLOAD/"
 cp "$ROOT/scripts/make-certs.sh" "$PAYLOAD/"
 echo "$VERSION" > "$PAYLOAD/VERSION"
 
@@ -145,6 +149,11 @@ else
   echo "==> notarising, which takes a few minutes"
   xcrun notarytool submit "$PKG" --keychain-profile "$NOTARY_PROFILE" --wait
   xcrun stapler staple "$PKG"
+  # Validated, not assumed. Stapling can report success and leave a package
+  # that still needs Apple reachable to verify, which is discovered by whoever
+  # installs it on a machine with no network - the exact case notarisation is
+  # supposed to solve. The agent's builder has always done this.
+  xcrun stapler validate "$PKG"
   echo
   echo "Built and notarised $PKG"
 fi

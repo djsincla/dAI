@@ -787,3 +787,42 @@ describe('the control plane package stages what its installer needs', () => {
     expect(preflight).toBeLessThan(generate)
   })
 })
+
+/**
+ * What the package hands to whoever installs it.
+ *
+ * The comments in this source are the design record - the measurements, the
+ * failures and the reasoning that took a year to acquire. They are worth more
+ * than the code they explain: the code is routing and Postgres, and anybody can
+ * write that. Shipping them in dist/ handed the expensive half away with the
+ * cheap half, in plaintext, to everyone who ran the installer.
+ *
+ * They stay in the repository, where they are doing their job.
+ */
+describe('what the shipped build gives away', () => {
+  const buildConfig = JSON.parse(
+    readFileSync(join(import.meta.dirname, '..', 'tsconfig.build.json'), 'utf8'))
+
+  it('strips comments from the compiled output', () => {
+    expect(buildConfig.compilerOptions.removeComments).toBe(true)
+  })
+
+  it('only strips them from the build, never from source', () => {
+    // Development runs from source through tsx. If this ever became a setting
+    // on the base config, the reasoning would vanish from the editor too, which
+    // is where it earns its keep.
+    const base = JSON.parse(
+      readFileSync(join(import.meta.dirname, '..', 'tsconfig.json'), 'utf8'))
+    expect(base.compilerOptions?.removeComments).toBeUndefined()
+  })
+
+  it('carries a licence', () => {
+    // A package with no terms leaves a recipient guessing and the author with
+    // nothing to point at.
+    const licence = readFileSync(
+      join(import.meta.dirname, '..', '..', 'LICENSE'), 'utf8')
+    expect(licence).toMatch(/Copyright \(c\) \d{4}/)
+    expect(JSON.parse(readFileSync(
+      join(import.meta.dirname, '..', 'package.json'), 'utf8')).license).toBeTruthy()
+  })
+})

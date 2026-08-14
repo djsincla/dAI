@@ -2,6 +2,7 @@ import express, { type Express, type NextFunction, type Request, type Response }
 import { BoundListeners, type GroupListeners } from './lib/groupSockets.js'
 import * as OpenApiValidator from 'express-openapi-validator'
 import { parse as parseYaml } from 'yaml'
+import { version } from './lib/version.js'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -108,7 +109,10 @@ export function createApp(db: Db, surface: Surface = 'both',
   // memory by claiming to have rendered a very large frame.
   app.use(express.raw({ type: 'application/octet-stream', limit: '256mb' }))
 
-  app.get('/healthz', (_req, res) => { res.json({ ok: true, surface }) })
+  // version, because this is the endpoint somebody curls when they want to know
+  // what is running, and until it was here the answer needed ssh and a guess at
+  // which directory the daemon was started from.
+  app.get('/healthz', (_req, res) => { res.json({ ok: true, surface, version }) })
 
   // The control node serves the contract. Agents and generated clients fetch it
   // from the authority rather than carrying a copy that can drift, and the

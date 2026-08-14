@@ -38,6 +38,10 @@ export type RefusalReason =
   | 'node-unreachable'
   | 'gang-short'
   | 'gang-not-cluster'
+  // The model runs across machines and no group has been set up to serve it.
+  // Distinct from having no capacity: there is nothing wrong with the fleet,
+  // and what is missing is a decision rather than a machine.
+  | 'not-offered'
 
 export interface Refusal {
   refused: RefusalReason

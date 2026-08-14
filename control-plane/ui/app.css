@@ -732,3 +732,10 @@ th.sortable.desc::after { content: ' \2193'; opacity: 1; color: var(--accent); }
 
 /* The one control on a group card that cannot be undone. */
 .link.danger { color: var(--bad, #d9534f); }
+
+/* A model that runs across machines, in a list where everything else is one. */
+.split-badge {
+  font-size: 11px;
+  color: var(--warn, #b8860b);
+  letter-spacing: .04em;
+}

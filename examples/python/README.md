@@ -18,6 +18,7 @@ rag_index.py        chunk it, embed it, write the store
 rag_store.py        the vector store: one SQLite file
 rag_embed.py        text to vectors, and why it happens locally
 rag_ask.py          ask a question, answer with citations
+rag_ask_split.py    the same question, answered by two machines at once
 ```
 
 ## Before anything

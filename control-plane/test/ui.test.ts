@@ -10,7 +10,7 @@ import {
   TIERS, describeTier, inBothTiers, tierMachines, tiersAfter, tiersOf,
   attentionItems, capacityOf, copyState, distributionOf, humanBytes, importCost,
   bucketFor, certificateStanding, clampWindow, effectiveModelFor, groupMismatches,
-  suspensionNote, describeWindow, groupMachines,
+  splitNote, suspensionNote, describeWindow, groupMachines,
   groupMode, groupWarning, importProgress, isStale, isSynthetic, kindsFor,
   machinesThatCouldHold, matchesQuery, MAX_WINDOW_S, MIN_WINDOW_S, nextSort,
   pauseAction, progressOf, runsGpu, servingFor, sortRows, windowFromDrag,
@@ -1079,5 +1079,23 @@ describe('what the fleet view says about the model a machine runs', () => {
   it('says nothing about a machine whose groups have named nothing', () => {
     expect(effectiveModelFor(machine('rotorua', []), [g('overnight', 'harvest', null)]))
       .toBe(null)
+  })
+})
+
+describe('how wide a model is, said where it is named', () => {
+  it('marks a model that runs across machines', () => {
+    // A repository path says nothing about this, and serving it engages two
+    // machines, needs a group set up for it, and takes those machines out of
+    // harvesting while it stands.
+    expect(splitNote(2)).toBe('2 machines')
+    expect(splitNote(5)).toBe('5 machines')
+  })
+
+  it('says nothing about the ordinary case', () => {
+    // The point is that split models stand out. A list decorated with
+    // "1 machine" on every row hides them again.
+    expect(splitNote(1)).toBe('')
+    expect(splitNote(null)).toBe('')
+    expect(splitNote(undefined)).toBe('')
   })
 })

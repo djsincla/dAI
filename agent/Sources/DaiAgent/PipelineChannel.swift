@@ -47,6 +47,13 @@ public actor PipelineChannel {
     /// it, so returning it only after a peer arrived was a deadlock written into
     /// the signature.
     private var connected: EventLoopFuture<Channel>?
+    /// The same wait, still writable, so closing can end it.
+    ///
+    /// A listener whose peer never arrived would otherwise hold `close()` for
+    /// the whole accept timeout - a minute, during which the port it is trying
+    /// to give back is still bound and the next split on this machine cannot
+    /// listen at all.
+    private var accepting: EventLoopPromise<Channel>?
     private var bound: Channel?
     private var inbox: FrameInbox
     /// Where this link says what happened to it.
@@ -128,6 +135,7 @@ public actor PipelineChannel {
 
         let server = try await bootstrap.bind(host: "0.0.0.0", port: port).get()
         self.bound = server
+        self.accepting = accepted
 
         // A peer that never arrives must not leave a job holding a machine open
         // indefinitely.
@@ -287,6 +295,11 @@ public actor PipelineChannel {
     }
 
     public func close() async {
+        // Ended rather than waited out. Succeeding does nothing if a peer
+        // already arrived, and if none did this is the difference between
+        // giving the port back now and giving it back in a minute.
+        accepting?.fail(Failure.peerClosed)
+        accepting = nil
         if let connected, let channel = try? await connected.get() {
             try? await channel.close().get()
         }

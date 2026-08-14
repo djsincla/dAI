@@ -260,6 +260,31 @@ struct PipelineChannelSocketTests {
         try? await group.shutdownGracefully()
     }
 
+    @Test("closing a link gives the port back")
+    func closeReleasesThePort() async throws {
+        // A split that ends has to release its socket, and this is the test for
+        // the failure that taught us: one attempt left its listener bound for
+        // the life of the daemon, the next could not bind at all, and the peer
+        // connected to the corpse of the first and completed a handshake with
+        // it. A leaked listener does not merely waste a port - it answers.
+        let fx = try fixture()
+        defer { try? FileManager.default.removeItem(at: fx.dir) }
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
+
+        let first = PipelineChannel(group: group)
+        let port = try await first.listen(port: 0, tls: fx.serverContext)
+        await first.close()
+
+        // The same port, immediately, which is what a second split on this
+        // machine asks for.
+        let second = PipelineChannel(group: group)
+        let again = try await second.listen(port: port, tls: fx.serverContext)
+        #expect(again == port)
+
+        await second.close()
+        try? await group.shutdownGracefully()
+    }
+
     @Test("several tensors in flight keep their order")
     func ordered() async throws {
         // A pipeline sends one per token and the receiver consumes them in

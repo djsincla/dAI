@@ -81,6 +81,9 @@ public actor SplitRunner {
         public let model: any LanguageModel
         public let tokenizer: Tokenizer
         public let split: PipelineSplit
+        /// Layers in the whole model, before it was divided. `split` describes
+        /// this machine's share and cannot answer "share of what".
+        public let totalLayers: Int
     }
 
     public func load(directory: URL) async throws -> Loaded {
@@ -131,7 +134,8 @@ public actor SplitRunner {
 
         let tokenizer = try await loadTokenizer(
             configuration: ModelConfiguration(directory: directory), hub: HubApi())
-        return Loaded(model: model, tokenizer: tokenizer, split: split)
+        return Loaded(model: model, tokenizer: tokenizer, split: split,
+                      totalLayers: layerCount)
     }
 
     /// The model configuration as this machine should see it.
@@ -172,6 +176,35 @@ public actor SplitRunner {
         /// text worth reporting.
         public let isHead: Bool
         public let layers: Range<Int>
+        /// Layers in the whole model, before it was divided.
+        ///
+        /// Kept so the head can describe the division rather than only its own
+        /// share of it. A rank that reports `0..<24` says nothing about whether
+        /// anything else exists; `0..<24` of 48 says the model was halved.
+        public let totalLayers: Int
+        /// How many machines the model was divided across.
+        public let size: Int
+
+        /// Every rank's layer range, derived rather than collected.
+        ///
+        /// Only the head sends this, and it sends the whole plan. Each rank
+        /// knows its own range, but they report independently and the control
+        /// plane answers the caller the moment the head replies - so gathering
+        /// ranges from the others would race a response that has already gone
+        /// out. The head knows the total and the gang size, so it can rebuild
+        /// every range with the same accumulator each rank used to find its own.
+        ///
+        /// PipelineSplit, not arithmetic repeated here. Boundaries accumulate
+        /// rather than multiply - 80 layers over 3 machines gives 27, 27 and 26,
+        /// and the obvious formula leaves layer 26 owned by nobody - and a
+        /// second implementation of that is a second chance to get it wrong.
+        public var layerPlan: [[Int]] {
+            guard isHead, size > 1 else { return [] }
+            return (0 ..< size).map { rank in
+                let s = PipelineSplit(rank: rank, size: size, layerCount: totalLayers)
+                return [s.startIndex, s.endIndex]
+            }
+        }
 
         /// What this rank reports as the request's cost.
         ///
@@ -198,7 +231,8 @@ public actor SplitRunner {
         let loaded = try await load(directory: directory)
         let outcome = try generate(loaded, prompt: prompt, maxTokens: maxTokens)
         return Completed(outcome: outcome, isHead: loaded.split.isLast,
-                         layers: loaded.split.startIndex ..< loaded.split.endIndex)
+                         layers: loaded.split.startIndex ..< loaded.split.endIndex,
+                         totalLayers: loaded.totalLayers, size: loaded.split.size)
     }
 
     public func generate(_ loaded: Loaded, prompt: String, maxTokens: Int) throws -> Outcome {

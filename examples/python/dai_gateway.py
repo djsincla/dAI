@@ -328,6 +328,22 @@ def provenance(gateway: "Gateway", completion: dict) -> str:
     if prompt_tokens is not None:
         lines.append(f"  tokens     {prompt_tokens} in, {completion_tokens} out"
                      " (counted by the answering node)")
+    split = extra.get("split")
+    if split:
+        # The difference between a claim and evidence. /v1/models says what an
+        # operator declared this model needs; this says which machines were sent
+        # the request and, when the head reports them, which layers each one
+        # held. A machine cannot appear here without having done the work.
+        lines.append(f"  split      across {split['machines']} machines")
+        for rank in split.get("ranks", []):
+            where = rank.get("layers")
+            layers = f"layers {where[0]}..<{where[1]}" if where else "layers not reported"
+            lines.append(f"             rank {rank['rank']}  {rank['hostname']:12}"
+                         f" {layers}  ({rank['role']})")
+        if not split.get("layersReported"):
+            # Distinguished from "not split", because the machine that cannot
+            # say is the one running an agent old enough to need upgrading.
+            lines.append("             this agent is too old to report layer ranges")
     if extra.get("cappedByPolicy"):
         lines.append(f"  capped     to {extra.get('maxTokensApplied')} tokens by that"
                      " machine's presence policy")

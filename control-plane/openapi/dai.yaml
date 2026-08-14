@@ -3349,6 +3349,60 @@ components:
             seconds: { type: number }
             maxTokensApplied: { type: integer }
             cappedByPolicy: { type: boolean }
+            split:
+              $ref: '#/components/schemas/SplitReport'
+
+    SplitReport:
+      type: object
+      description: |
+        Evidence that this completion was served by more than one machine.
+
+        Present only when the model was divided; absent entirely on an ordinary
+        completion, so a caller writing `if (dai.split)` reads both correctly
+        without every single-machine answer carrying a field denying it.
+
+        Distinct from the `dai` block on /v1/models, which reports what an
+        operator declared. A declaration can be wrong - this fleet ran for a day
+        with a group declaring it served a 14B while its machines held a 32B and
+        a 30B. This names the machines the request was actually dispatched to,
+        and a machine cannot appear here without having been sent the work.
+      required: [machines, ranks, layersReported]
+      properties:
+        machines:
+          type: integer
+          description: How many machines served this one request.
+        layersReported:
+          type: boolean
+          description: |
+            Whether the layer ranges below are present. Stated rather than left
+            to be inferred from a missing field: an agent older than the release
+            that began reporting them cannot say, which is worth telling apart
+            from a split that did not happen.
+        ranks:
+          type: array
+          items:
+            type: object
+            required: [hostname, rank, role]
+            properties:
+              hostname: { type: string }
+              rank:
+                type: integer
+                description: |
+                  Numbered in reverse. Rank 0 holds the last layers and the
+                  output head, and is the machine that answers.
+              role:
+                type: string
+                enum: ['output head', 'feeds the next rank']
+              layers:
+                type: array
+                description: |
+                  `[start, end)` of the layers this machine held. The part that
+                  proves division actually happened - two hostnames prove two
+                  machines were sent work, where 0..<24 beside 24..<48 proves
+                  neither held the whole model.
+                minItems: 2
+                maxItems: 2
+                items: { type: integer }
 
     Policy:
       type: object

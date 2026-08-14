@@ -7,6 +7,7 @@ import { candidatesFor, isRefusal, selectGang, selectNode,
          type Candidate, type Refusal } from '../lib/router.js'
 import { shapeOf } from '../lib/shape.js'
 import { membersOf } from '../lib/pools.js'
+import { splitReport } from '../lib/splitReport.js'
 
 /**
  * OpenAI-compatible serving surface.
@@ -356,7 +357,14 @@ export function servingRoutes(db: Db, broker: Broker): Router {
       return
     }
 
-    const result = out.body as { text: string; promptTokens: number; completionTokens: number }
+    const result = out.body as {
+      text: string; promptTokens: number; completionTokens: number; layerPlan?: unknown
+    }
+    // The gang was known at dispatch and thrown away here until now. Reporting
+    // it is what turns "the catalogue says this model is split" into "these
+    // machines served this request".
+    const split = splitReport(
+      gang && 'members' in gang ? gang.members : null, result.layerPlan)
     res.json({
       id: `chatcmpl-${started}`,
       object: 'chat.completion',
@@ -381,6 +389,10 @@ export function servingRoutes(db: Db, broker: Broker): Router {
         seconds: Math.round((Date.now() - started) / 10) / 100,
         maxTokensApplied: maxTokens,
         cappedByPolicy: maxTokens < requested,
+        // Absent entirely on a single-machine completion, so `if (dai.split)`
+        // reads correctly rather than needing a `split: false` on every answer
+        // this fleet has ever served.
+        ...(split ? { split } : {}),
       },
     })
   })
@@ -660,7 +672,10 @@ export function servingRoutes(db: Db, broker: Broker): Router {
       text: string; promptTokens?: number; completionTokens?: number
       cachedTokens?: number
       toolCalls?: { name: string; arguments: unknown }[]
+      layerPlan?: unknown
     }
+    const split = splitReport(
+      gang && 'members' in gang ? gang.members : null, result.layerPlan)
 
 
     // Split the way the API this imitates splits it: every prompt token lands
@@ -848,6 +863,7 @@ export function servingRoutes(db: Db, broker: Broker): Router {
         seconds: Math.round((Date.now() - started) / 10) / 100,
         maxTokensApplied: maxTokens,
         cappedByPolicy: maxTokens < requested,
+        ...(split ? { split } : {}),
       },
     })
   })

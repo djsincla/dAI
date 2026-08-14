@@ -324,7 +324,14 @@ public actor ReverseChannel {
                 text: done.isHead ? done.outcome.text : nil,
                 error: nil,
                 promptTokens: done.reported.prompt,
-                completionTokens: done.reported.completion)
+                completionTokens: done.reported.completion,
+                // Empty on every rank but the head, which is where the control
+                // plane assembles the caller's answer. It is the evidence that
+                // the model was divided rather than the declaration that it
+                // should be: two hostnames prove two machines were sent work,
+                // where 0..<24 beside 24..<48 proves neither held the whole
+                // model.
+                layerPlan: done.layerPlan)
         } catch {
             // A pipeline failure already names the rank that noticed, which is
             // not always this one: rank 0 timing out and rank 1 failing to send

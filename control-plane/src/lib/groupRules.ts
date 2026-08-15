@@ -32,10 +32,23 @@ export interface Group extends PoolSpec {
    * Whether this group asserts anything at all.
    *
    * A disabled group keeps its machines, its model and its socket, and acts on
-   * none of them. Absent means enabled, so a caller that has not been taught
-   * about this yet behaves as it always did.
+   * none of them.
+   *
+   * Required, and it was optional. Optional meant a construction site that
+   * forgot the field got "enabled" by default, silently, with nothing to
+   * compile against - and two of them did forget. A disabled group went on
+   * counting toward one-group-per-tier, so changing a group's model was refused
+   * for conflicting with a group that had been stood down precisely to stop it
+   * conflicting. The refusal named a rule nobody could satisfy without deleting
+   * something they meant to keep.
+   *
+   * The original reasoning was that absent should mean enabled so callers not
+   * yet taught about disabling would behave as they always had. They did not:
+   * they behaved as though nothing was ever disabled, which is a different
+   * thing and was wrong from the moment the feature landed. A required field
+   * turns that into a compile error at every site at once.
    */
-  enabled?: boolean
+  enabled: boolean
 }
 
 /** Groups that are asserting something. The rest are configuration at rest. */

@@ -25,6 +25,10 @@ const group = (name: string, over: Partial<Group> = {}): Group => ({
   tier: 'harvest',
   membership: {},
   servingModelId: null,
+  // A group in a test is a live one unless the test says otherwise, which is
+  // what nearly every case here is about. The default lives in one place so
+  // `enabled` being required does not mean writing it forty times.
+  enabled: true,
   ...over,
 })
 
@@ -172,5 +176,47 @@ describe('reading which groups a machine is in', () => {
     ])
     expect(byTier.get('harvest')?.map((g) => g.name)).toEqual(['overnight'])
     expect(byTier.get('cluster')?.map((g) => g.name)).toEqual(['serving'])
+  })
+})
+
+/**
+ * A group that was stood down still counted.
+ *
+ * Changing a group's model was refused because its machines were "in 2 harvest
+ * groups" - one of which had been disabled precisely so it would stop
+ * conflicting. The rule was right and had been fixed to ignore disabled groups;
+ * two call sites selected `enabled` from the database and then dropped it when
+ * building the objects to validate. `enabled` was optional, absent meant
+ * enabled, and nothing could be compiled against.
+ */
+describe('a disabled group is not a group a machine is in', () => {
+  const node = { id: 'n1', hostname: 'orca', tier: 'harvest',
+                 chip: 'Apple M4 Pro', memory_gb: 48 }
+
+  it('does not count a stood-down group toward one-group-per-tier', () => {
+    const broken = violations([node] as never, [
+      group('Cluster', { tier: 'harvest', enabled: true }),
+      group('overnight-harvest', { tier: 'harvest', enabled: false }),
+    ])
+    expect(broken).toEqual([])
+  })
+
+  it('still catches two live groups in one tier', () => {
+    // The rule has to keep working, or this fix has quietly disabled it.
+    const broken = violations([node] as never, [
+      group('Cluster', { tier: 'harvest', enabled: true }),
+      group('overnight-harvest', { tier: 'harvest', enabled: true }),
+    ])
+    expect(broken).toHaveLength(1)
+    expect(broken[0]!.rule).toBe('one-group-per-tier')
+  })
+
+  it('a machine may be in one group of each tier', () => {
+    const both = { ...node, tier: 'cluster' }
+    const broken = violations([both] as never, [
+      group('Cluster', { tier: 'harvest', enabled: true }),
+      group('split-cluster', { tier: 'cluster', enabled: true }),
+    ])
+    expect(broken).toEqual([])
   })
 })

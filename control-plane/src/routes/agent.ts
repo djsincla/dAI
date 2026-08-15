@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import type { Db } from '../lib/db.js'
 import { agentAuth } from '../lib/auth.js'
 import { poolsFor } from '../lib/pools.js'
-import { effectiveModel } from '../lib/groupRules.js'
+import { effectiveServing } from '../lib/groupRules.js'
 import { repositoryRoot, safePath } from '../lib/repository.js'
 import { outputsRoot, sceneById, scenesRoot } from '../lib/scenes.js'
 import { blobPath, finishIfDone, manifestFor, outputPath } from '../lib/attachments.js'
@@ -490,7 +490,7 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
     const { rows: pools } = await db.query(
       `SELECT id, name, tier, membership, serving_model_id FROM pools
         WHERE serving_model_id IS NOT NULL AND enabled`)
-    const servingModel = effectiveModel(node as never, (pools as any[]).map((p) => ({
+    const serving = effectiveServing(node as never, (pools as any[]).map((p) => ({
       ...p, servingModelId: p.serving_model_id as string,
     })) as never)
 
@@ -499,7 +499,19 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
       // Null means nobody has said, which the node treats as "keep what you
       // have" rather than "stop serving": a group that has not been given a
       // model is not an instruction to unload one.
-      servingModel,
+      servingModel: serving.model,
+      // Whether to hold it in memory rather than loading on the next request.
+      //
+      // Intent, not tier. The node never learns which groups it is in - that
+      // keeps the shape of the fleet out of a credential living on somebody's
+      // workstation - and "hold this loaded" is an instruction it can follow
+      // without knowing why it was given.
+      //
+      // True for a cluster group, because a split cannot start until every rank
+      // has built its share: a cold gang pays the slowest machine's load before
+      // the first token, and pays it again whenever the group falls idle. False
+      // for harvest, where the machine belongs to whoever is sitting at it.
+      keepLoaded: serving.keepLoaded,
     })
   })
 

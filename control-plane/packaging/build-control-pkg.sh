@@ -187,7 +187,39 @@ mkdir -p "$OUT"
 PKG="$OUT/dai-control-$VERSION.pkg"
 if [[ $UNSIGNED -eq 1 ]]; then PKG="$OUT/dai-control-$VERSION-unsigned.pkg"; SKIP_NOTARY=1; fi
 
+# --component-plist, or the .app in the payload is installed somewhere else
+# entirely.
+#
+# pkgbuild treats a nested .app as a relocatable component: it writes a
+# <relocate> entry naming the bundle id, and at install time the installer asks
+# Spotlight where that id already lives and puts the new copy THERE, ignoring
+# the payload path. Having once run the app out of the build directory, the
+# installer found it by id and wrote a root-owned bundle back into
+# control-plane/app/.build - which then broke the next build with a wall of
+# "Permission denied", and left the daemon's own directory without the app that
+# was supposed to be beside it.
+#
+# The failure is silent from the installer's side. It reports success, because
+# from its point of view it did exactly what the package asked for.
+COMPONENTS="$STAGING/../components.plist"
+pkgbuild --analyze --root "$STAGING" "$COMPONENTS" >/dev/null
+# Every bundle, not only the one we know about. A component added later would
+# otherwise inherit the default and relocate itself somewhere surprising.
+/usr/libexec/PlistBuddy -c "Print" "$COMPONENTS" >/dev/null 2>&1 && \
+python3 - "$COMPONENTS" <<'RELOC'
+import plistlib, sys
+path = sys.argv[1]
+with open(path, 'rb') as f:
+    components = plistlib.load(f)
+for c in components:
+    c['BundleIsRelocatable'] = False
+with open(path, 'wb') as f:
+    plistlib.dump(components, f)
+print(f"  {len(components)} bundle component(s) pinned to their payload path")
+RELOC
+
 pkgbuild --root "$STAGING" \
+         --component-plist "$COMPONENTS" \
          --identifier com.dai.control \
          --version "$VERSION" \
          --install-location / \
@@ -206,9 +238,7 @@ else
 fi
 
 if [[ $SKIP_NOTARY -eq 1 || -z "$NOTARY_PROFILE" ]]; then
-  echo
-  echo "Built $PKG (NOT notarised)."
-  echo "Gatekeeper will refuse this on any machine other than one where it was built."
+  :
 else
   echo "==> notarising, which takes a few minutes"
   xcrun notarytool submit "$PKG" --keychain-profile "$NOTARY_PROFILE" --wait
@@ -218,6 +248,22 @@ else
   # installs it on a machine with no network - the exact case notarisation is
   # supposed to solve. The agent's builder has always done this.
   xcrun stapler validate "$PKG"
-  echo
+  NOTARISED=1
+fi
+
+# Taken apart and checked, not trusted - and on both paths, because an unsigned
+# build exists to find out whether the build works and is the cheapest place to
+# learn that it does not. Every packaging fault here has been invisible to the
+# build that produced it and obvious in the artifact a moment later: a node that
+# could not execute, an app the installer would write somewhere else entirely,
+# comments nobody meant to ship.
+echo
+"$HERE/verify-pkg.sh" "$PKG"
+echo
+
+if [[ ${NOTARISED:-0} -eq 1 ]]; then
   echo "Built and notarised $PKG"
+else
+  echo "Built $PKG (NOT notarised)."
+  echo "Gatekeeper will refuse this on any machine other than one where it was built."
 fi

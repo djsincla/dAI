@@ -888,6 +888,52 @@ describe('what the shipped build gives away', () => {
     expect(gate.slice(i, i + 4).join('\n')).toContain('exit 1')
   })
 
+  it('takes the built package apart before calling it built', () => {
+    // The lesson of every packaging fault here: they are invisible in the source
+    // and obvious in the artifact. A signed node that could not execute, an .app
+    // pkgbuild marked relocatable so the installer wrote it into a build
+    // directory it found through Spotlight, comments shipped in dist/. No test
+    // of this repository could see any of them, because none of them are
+    // properties of this repository - they are properties of a file the build
+    // produced.
+    const builder = readFileSync(
+      join(import.meta.dirname, '..', 'packaging', 'build-control-pkg.sh'), 'utf8')
+    expect(builder).toContain('verify-pkg.sh')
+
+    // On both paths. An unsigned build exists to find out whether the build
+    // works, which makes it the cheapest possible place to learn that it does
+    // not - and the easiest place to skip the check by accident.
+    const lines = builder.split('\n')
+    const call = lines.findIndex((l) => l.includes('verify-pkg.sh" "$PKG"'))
+    const branch = lines.findIndex((l) => l.includes('SKIP_NOTARY -eq 1'))
+    expect(call).toBeGreaterThan(branch)
+    expect(lines.slice(branch, call).filter((l) => l.trim() === 'fi').length)
+      .toBeGreaterThan(0)
+  })
+
+  it('pins bundles to the path the payload names', () => {
+    // pkgbuild marks a nested .app relocatable by default. The installer then
+    // asks Spotlight where that bundle id already lives and writes THERE,
+    // reporting success - so the daemon got no status app and a root-owned
+    // bundle appeared in the build directory, which broke the following build
+    // with permission errors on files the builder owned.
+    const builder = readFileSync(
+      join(import.meta.dirname, '..', 'packaging', 'build-control-pkg.sh'), 'utf8')
+    expect(builder).toContain('--component-plist')
+    expect(builder).toContain('BundleIsRelocatable')
+  })
+
+  it('checks the runtime by running it, not by asking codesign', () => {
+    const verify = readFileSync(
+      join(import.meta.dirname, '..', 'packaging', 'verify-pkg.sh'), 'utf8')
+    // The three artifact properties that have actually broken an install.
+    expect(verify).toContain('new Function')       // node can compile
+    expect(verify).toContain('<relocate>')         // nothing will be moved
+    expect(verify).toContain("'*.map'")            // no maps inside the package
+    // and it has to fail the build, not warn
+    expect(verify).toContain('exit 1')
+  })
+
   it('carries a licence', () => {
     // A package with no terms leaves a recipient guessing and the author with
     // nothing to point at.

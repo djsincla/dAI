@@ -395,4 +395,17 @@ def pick_model(gateway: Gateway, preferred: str | None = None) -> str:
         for name in available:
             if preferred.lower() in name.lower():
                 return name
+        # Asked for by name and not here: say so, rather than answering with a
+        # different model.
+        #
+        # Falling through to available[0] meant `--model Qwen3-30B` was served
+        # by a 32B, and the only sign was a line further down the output that
+        # nobody reads when the answer looks fine. A run that quietly used
+        # something other than what was asked for is worse than one that failed:
+        # the numbers get compared, written down, and are about the wrong model.
+        raise GatewayError(0, None,
+            f"no model here matches {preferred!r}.\n"
+            "  being served: " + (", ".join(available) or "(none)") + "\n"
+            "  A model is served by a group, so check that a group is enabled\n"
+            "  and serving the one you want.")
     return available[0]

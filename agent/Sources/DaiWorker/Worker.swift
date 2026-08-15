@@ -58,6 +58,12 @@ public actor Worker {
     /// what it serves. A runtime is bound to one model at construction, so
     /// switching means a new one - and both loops have to be handed it.
     private var gpu: MLXRuntime?
+    /// The runtime this machine was started with, from its own configuration.
+    ///
+    /// Kept so a machine can tell a model it adopted from a group apart from the
+    /// one it was configured to run. Without that it cannot answer "is what I am
+    /// holding mine", and every `nil` from the control plane looks the same.
+    private let configuredGPU: MLXRuntime?
     private let ane: ANERuntime?
 
     private var policy: [PresenceState: StatePolicy] = defaultPolicy
@@ -159,6 +165,7 @@ public actor Worker {
         self.monitor = PresenceMonitor(promoteAfter: promoteAfter)
         self.pauseSwitch = pauseSwitch
         self.gpu = gpu
+        self.configuredGPU = gpu
         self.ane = ane
     }
 
@@ -390,26 +397,83 @@ public actor Worker {
     ///
     /// The old model's weights are released. Two runtimes holding two models is
     /// how a machine with 64GB ends up unable to load either.
+    /// What a machine should do about the model it is holding.
+    ///
+    /// Three answers, where there used to be two, because `nil` meant two
+    /// different things and only one of them was handled.
+    ///
+    /// **Nobody has said** is a group that has not been given a model yet, or a
+    /// machine configured with one in its plist and left alone. Keep what you
+    /// have: a group with no opinion is not an instruction to unload.
+    ///
+    /// **Handed back** is a machine that adopted a group's model and is no
+    /// longer claimed by any enabled group - the case after a split tier is
+    /// stood down. Both arrive as `nil`, and treating them alike left orca
+    /// holding half a 32B for a group that no longer existed: 9.45 GB spent on
+    /// somebody's workstation for a model no socket would route to, while every
+    /// request went to the other machine.
+    ///
+    /// The distinction is whether the model being held is this machine's own or
+    /// one it adopted. A machine can always answer that without being told.
+    enum ServingDirective: Equatable {
+        case keep
+        case adopt(String)
+        /// Let go of an adopted model and fall back to what this machine was
+        /// configured to run. Not "unload and hold nothing": constructing a
+        /// runtime allocates nothing and loading happens on the next request, so
+        /// this releases the memory now and costs nothing until it is wanted.
+        case release
+    }
+
+    static func directive(wanted: String?, current: String,
+                          configured: String?) -> ServingDirective {
+        if let wanted, !wanted.isEmpty {
+            return wanted == current ? .keep : .adopt(wanted)
+        }
+        // Nobody is naming a model. Only meaningful if this machine is holding
+        // something that was not its own.
+        guard let configured, configured != current else { return .keep }
+        return .release
+    }
+
     private func adoptServingModel(_ wanted: String?) async {
-        // Nil is "nobody has said", not "serve nothing". A group without a
-        // model is not an instruction to unload one.
-        guard let wanted, !wanted.isEmpty else { return }
         // Only a machine that already runs one. Starting a runtime on a node
         // that was configured without a GPU model is a different decision, made
         // where the runtimes are built and where whether MLX works at all is
         // known.
         guard let current = gpu else { return }
-        guard await current.name != wanted else { return }
+        let running = await current.name
 
-        log("group serves \(wanted); this machine is running \(await current.name)")
-        if await current.isLoaded { _ = await current.unload() }
-        let replacement = MLXRuntime(modelId: wanted)
+        let replacement: MLXRuntime
+        let adopted: String
+        switch Self.directive(wanted: wanted, current: running,
+                              configured: await configuredGPU?.name) {
+        case .keep:
+            return
+        case .adopt(let model):
+            log("group serves \(model); this machine is running \(running)")
+            if await current.isLoaded { _ = await current.unload() }
+            replacement = MLXRuntime(modelId: model)
+            adopted = model
+        case .release:
+            // The group that asked for this is gone. Give the memory back now
+            // rather than holding it until something else happens to want it -
+            // the socket already told the caller these machines were handed
+            // back, and that has to be true of the workstation as well as the
+            // scheduler.
+            guard let configured = configuredGPU else { return }
+            log("no group serves this machine; releasing \(running) and returning to "
+                + "\(await configured.name)")
+            if await current.isLoaded { _ = await current.unload() }
+            replacement = configured
+            adopted = await configured.name
+        }
         gpu = replacement
         // The name travels with the runtime rather than being asked of it: the
         // receiving loop is a different actor, and awaiting the new runtime just
         // to log its name would be a hop for a string we already have.
-        await onServingModelChanged?(replacement, wanted)
-        log("now serving \(wanted)")
+        await onServingModelChanged?(replacement, adopted)
+        log("now serving \(adopted)")
     }
 
     private func renewIfDue() async {

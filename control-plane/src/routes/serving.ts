@@ -49,6 +49,26 @@ async function servableModels(db: Db, broker: Broker, groupId?: string | null) {
       .map((m) => [m.id, Math.max(1, Number(m.machines ?? 1))]))
 
     const scope = groupId ? await membersOf(db, groupId) : null
+
+    // A split model belongs to the group an operator assigned it to, and to no
+    // other socket.
+    //
+    // The weights stay on the machines after a split group is stood down, so a
+    // harvest group sharing those machines went on advertising a model it can
+    // never run: the catalogue said the 32B was available on :8463, and every
+    // request for it was refused with "no cluster group is serving it". The
+    // socket was offering something it would always turn down, which is a
+    // worse failure than not offering it - a caller has no way to tell an
+    // advertised model from a servable one, and picks by name.
+    //
+    // Asked of this group rather than of the fleet: the group that declared the
+    // split still lists it, because there it is true.
+    const splitHere = groupId
+      ? new Set((await db.query(
+          `SELECT serving_model_id FROM pools
+            WHERE id = $1 AND enabled AND serving_model_id IS NOT NULL`,
+          [groupId])).rows.map((r) => (r as { serving_model_id: string }).serving_model_id))
+      : null
     const models = new Map<string, {
       context: number; resident: boolean; live: boolean; machines: number
     }>()
@@ -63,6 +83,11 @@ async function servableModels(db: Db, broker: Broker, groupId?: string | null) {
       // available: none". Heartbeat says the node exists and holds the model;
       // being parked says it is free this instant, which is a routing
       // question rather than a catalogue one.
+      // Declared wider than one machine, and not the model this group was told
+      // to serve: not this socket's to offer.
+      const width = machines.get(row.name as string) ?? 1
+      if (splitHere !== null && width > 1 && !splitHere.has(row.name as string)) continue
+
       const seen = models.get(row.name)
       models.set(row.name, {
         context: Math.max(seen?.context ?? 0, row.context ?? 0),
@@ -72,7 +97,7 @@ async function servableModels(db: Db, broker: Broker, groupId?: string | null) {
         // exists and is momentarily unreachable - which is the truth while a
         // node reads a long prompt.
         live: (seen?.live ?? false) || broker.isConnected(row.node_id),
-        machines: machines.get(row.name as string) ?? 1,
+        machines: width,
       })
     }
     return models

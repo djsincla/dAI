@@ -1,4 +1,5 @@
 import Testing
+@testable import DaiAgent
 @testable import DaiWorker
 
 /// What a machine does about the model it is holding.
@@ -64,5 +65,41 @@ struct ServingDirectiveTests {
         // by whether the held model is this machine's own.
         #expect(Worker.directive(wanted: nil, current: mine, configured: mine) == .keep)
         #expect(Worker.directive(wanted: nil, current: theirs, configured: mine) == .release)
+    }
+}
+
+/// Whether a machine holds its model in memory.
+///
+/// The control plane derives this from the tier and sends it as intent; the
+/// node never learns which groups it is in. It reached the agent's Directives
+/// and stopped there for one release - decoded, carried, and acted on by
+/// nothing - so a cluster group sat cold for four minutes with a readiness
+/// strip correctly reporting "the model is not built yet" and nothing ever
+/// building it.
+@Suite("holding a model loaded")
+struct KeepLoadedTests {
+    @Test("a control plane too old to say means lazy")
+    func absentIsLazy() {
+        // Which is what every machine did before this existed, so an older
+        // control plane keeps the behaviour it was written against.
+        #expect(ControlPlane.Directives().keepLoaded == false)
+        #expect(ControlPlane.Directives(servingModel: "m").keepLoaded == false)
+    }
+
+    @Test("carries what it was told")
+    func carries() {
+        #expect(ControlPlane.Directives(servingModel: "m", keepLoaded: true).keepLoaded)
+    }
+
+    @Test("the two directives are independent")
+    func independent() {
+        // A machine can be told to hold what it already has, which is the
+        // ordinary case once a cluster group has settled: the model does not
+        // change and the instruction to keep it does not stop applying.
+        let d = ControlPlane.Directives(renewRequested: true, servingModel: nil,
+                                        keepLoaded: true)
+        #expect(d.servingModel == nil)
+        #expect(d.keepLoaded)
+        #expect(d.renewRequested)
     }
 }

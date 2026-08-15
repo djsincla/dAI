@@ -778,7 +778,11 @@ public actor ControlPlane {
         let reply = (try? JSONDecoder().decode(JSONValue.self, from: data))?.objectValue ?? [:]
         return Directives(
             renewRequested: reply["renewRequested"]?.boolValue ?? false,
-            servingModel: reply["servingModel"]?.stringValue)
+            servingModel: reply["servingModel"]?.stringValue,
+            // Absent on a control plane older than the release that began
+            // sending it, and false is the right reading there: lazy is what
+            // every machine did before this existed.
+            keepLoaded: reply["keepLoaded"]?.boolValue ?? false)
     }
 
     /// What the control plane asked of this node on the last beat.
@@ -803,9 +807,27 @@ public actor ControlPlane {
         /// unload one.
         public let servingModel: String?
 
-        public init(renewRequested: Bool = false, servingModel: String? = nil) {
+        /// Whether to hold the model in memory rather than loading it when a
+        /// request arrives.
+        ///
+        /// Intent, not tier. A node never learns which groups it is in - that
+        /// keeps the shape of the fleet out of a credential living on somebody's
+        /// workstation - and "hold this loaded" is an instruction it can follow
+        /// without knowing why it was given.
+        ///
+        /// True for a cluster group, because a split cannot start until every
+        /// rank has built its share: a cold gang pays the slowest machine's load
+        /// before the first token, and pays it again whenever the group falls
+        /// idle. False for harvest, where the machine belongs to whoever is
+        /// sitting at it and holding gigabytes for a request that may not come
+        /// today is the behaviour the presence policy exists to prevent.
+        public let keepLoaded: Bool
+
+        public init(renewRequested: Bool = false, servingModel: String? = nil,
+                    keepLoaded: Bool = false) {
             self.renewRequested = renewRequested
             self.servingModel = servingModel
+            self.keepLoaded = keepLoaded
         }
     }
 

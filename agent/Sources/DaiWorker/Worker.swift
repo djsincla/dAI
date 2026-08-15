@@ -476,6 +476,35 @@ public actor Worker {
         log("now serving \(adopted)")
     }
 
+    /// Build the model now, when the group says to hold it loaded.
+    ///
+    /// A cluster group exists because the model is large, often too large for
+    /// one machine, and a split cannot begin until every rank has built its
+    /// share - so a cold gang pays the slowest machine's load before the first
+    /// token and pays it again whenever the group falls idle. The operator
+    /// already accepted the cost by standing the group up: those machines are
+    /// out of harvesting for as long as it stands, so the memory is spoken for
+    /// whether or not it holds anything.
+    ///
+    /// Only ever loads. Unloading is `adoptServingModel`'s to do, and having two
+    /// paths that both release a model is how the batch loop once freed the one
+    /// the serving loop was using.
+    ///
+    /// Failure is logged and not retried here. The next heartbeat asks again,
+    /// which is the right cadence for something whose usual cause is a machine
+    /// busy with the request that is keeping it warm in the first place.
+    private func warmIfAsked(_ keepLoaded: Bool) async {
+        guard keepLoaded, let runtime = gpu else { return }
+        guard await !runtime.isLoaded else { return }
+        do {
+            let seconds = try await runtime.load()
+            log(String(format: "held loaded for this group: %@ in %.1fs",
+                       await runtime.name, seconds))
+        } catch {
+            log("could not hold \(await runtime.name) loaded: \(error)")
+        }
+    }
+
     private func renewIfDue() async {
         guard let renewer else { return }
         // Asked takes precedence over due. Somebody who requested a renewal
@@ -528,6 +557,7 @@ public actor Worker {
             // never listens.
             if directives.renewRequested { renewRequested = true }
             await adoptServingModel(directives.servingModel)
+            await warmIfAsked(directives.keepLoaded)
             // Cleared only once the report has actually landed. A dropped
             // heartbeat is common and the reason a node is not holding its
             // models is exactly the sort of thing that would be lost by

@@ -855,6 +855,39 @@ describe('what the shipped build gives away', () => {
     expect(ignored).toContain('control-plane/.maps')
   })
 
+  it('signs the runtime with the entitlements it needs to run', () => {
+    // The hardened runtime forbids writable-executable memory, and V8 compiles
+    // JavaScript into exactly that. Every signed release shipped a node that
+    // died with Trace/BPT trap: 5 on the first real program it loaded - and
+    // `node --version` worked, so nothing caught it until an upgrade ran
+    // migrate and the installer blamed Postgres for being unreachable.
+    const builder = readFileSync(
+      join(import.meta.dirname, '..', 'packaging', 'build-control-pkg.sh'), 'utf8')
+    expect(builder).toContain('--entitlements "$HERE/node.entitlements"')
+
+    const ents = readFileSync(
+      join(import.meta.dirname, '..', 'packaging', 'node.entitlements'), 'utf8')
+    for (const needed of ['com.apple.security.cs.allow-jit',
+                          'com.apple.security.cs.allow-unsigned-executable-memory']) {
+      expect(ents).toContain(needed)
+    }
+  })
+
+  it('proves the signed runtime executes, rather than that it verifies', () => {
+    // codesign confirms a signature is well formed and says nothing about
+    // whether the entitlements let the program run. That was the only question
+    // that mattered and the build was not asking it, so the check is a compile
+    // rather than an inspection.
+    const builder = readFileSync(
+      join(import.meta.dirname, '..', 'packaging', 'build-control-pkg.sh'), 'utf8')
+    expect(builder).toContain('new Function')
+    // And it must stop the build - a warning about an unrunnable runtime is a
+    // package that still ships.
+    const gate = builder.split('\n')
+    const i = gate.findIndex((l) => l.includes('new Function'))
+    expect(gate.slice(i, i + 4).join('\n')).toContain('exit 1')
+  })
+
   it('carries a licence', () => {
     // A package with no terms leaves a recipient guessing and the author with
     // nothing to point at.

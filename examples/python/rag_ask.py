@@ -30,6 +30,7 @@ import os
 import sys
 
 import rag_embed
+import quotecheck
 from dai_gateway import (Gateway, GatewayError, NoCapacity, pick_model, provenance,
                          text_of, who_answered)
 from rag_store import Store
@@ -48,6 +49,11 @@ Rules:
 - Cite the section for every claim, like (WIC 4512). Cite the section only:
   never a paragraph or part number that is not printed in the text itself.
 - Quote the statute's own words for anything turning on a precise term.
+- Quotation marks mean copied exactly. Put them only around text you have
+  reproduced character for character from the sections above. If you are
+  restating, summarising, or cannot reproduce it exactly, write it without
+  quotation marks. A paraphrase in quotation marks is worse than no quotation:
+  it invites the reader to stop checking.
 - Do not give legal advice or predict how a particular case would be decided.
 
 Sections:
@@ -145,6 +151,14 @@ def main() -> int:
     for chunk in dict.fromkeys(c["citation"] for c in chunks):
         url = next(c["url"] for c in chunks if c["citation"] == chunk)
         print(f"  {chunk:<16} {url}")
+    # Checked before the provenance block, because provenance answers "where did
+    # this come from" and this answers "is what it says it copied actually
+    # copied" - and the second is the one that has been wrong.
+    quoted = quotecheck.report(quotecheck.check(answer, [c["text"] for c in chunks]))
+    if quoted:
+        print()
+        print(quoted)
+
     print(f"\n--- where this answer came from -------------------------------")
     print(provenance(gateway, completion))
     print("\nThe statute is the authority; this is a reading aid, not advice.")

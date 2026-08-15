@@ -176,10 +176,47 @@ export function coupledWith(group: Group, nodes: NodeFacts[], groups: Group[]): 
  * same as "serve nothing": nobody has said.
  */
 export function effectiveModel(node: NodeFacts, groups: Group[]): string | null {
+  return effectiveServing(node, groups).model
+}
+
+/**
+ * What a machine should serve, and whether to hold it in memory.
+ *
+ * The two answers come from the same decision and used to be one, which left
+ * every machine loading lazily - correct for harvest and wrong for a cluster.
+ *
+ * **Harvest is lazy.** The weights are on disk and the model loads when a
+ * request arrives. These are workstations somebody is sitting at, and holding
+ * gigabytes for a request that may not come today is the behaviour the whole
+ * presence policy exists to avoid.
+ *
+ * **A cluster is warm.** A cluster group exists because a model is large, often
+ * too large for one machine, and a caller addressing that socket is asking for
+ * the thing that takes longest to start. Worse, a split cannot begin until every
+ * rank has built its share, so a cold gang pays the slowest machine's load
+ * before the first token - and pays it again every time the group falls idle.
+ * The operator already accepted the cost by standing the group up: it takes
+ * those machines out of harvesting for as long as it stands, so the memory is
+ * spoken for whether or not it holds anything.
+ *
+ * The node is told the intent and not the tier. It never learns which groups it
+ * belongs to - that is deliberate, so a credential on a workstation does not
+ * carry the shape of the fleet - and "hold this loaded" is an instruction it can
+ * follow without knowing why.
+ */
+export function effectiveServing(
+  node: NodeFacts, groups: Group[],
+): { model: string | null; keepLoaded: boolean } {
   const mine = (poolsFor(node, active(groups)) as Group[])
     .filter((g) => g.servingModelId !== null)
-  const cluster = mine.find((g) => g.tier === 'cluster')
-  return (cluster ?? mine[0])?.servingModelId ?? null
+  // Cluster preempts harvest where a machine is in both. A split rank cannot be
+  // preempted and harvest membership is the promise that a machine can be taken
+  // away; only one of those survives contact with one machine.
+  const winner = mine.find((g) => g.tier === 'cluster') ?? mine[0]
+  return {
+    model: winner?.servingModelId ?? null,
+    keepLoaded: winner?.tier === 'cluster',
+  }
 }
 
 /**

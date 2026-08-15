@@ -208,6 +208,48 @@
   </div>
 </section>
 
+  <div class="entry">
+    <h4>Harvest loads on request; a cluster holds its model warm</h4>
+    <p class="because">Because a split cannot begin until every rank has built its share</p>
+    <p>
+      A harvest machine keeps the weights on disk and loads when a request
+      arrives. Somebody is sitting at it, and holding gigabytes for a request
+      that may not come today is what the presence policy exists to prevent.
+    </p>
+    <p>
+      A cluster machine holds the model loaded. A cold gang pays the slowest
+      machine's load before the first token and pays it again whenever the group
+      falls idle - and the operator already accepted the cost by standing the
+      group up, because it takes those machines out of harvesting for as long as
+      it stands. The memory is spoken for whether or not it holds anything.
+    </p>
+    <p class="evidence">
+      The node is told the intent, not the tier. It never learns which groups it
+      belongs to, so a credential living on a workstation does not carry the
+      shape of the fleet - and "hold this loaded" is an instruction it can follow
+      without knowing why.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>A machine handed back from a split lets go of the model</h4>
+    <p class="because">Because "handed back" has to be true of the workstation, not only the scheduler</p>
+    <p>
+      Null from the control plane meant two things. A group that has not been
+      given a model is not an instruction to unload one - a machine configured
+      with a model in its plist must keep it. A machine released from a
+      stood-down split arrives as the same null, and treating them alike left one
+      node holding half a 32B for a group that no longer existed: 9.45 GB on
+      somebody's desk, for a model no socket would route to.
+    </p>
+    <p class="evidence">
+      The machine answers it without being told anything new: is what I hold my
+      own, or something I adopted. Releasing constructs a runtime rather than
+      loading one, so the memory goes back immediately and nothing is paid until
+      it is wanted.
+    </p>
+  </div>
+
 <section id="groups">
   <div class="sec-head"><h2>4</h2><h3>Groups, tiers and sockets</h3></div>
 
@@ -420,6 +462,62 @@
     </p>
   </div>
 </section>
+
+  <div class="entry">
+    <h4>Every expensive bug here has been silent, and named the wrong thing</h4>
+    <p class="because">Because the error that arrives is rarely the fault that happened</p>
+    <p>
+      A hardened-runtime Node with no JIT entitlements trapped on the first real
+      program it loaded, and the installer reported that Postgres was
+      unreachable while Postgres was running perfectly well. <code>pkgbuild</code>
+      marked the status app relocatable, so the installer wrote it wherever
+      Spotlight had last seen the bundle id - producing a missing app and
+      permission errors in a build directory, two symptoms of one cause, neither
+      pointing at it, and reporting success. A stop token appended before being
+      checked put <code>&lt;|im_end|&gt;</code> into answers and billed a token
+      for it. A missing layer in a split does not crash at all: the model
+      computes without it and answers fluently from the wrong network.
+    </p>
+    <p class="evidence">
+      So each layer is made to report what it did rather than what it was asked
+      to do - layer ranges on a completion, a fingerprint beside a version,
+      <code>layersReported</code> stated rather than inferred from a missing
+      field.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>Verify the artifact, not the source</h4>
+    <p class="because">Because a packaging fault is not a property of the repository</p>
+    <p>
+      No test of this codebase could see a signed binary that cannot execute, an
+      installer that will place a bundle somewhere else, or comments shipped in
+      <code>dist/</code>. They are properties of a file the build produced, so
+      the build takes that file apart: <code>verify-pkg.sh</code> extracts the
+      package, runs the shipped Node, and checks what is inside before calling
+      it built.
+    </p>
+    <p class="evidence">
+      It reported the relocation fault on a package that had already been signed,
+      notarised, stapled and installed.
+    </p>
+  </div>
+
+  <div class="entry">
+    <h4>A required field beats a defaulted one where the default is plausible</h4>
+    <p class="because">Because a forgotten optional field is silent and a missing required one is a compile error</p>
+    <p>
+      <code>enabled</code> was optional on a group, and absent meant enabled -
+      documented as backwards compatibility so callers not yet taught about
+      disabling would behave as they always had. They did not: they behaved as
+      though nothing was ever disabled, which was wrong from the moment the
+      feature landed. Two call sites read the field from the database and
+      dropped it, so a stood-down group went on blocking changes.
+    </p>
+    <p class="evidence">
+      Making it required named every construction site at once.
+    </p>
+  </div>
 
 <section id="models">
   <div class="sec-head"><h2>7</h2><h3>Models and storage</h3></div>

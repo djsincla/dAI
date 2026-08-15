@@ -77,6 +77,39 @@ public actor SplitRunner {
     /// not own are never referenced and therefore never read off disk. Loading
     /// the whole model and discarding afterwards would need the memory first,
     /// which is the thing there is not enough of.
+    /// Which tokens end generation, and the rule that they are not part of it.
+    ///
+    /// A terminator is a signal, not output. Appending it and then noticing on
+    /// the next lap put `<|im_end|>` into an answer served across two machines -
+    /// cosmetic in prose, and something that would break any caller parsing
+    /// JSON. It also counted as a completion token, so the request billed for a
+    /// token nobody asked for and nobody could read.
+    ///
+    /// Three sources, because one is not enough. `eosTokenId` is the tokenizer's
+    /// idea of the end. `unknownTokenId` means generation has gone somewhere
+    /// meaningless and upstream treats it as terminal. And a model's config may
+    /// declare several - Qwen ends a chat turn with `<|im_end|>` while
+    /// `<|endoftext|>` ends a document, and a loop that knows only one of them
+    /// runs to the token budget producing text past the end of the answer.
+    public struct StopSet: Sendable {
+        public let ids: Set<Int>
+
+        public init(_ ids: Set<Int>) { self.ids = ids }
+
+        public func ends(_ token: Int) -> Bool { ids.contains(token) }
+
+        /// `eos_token_id` from a model's config.json, which is an integer in
+        /// some models and a list in others. Both spellings mean the same thing
+        /// and reading only one of them is how a stop token gets missed.
+        public static func declared(in fields: [String: Any]) -> Set<Int> {
+            switch fields["eos_token_id"] {
+            case let one as Int: return [one]
+            case let many as [Any]: return Set(many.compactMap { $0 as? Int })
+            default: return []
+            }
+        }
+    }
+
     public struct Loaded {
         public let model: any LanguageModel
         public let tokenizer: Tokenizer
@@ -84,6 +117,8 @@ public actor SplitRunner {
         /// Layers in the whole model, before it was divided. `split` describes
         /// this machine's share and cannot answer "share of what".
         public let totalLayers: Int
+        /// Stop tokens the model's own configuration declares.
+        public let declaredStops: Set<Int>
     }
 
     public func load(directory: URL) async throws -> Loaded {
@@ -135,7 +170,8 @@ public actor SplitRunner {
         let tokenizer = try await loadTokenizer(
             configuration: ModelConfiguration(directory: directory), hub: HubApi())
         return Loaded(model: model, tokenizer: tokenizer, split: split,
-                      totalLayers: layerCount)
+                      totalLayers: layerCount,
+                      declaredStops: StopSet.declared(in: fields))
     }
 
     /// The model configuration as this machine should see it.
@@ -243,16 +279,30 @@ public actor SplitRunner {
         let cache = loaded.model.newCache(parameters: nil)
         var produced: [Int] = []
 
+        // Everything that ends generation, from all three places one can be
+        // declared. Built once rather than compared three times a token.
+        let stops = StopSet(loaded.declaredStops
+            .union([loaded.tokenizer.eosTokenId, loaded.tokenizer.unknownTokenId]
+                .compactMap { $0 }))
+
         let started = Date()
         var token = try step(loaded, input: MLXArray(promptTokens.map { Int32($0) }),
                              cache: cache)
         let firstAt = Date()
-        produced.append(token)
 
-        while produced.count < maxTokens {
-            if loaded.tokenizer.eosTokenId == token { break }
-            token = try step(loaded, input: MLXArray([Int32(token)]), cache: cache)
+        // Tested before appending, never after. The previous order put the token
+        // in and noticed on the next lap, so the terminator was decoded into the
+        // answer and counted as a completion token: `<|im_end|>` on the end of
+        // every split reply.
+        //
+        // Structured to step only when another token will actually be kept. A
+        // wasted forward pass is a full round trip between machines here, which
+        // is the one cost this whole arrangement exists to ration.
+        while true {
+            if stops.ends(token) { break }
             produced.append(token)
+            if produced.count >= maxTokens { break }
+            token = try step(loaded, input: MLXArray([Int32(token)]), cache: cache)
         }
         let ended = Date()
 

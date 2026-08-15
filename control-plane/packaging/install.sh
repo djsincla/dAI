@@ -83,6 +83,36 @@ if [[ -n "$CONFIG" ]]; then
 fi
 
 [[ $EUID -eq 0 ]] || { echo "must run as root: sudo $0 ..." >&2; exit 1; }
+
+# ------------------------------------------------------- what is already here
+#
+# An upgrade should not have to be told what the machine already knows. Until
+# this existed, reinstalling over a working control plane failed with
+# "missing --db" - and the database URL it was asking for was sitting in the
+# plist three directories away, put there by the previous run of this script.
+#
+# That is the worst kind of installer failure: it stops halfway through an
+# upgrade, on a machine with a live fleet, over a value nobody needs to retype.
+# The likely reaction is to guess the URL, and guessing wrong points a control
+# plane at an empty database, which reads as every machine having vanished.
+#
+# Last in precedence, deliberately. A flag wins, then a config file, then this.
+# Somebody standing at the machine with an argument is correcting what is
+# installed, not being overruled by it.
+if [[ -f "$PLIST" ]]; then
+  installed() {
+    plutil -extract "EnvironmentVariables.$1" raw -o - "$PLIST" 2>/dev/null || true
+  }
+  if [[ -z "$DB" ]]; then
+    DB="$(installed DATABASE_URL)"
+    [[ -n "$DB" ]] && echo "==> reusing the database this machine is already configured with"
+  fi
+  if [[ -z "$PORT" ]];          then PORT="$(installed PORT)"; fi
+  if [[ -z "$AGENT_CIDRS" ]];   then AGENT_CIDRS="$(installed DAI_AGENT_CIDRS)"; fi
+  if [[ -z "$ADMIN_CIDRS" ]];   then ADMIN_CIDRS="$(installed DAI_ADMIN_CIDRS)"; fi
+  if [[ -z "$MONITOR_CIDRS" ]]; then MONITOR_CIDRS="$(installed DAI_MONITOR_CIDRS)"; fi
+fi
+
 [[ -n "$DB" ]] || { echo "missing --db (a postgres:// URL)" >&2; exit 2; }
 [[ -n "$HOSTNAME_FOR_CERT" ]] || HOSTNAME_FOR_CERT="$(scutil --get LocalHostName 2>/dev/null || hostname)"
 

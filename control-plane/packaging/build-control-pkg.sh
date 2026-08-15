@@ -148,8 +148,38 @@ else
   echo "==> signing"
   # The runtime is the only Mach-O in the payload; the rest is scripts and data.
   # --options runtime is required for notarisation.
-  codesign --force --timestamp --options runtime --sign "$APP_ID" "$PAYLOAD/node"
+  # --entitlements, or the hardened runtime forbids the writable-executable
+  # memory V8 compiles into and node dies with Trace/BPT trap: 5 - EXC_BREAKPOINT
+  # raised from libsystem_pthread, where the JIT write-protect call lives.
+  #
+  # It fails in the least useful way available. `node --version` works, because
+  # printing a constant never reaches the compiler, and so does `node -e` with a
+  # small script. The crash arrives when a real module tree loads - so every
+  # signed release shipped this, invisibly, until an upgrade ran migrate and the
+  # installer reported that Postgres was unreachable while Postgres was running
+  # perfectly well three steps away.
+  #
+  # The entitlements file carries no XML comments, deliberately. AMFI parses it
+  # with a stricter reader than plutil and rejects a comment with "syntax error
+  # near line 6", naming a line that is a sentence of prose - so the explanation
+  # lives here, where it can be read without breaking the thing it explains.
+  #
+  # allow-jit permits the MAP_JIT allocation; allow-unsigned-executable-memory
+  # permits executing pages nobody signed, which is what a just-in-time compiler
+  # produces. disable-library-validation is for native addons under
+  # node_modules, signed by whoever built them or by nobody.
+  codesign --force --timestamp --options runtime \
+           --entitlements "$HERE/node.entitlements" \
+           --sign "$APP_ID" "$PAYLOAD/node"
   codesign --verify --strict --verbose=2 "$PAYLOAD/node"
+  # Verified by running it, not by asking codesign whether it is happy. codesign
+  # confirms the signature is well formed and says nothing about whether the
+  # entitlements let the program execute - which is the only question that
+  # matters and the one nobody was asking.
+  if ! "$PAYLOAD/node" -e 'new Function("return 1+1")()' >/dev/null 2>&1; then
+    echo "the signed node cannot execute compiled code - check node.entitlements" >&2
+    exit 1
+  fi
 fi
 
 echo "==> building package"

@@ -20,7 +20,22 @@ BIN="$(swift build -c release --package-path "$HERE" --show-bin-path)/dai-contro
 [[ -x "$BIN" ]] || { echo "no binary at $BIN" >&2; exit 1; }
 
 APP="$HERE/.build/dAI Control.app"
-rm -rf "$APP"
+# Quit a running copy first. macOS protects the bundle of a live app, so
+# rebuilding while it sits in the menu bar fails with a wall of "Permission
+# denied" on files the builder plainly owns - which reads as a permissions
+# problem and is not one.
+pkill -f "$APP" 2>/dev/null || true
+
+# And say so plainly when the bundle genuinely is not ours. A previous build run
+# under sudo leaves a root-owned bundle here, and `rm -rf` then prints one line
+# per file - eight lines of "Permission denied" that bury the only sentence that
+# matters, which is that one directory has the wrong owner.
+if [[ -e "$APP" ]] && ! rm -rf "$APP" 2>/dev/null; then
+  echo "cannot replace $APP" >&2
+  echo "  it is owned by $(stat -f '%Su' "$APP"), so this build cannot remove it." >&2
+  echo "  sudo rm -rf \"$APP\"" >&2
+  exit 1
+fi
 mkdir -p "$APP/Contents/MacOS"
 sed "s|@VERSION@|$VERSION|g" "$HERE/bundle/Info.plist" > "$APP/Contents/Info.plist"
 cp "$BIN" "$APP/Contents/MacOS/dai-control-status"

@@ -905,6 +905,12 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
     const proposed: Group[] = pools.map((p) => ({
       id: p.id, name: p.name, tier: p.tier, membership: p.membership,
       servingModelId: p.id === poolId ? modelId : p.serving_model_id,
+      // Carried, not dropped. `active()` filters on `enabled !== false`, so a
+      // group arriving here without the field reads as enabled - and a group
+      // that was stood down went on counting against one-group-per-tier. The
+      // symptom is a refusal naming a disabled group as a reason, which is a
+      // rule nobody can satisfy without deleting something they meant to keep.
+      enabled: p.enabled !== false,
     }))
     const broken = violations(nodes as never, proposed)
     if (broken.length > 0) {
@@ -954,6 +960,7 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
     const groups: Group[] = pools.map((p) => ({
       id: p.id, name: p.name, tier: p.tier, membership: p.membership,
       servingModelId: p.serving_model_id,
+      enabled: p.enabled !== false,
     }))
     const mine = groups.find((g) => g.id === req.params.poolId)
     if (!mine) { res.status(404).json({ error: 'not_found', detail: 'no such group' }); return }

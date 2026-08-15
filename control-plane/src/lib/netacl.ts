@@ -32,6 +32,43 @@ export class Acl {
       .filter(Boolean)
     this.open = entries.length === 0
     for (const entry of entries) this.add(entry)
+    this.completeLoopback()
+  }
+
+  /**
+   * Loopback has two spellings, and an operator who allowed one meant both.
+   *
+   * `localhost` resolves to `::1` before `127.0.0.1` on macOS, so a client that
+   * connects by name arrives over IPv6 and is refused by an allowlist that says
+   * `127.0.0.1/32`. The status app hit this against its own control plane: the
+   * monitoring range permitted loopback and the request was still rejected, six
+   * inches away, with nothing in the message to say which loopback.
+   *
+   *     localhost  -> 403
+   *     127.0.0.1  -> 200
+   *
+   * Distinct from the IPv4-mapped case below, which normalizeIp already unwraps.
+   * `::1` is not a wrapped `127.0.0.1`; it is a different address for the same
+   * machine, and no amount of rewriting makes one into the other.
+   *
+   * This widens nothing. `::1` and `127.0.0.1` are reachable only from this
+   * host, so anything that can present one can present the other - permitting
+   * one and refusing the other is a distinction with no security content and a
+   * great deal of confusion. It is deliberately only loopback: no other address
+   * has two forms that mean the same machine.
+   *
+   * Decided from the finished list rather than by reading the strings, so
+   * `127.0.0.0/8` and `127.0.0.1/32` and a bare `::1` all behave the same
+   * without three cases to keep in step.
+   */
+  private completeLoopback(): void {
+    if (this.open) return
+    if (this.list.check('127.0.0.1', 'ipv4') && !this.list.check('::1', 'ipv6')) {
+      this.list.addAddress('::1', 'ipv6')
+    }
+    if (this.list.check('::1', 'ipv6') && !this.list.check('127.0.0.1', 'ipv4')) {
+      this.list.addAddress('127.0.0.1', 'ipv4')
+    }
   }
 
   private add(entry: string): void {

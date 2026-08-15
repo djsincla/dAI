@@ -6,6 +6,7 @@ import { resolve as resolveOpenJD, frameOf, type JobTemplate } from '../lib/open
 import { repositoryRoot, safePath, verifyModel } from '../lib/repository.js'
 import { COMPLETE_ENOUGH, holdsModel } from '../lib/possession.js'
 import { coupledWith, effectiveModel, violations, type Group } from '../lib/groupRules.js'
+import { splitReadiness, type RankFacts } from '../lib/splitReadiness.js'
 import { runnability, shapeOf, whyGroupCannotHost } from '../lib/shape.js'
 import { costOfServing, suspensions } from '../lib/suspension.js'
 import { allocate, capacity, rangeFrom } from '../lib/ports.js'
@@ -954,6 +955,70 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
    * Agreement spreads through shared machines, so a group can be constrained by
    * one it shares nothing with. Asked for rather than discovered.
    */
+  /**
+   * Whether this group could serve a request right now, and what is missing.
+   *
+   * Asked before anybody sends anything. Standing a split up meant enabling the
+   * group and then waiting with nothing to look at while the weights arrived,
+   * and the first sign it was not ready came from sending a request and reading
+   * the refusal - a diagnostic disguised as a failure, minutes after an operator
+   * could have acted on it.
+   */
+  r.get('/pools/:poolId/readiness', async (req, res) => {
+    const { poolId } = req.params as { poolId: string }
+    const { rows: pools } = await db.query(
+      `SELECT id, name, tier, membership, serving_model_id, enabled
+         FROM pools WHERE id = $1`, [poolId])
+    const pool = pools[0] as {
+      name: string; tier: string; serving_model_id: string | null; enabled: boolean
+    } | undefined
+    if (!pool) { res.status(404).json({ error: 'not_found', detail: 'no such group' }); return }
+
+    const machines = pool.serving_model_id === null ? 1 : Number(
+      ((await db.query(`SELECT machines FROM models WHERE id = $1`,
+        [pool.serving_model_id])).rows[0] as { machines: number } | undefined)?.machines ?? 1)
+
+    const { rows: nodes } = await db.query(
+      `SELECT id, hostname, tier, chip, memory_gb, resident_models, model_context,
+              pipeline_address, model_sync_faults, last_heartbeat
+         FROM nodes WHERE state = 'active'`)
+
+    // The group's own machines, by the same membership rule everything else
+    // uses, so this describes the group an operator is looking at rather than
+    // the fleet.
+    const members: RankFacts[] = (nodes as any[])
+      .filter((n) => poolsFor(n as never, [pool] as never).length > 0)
+      .map((n) => ({
+        nodeId: n.id,
+        hostname: n.hostname,
+        // Heartbeat, not the reverse channel: a node reading a long prompt is
+        // not parked, and calling it disconnected would report a working
+        // machine as missing.
+        connected: n.last_heartbeat != null
+          && Date.now() - new Date(n.last_heartbeat).getTime() < 120_000,
+        assigned: pool.serving_model_id,
+        // On disk is what the node has fetched; model_context is written when a
+        // model has been opened, which is the only evidence available that the
+        // weights are actually here.
+        onDisk: Object.keys((n.model_context ?? {}) as Record<string, unknown>),
+        loaded: Object.keys((n.resident_models ?? {}) as Record<string, unknown>),
+        pipelineAddress: n.pipeline_address ?? null,
+        syncFault: Object.values((n.model_sync_faults ?? {}) as Record<string, string>)[0]
+          ?? null,
+      }))
+
+    res.json({
+      group: pool.name,
+      tier: pool.tier,
+      ...splitReadiness({
+        enabled: pool.enabled !== false,
+        model: pool.serving_model_id,
+        machines,
+        members,
+      }),
+    })
+  })
+
   r.get('/pools/:poolId/coupled', async (req, res) => {
     const { rows: pools } = await db.query(
       `SELECT id, name, tier, membership, serving_model_id, enabled FROM pools`)

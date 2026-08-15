@@ -814,3 +814,85 @@ describe('what a machine is offered for', () => {
     expect(r.status).toBe(403)
   })
 })
+
+/**
+ * Readiness, over HTTP, against a real database.
+ *
+ * The logic is unit-tested; this covers the half that is not logic - the SQL
+ * and the shape of the columns. `resident_models` and `model_context` are jsonb
+ * objects in the database while the node listing flattens them to arrays, and
+ * reading the wrong one gives a group that is permanently "fetching the
+ * weights" with no way to tell that from the truth.
+ */
+describe('whether a split group is ready to serve', () => {
+  const model = 'mlx-community/Qwen2.5-Coder-32B-Instruct-4bit'
+
+  const readyNode = async (hostname: string, address: string | null) => {
+    const { rows } = await db.query(
+      // tiers, plural: tier is derived from it. A machine in a cluster group
+      // is in the cluster tier, which is what makes it a member here.
+      `INSERT INTO nodes (hostname, tiers, state, cert_fingerprint, last_heartbeat,
+                          resident_models, model_context, pipeline_address)
+       VALUES ($1, ARRAY['cluster']::text[], 'active', $2, now(),
+               $3::jsonb, $3::jsonb, $4)
+       RETURNING id`,
+      [hostname, `fp-${hostname}`, JSON.stringify({ [model]: 32768 }), address])
+    return rows[0]!.id as string
+  }
+
+  const splitPool = async () => {
+    await db.query(
+      `INSERT INTO models (id, size_bytes, machines, runtime, kind)
+       VALUES ($1, $2, 2, 'mlx', 'generate')
+       ON CONFLICT (id) DO UPDATE SET machines = 2`, [model, 18_400_000_000])
+    const { rows } = await db.query(
+      `INSERT INTO pools (name, tier, schedule, preempt, serving_model_id, enabled)
+       VALUES ('split-cluster','cluster','gang','never',$1,true) RETURNING id`, [model])
+    return rows[0]!.id as string
+  }
+
+  it('reads the jsonb columns, not the flattened listing', async () => {
+    const poolId = await splitPool()
+    await readyNode('orca', '192.168.99.1')
+    await readyNode('rotorua', '192.168.99.2')
+
+    const r = await fetch(`${base}/admin/v1/pools/${poolId}/readiness`,
+      { headers: asUser(fx.operatorToken) })
+    const body = await r.json() as any
+    expect(r.status).toBe(200)
+    expect(body.state).toBe('ready')
+    expect(body.machines).toBe(2)
+    expect(body.ranks.map((x: any) => x.rank).sort()).toEqual([0, 1])
+    // The head is a machine that can be dialled, as the router requires.
+    expect(body.ranks.find((x: any) => x.rank === 0).dialable).toBe(true)
+  })
+
+  it('blocks, and names the setting, when no machine can be dialled', async () => {
+    const poolId = await splitPool()
+    await readyNode('orca', null)
+    await readyNode('rotorua', null)
+
+    const r = await fetch(`${base}/admin/v1/pools/${poolId}/readiness`,
+      { headers: asUser(fx.operatorToken) })
+    const body = await r.json() as any
+    expect(body.state).toBe('blocked')
+    expect(JSON.stringify(body)).toContain('DAI_PIPELINE_INTERFACE')
+  })
+
+  it('is idle rather than broken when the group is stood down', async () => {
+    const poolId = await splitPool()
+    await db.query(`UPDATE pools SET enabled = false WHERE id = $1`, [poolId])
+    await readyNode('orca', '192.168.99.1')
+
+    const r = await fetch(`${base}/admin/v1/pools/${poolId}/readiness`,
+      { headers: asUser(fx.operatorToken) })
+    expect((await r.json() as any).state).toBe('idle')
+  })
+
+  it('404s for a group that does not exist', async () => {
+    const r = await fetch(
+      `${base}/admin/v1/pools/00000000-0000-0000-0000-000000000000/readiness`,
+      { headers: asUser(fx.operatorToken) })
+    expect(r.status).toBe(404)
+  })
+})

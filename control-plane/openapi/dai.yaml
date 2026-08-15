@@ -1772,6 +1772,85 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '401': { $ref: '#/components/responses/Unauthorized' }
 
+  /admin/v1/pools/{poolId}/readiness:
+    parameters:
+      - name: poolId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [admin]
+      summary: Whether this group could serve a request right now
+      description: >
+        Asked before anybody sends anything. Standing a split up meant enabling
+        the group and then waiting with nothing to look at while the weights
+        arrived, and the first sign it was not ready came from sending a request
+        and reading the refusal - a diagnostic disguised as a failure, minutes
+        after an operator could have acted on it.
+
+
+        The same questions the router asks at admission, in the same order, so a
+        group reported ready here is admitted there.
+      responses:
+        '200':
+          description: What the group can do, and what is missing
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [group, tier, state, detail, machines, present, ranks]
+                properties:
+                  group: { type: string }
+                  tier: { type: string }
+                  state:
+                    type: string
+                    enum: [ready, preparing, blocked, idle]
+                    description: >
+                      preparing resolves on its own; blocked needs somebody to
+                      act. Saying which is the difference between waiting and
+                      walking to a machine.
+                  detail: { type: string }
+                  model: { type: string, nullable: true }
+                  machines:
+                    type: integer
+                    description: How many machines the model was declared to need.
+                  present:
+                    type: integer
+                    description: How many are here and could take a rank.
+                  ranks:
+                    type: array
+                    items:
+                      type: object
+                      required: [hostname, state, detail, weights, loaded, dialable]
+                      properties:
+                        hostname: { type: string }
+                        rank:
+                          type: integer
+                          nullable: true
+                          description: >
+                            Null until ranks can be assigned, which needs at
+                            least one machine that can be dialled.
+                        role:
+                          type: string
+                          nullable: true
+                          enum: ['output head', 'feeds the next rank', null]
+                        state:
+                          type: string
+                          enum: [ready, loading, fetching, unreachable, faulted]
+                        detail: { type: string }
+                        weights: { type: string, enum: [present, missing] }
+                        loaded: { type: boolean }
+                        dialable:
+                          type: boolean
+                          description: >
+                            Whether it has said where a peer should dial it. The
+                            one that is nearly always a cable.
+        '404':
+          description: No such group
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /admin/v1/pools/{poolId}/coupled:
     parameters:
       - name: poolId

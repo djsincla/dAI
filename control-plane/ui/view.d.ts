@@ -133,3 +133,17 @@ export function certificateStanding(node: any, now?: number): {
 export function suspensionNote(node: any): string | null
 export function effectiveModelFor(node: any, groups: any[]): string | null
 export function splitNote(machines: number | null | undefined): string
+export function readinessSummary(r: any): {
+  level: 'good' | 'busy' | 'bad' | 'idle' | 'unknown'
+  label: string
+  detail: string
+}
+export function rankLine(rank: any): {
+  hostname: string
+  /** Empty until ranks can be assigned, which needs a machine that can be dialled. */
+  where: string
+  state: string
+  marks: string[]
+  detail: string
+}
+export function shouldKeepWatching(r: any): boolean

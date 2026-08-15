@@ -3,8 +3,8 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   bodySkeleton, buildUrl, callableHere, formatResponse, groupOperations,
-  isReadOnly, matchesOperation, operationsFrom, resolveRef, responseSize, statusTone,
-  surfaceOf,
+  isReadOnly, matchesOperation, operationsFrom, rankLine, readinessSummary,
+  resolveRef, responseSize, shouldKeepWatching, statusTone, surfaceOf,
 } from '../ui/view.js'
 import {
   TIERS, describeTier, inBothTiers, tierMachines, tiersAfter, tiersOf,
@@ -1097,5 +1097,65 @@ describe('how wide a model is, said where it is named', () => {
     expect(splitNote(1)).toBe('')
     expect(splitNote(null)).toBe('')
     expect(splitNote(undefined)).toBe('')
+  })
+})
+
+
+/**
+ * The readiness strip on a cluster group's card.
+ *
+ * It exists because standing a split up meant waiting with nothing to look at
+ * while ~18 GB reached both machines. What it has to get right is not the
+ * numbers but the distinction between a wait and a fault.
+ */
+describe('how a split group\'s readiness reads', () => {
+  it('separates a wait from a fault', () => {
+    // Preparing resolves on its own; blocked needs somebody to walk to a
+    // machine. One sentence for both is how the line stops being read.
+    expect(readinessSummary({ state: 'preparing', detail: 'x' }).level).toBe('busy')
+    expect(readinessSummary({ state: 'blocked', detail: 'x' }).level).toBe('bad')
+    expect(readinessSummary({ state: 'ready', detail: 'x' }).level).toBe('good')
+  })
+
+  it('calls a stood-down group stood down, not broken', () => {
+    // The operator's own decision. Describing it as a fault teaches them to
+    // ignore the strip.
+    expect(readinessSummary({ state: 'idle', detail: 'x' }).label).toBe('stood down')
+  })
+
+  it('survives a group it has no answer for yet', () => {
+    expect(readinessSummary(undefined).level).toBe('unknown')
+    expect(readinessSummary(null).label).toBe('unknown')
+  })
+
+  const rank = {
+    hostname: 'orca', rank: 0, role: 'output head', state: 'ready',
+    weights: 'present', loaded: true, dialable: true, detail: 'ready',
+  }
+
+  it('marks which machine holds the head', () => {
+    expect(rankLine(rank).where).toBe('rank 0 \u00b7 head')
+  })
+
+  it('names a rank nobody holds as nothing at all', () => {
+    // Ranks cannot be assigned until a machine can be dialled. Printing
+    // "rank 0" for a group that cannot form names a role nobody is holding.
+    expect(rankLine({ ...rank, rank: null, role: null, dialable: false }).where).toBe('')
+  })
+
+  it('says which of the three things is missing', () => {
+    const out = rankLine({ ...rank, weights: 'missing', loaded: false })
+    expect(out.marks).toContain('no weights')
+    expect(out.marks).toContain('not loaded')
+    expect(out.marks).toContain('dialable')
+  })
+
+  it('keeps watching only while something is changing', () => {
+    // Ready and blocked are stable. Polling them forever is a request every few
+    // seconds for an answer nobody is waiting on.
+    expect(shouldKeepWatching({ state: 'preparing' })).toBe(true)
+    expect(shouldKeepWatching({ state: 'ready' })).toBe(false)
+    expect(shouldKeepWatching({ state: 'blocked' })).toBe(false)
+    expect(shouldKeepWatching(undefined)).toBe(false)
   })
 })

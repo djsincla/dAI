@@ -1095,3 +1095,60 @@ export function splitNote(machines) {
   const n = Math.max(1, Math.trunc(Number(machines) || 1))
   return n > 1 ? `${n} machines` : ''
 }
+
+/* -------------------------------------------------------------- readiness */
+
+/**
+ * How a split group's readiness reads on its card.
+ *
+ * The distinction the whole strip exists to draw is **preparing** against
+ * **blocked**. Preparing resolves on its own and the operator waits; blocked
+ * needs somebody to go and look at a machine. Reporting both as "not ready"
+ * turns a two-minute wait and a fault into the same sentence, which is how an
+ * operator learns to ignore the line.
+ */
+export function readinessSummary(r) {
+  if (!r) return { level: 'unknown', label: 'unknown', detail: '' }
+  switch (r.state) {
+    case 'ready':
+      return { level: 'good', label: 'ready', detail: r.detail }
+    case 'preparing':
+      // Named for what it is doing rather than what it lacks. "Missing weights"
+      // reads as a fault; "fetching" reads as progress, and it is progress.
+      return { level: 'busy', label: 'preparing', detail: r.detail }
+    case 'blocked':
+      return { level: 'bad', label: 'needs attention', detail: r.detail }
+    default:
+      return { level: 'idle', label: 'stood down', detail: r.detail }
+  }
+}
+
+/**
+ * One machine's line in the strip.
+ *
+ * Rank is shown only once ranks can be assigned, which needs a machine that can
+ * be dialled. Showing "rank 0" for a group that cannot form would name a role
+ * nobody is holding.
+ */
+export function rankLine(rank) {
+  const where = rank.rank === null ? '' : `rank ${rank.rank}`
+  const role = rank.role === 'output head' ? ' · head' : ''
+  const marks = [
+    rank.weights === 'present' ? 'weights' : 'no weights',
+    rank.loaded ? 'loaded' : 'not loaded',
+    rank.dialable ? 'dialable' : 'no address',
+  ]
+  return { hostname: rank.hostname, where: where + role, state: rank.state,
+           marks, detail: rank.detail }
+}
+
+/**
+ * Whether the strip is worth polling again.
+ *
+ * A group that is preparing will change on its own; one that is ready or
+ * blocked will not, and polling it forever is a request every few seconds for
+ * an answer nobody is waiting on.
+ */
+export function shouldKeepWatching(r) {
+  return r?.state === 'preparing'
+}

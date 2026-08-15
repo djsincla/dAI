@@ -41,6 +41,7 @@ import sys
 import time
 
 import rag_embed
+import quotecheck
 from dai_gateway import Gateway, GatewayError, provenance, text_of, who_answered
 from rag_ask import SYSTEM, render
 from rag_store import Store
@@ -236,6 +237,11 @@ what happens next
     print(f"\n{answer}\n")
     print(f"answered by {who_answered(completion)} - the rank holding the output head;"
           f"\nthe other {shape['machines'] - 1} did their share and returned nothing to read.\n")
+    quoted = quotecheck.report(quotecheck.check(answer, [c["text"] for c in chunks]))
+    if quoted:
+        print()
+        print(quoted)
+
     print(provenance(gateway, completion))
     return 0
 

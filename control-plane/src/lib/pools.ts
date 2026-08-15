@@ -56,6 +56,18 @@ export interface PoolSpec {
   id: string
   tier: string
   membership: PoolMembership | null
+  /**
+   * Whether this group asserts anything.
+   *
+   * Optional here only because several callers read pools from SQL that never
+   * selected the column. It is treated as enabled when absent, which is the
+   * behaviour before disabling existed - and the reason to be careful: three
+   * separate faults this month came from a stood-down group still deciding
+   * something, and every one of them was a call site that had the field in the
+   * database and dropped it on the way here. If you are writing the query, select
+   * it.
+   */
+  enabled?: boolean
 }
 
 export interface NodeFacts {
@@ -109,7 +121,14 @@ export function nodeMatchesPool(node: NodeFacts, pool: PoolSpec): boolean {
 
 /** The pools a node may take work from. */
 export function poolsFor(node: NodeFacts, pools: PoolSpec[]): PoolSpec[] {
-  return pools.filter((p) => nodeMatchesPool(node, p))
+  // Stood down means claiming nothing, and that has to be true here rather than
+  // at each call site. Three faults this month were one call site forgetting:
+  // a disabled group blocked a model change by counting toward
+  // one-group-per-tier, kept a machine holding a model nobody would route to,
+  // and pinned the fleet to an agent version nobody had asked for since. Each
+  // was found separately and fixed separately, which is the shape of a rule
+  // living in the wrong place.
+  return pools.filter((p) => p.enabled !== false && nodeMatchesPool(node, p))
 }
 
 /**

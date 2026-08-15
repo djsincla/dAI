@@ -763,8 +763,16 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
     })) as unknown as Group[]
     const { rows: nodes } = await db.query(
       `SELECT id, hostname, tier, chip, memory_gb FROM nodes WHERE state = 'active'`)
+    // Whose machines these are, asked of the rule rather than of the claim.
+    //
+    // poolsFor drops a stood-down group, which is right everywhere it decides
+    // something - and wrong here, where the question is "who did this just
+    // affect". The operator pressed stand-down to get machines back, and
+    // listing none of them because it worked is the least useful possible
+    // answer. So membership is asked with the group treated as standing.
+    const target = { ...pools.find((p) => p.id === poolId), enabled: true }
     const affected = (nodes as never[])
-      .filter((n: never) => poolsFor(n, [pools.find((p) => p.id === poolId)] as never).length > 0)
+      .filter((n: never) => poolsFor(n, [target] as never).length > 0)
       .map((n: { hostname: string }) => ({
         hostname: n.hostname,
         nowServes: effectiveModel(n as never, groups),
@@ -1191,7 +1199,12 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
   /** Every machine, what it runs, what it should run, and who decides. */
   r.get('/agent/rollout', async (_req, res) => {
     const { rows: pools } = await db.query(
-      `SELECT id, name, tier, membership, agent_channel, desired_agent_version FROM pools`)
+      // enabled, because poolsFor drops a stood-down group and cannot do that
+      // without the column. Omitting it let a disabled group keep naming the
+      // agent version the whole fleet should run.
+      `SELECT id, name, tier, membership, agent_channel, desired_agent_version,
+              enabled
+         FROM pools`)
     const { rows: nodes } = await db.query(
       `SELECT id, hostname, tier, chip, memory_gb, state, agent_version, agent_fingerprint
          FROM nodes WHERE state = 'active' ORDER BY hostname`)

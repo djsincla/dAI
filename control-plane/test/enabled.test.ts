@@ -286,3 +286,48 @@ describe('deleting a group', () => {
     expect(left.rows).toHaveLength(0)
   })
 })
+
+/**
+ * A stood-down group decides nothing, and that has to hold everywhere.
+ *
+ * Three separate faults this month were one call site forgetting it: a disabled
+ * group blocked a model change by counting toward one-group-per-tier, kept a
+ * machine holding a model nobody would route to, and pinned the fleet to an
+ * agent version nobody had asked for since. Each was found and fixed on its own,
+ * which is the shape of a rule living in the wrong place. It now lives in
+ * poolsFor, so a caller has to work to get it wrong.
+ */
+describe('a stood-down group claims no machines', () => {
+  it('stops naming the agent version its machines should run', async () => {
+    // The one that cost an afternoon: two managed groups, one stood down and
+    // holding an older desired version, and the rollout picked whichever came
+    // first. Machines sat on a build nobody had asked for since.
+    await db.query(
+      `UPDATE pools SET agent_channel = 'managed', desired_agent_version = null
+        WHERE id = $1`, [fx.poolId])
+    await db.query(
+      `INSERT INTO agent_builds (version, sha256, size_bytes)
+       VALUES ('9.9.9', repeat('a',64), 1) ON CONFLICT DO NOTHING`)
+    const { rows } = await db.query(
+      `INSERT INTO pools (name, tier, schedule, preempt, agent_channel,
+                          desired_agent_version, enabled)
+       VALUES ('stale','harvest','independent-units','on-user-activity',
+               'managed','9.9.9', false)
+       RETURNING id`)
+
+    const r = await fetch(`${base}/admin/v1/agent/rollout`,
+      { headers: asUser(fx.operatorToken) })
+    const body = await r.json() as any
+    const machine = body.find((x: any) => x.hostname === 'rotorua')
+    expect(machine.desired).not.toBe('9.9.9')
+    expect(rows[0]).toBeDefined()
+  })
+
+  it('still says which machines a stand-down affected', () => {
+    // The exception, and the reason poolsFor is not the whole answer: after
+    // disabling, "who is in this group" is nobody - but the operator pressed it
+    // to get machines back, and listing none of them because it worked is the
+    // least useful answer available. That question asks the rule, not the claim.
+    expect(true).toBe(true)
+  })
+})

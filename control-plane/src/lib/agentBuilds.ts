@@ -84,7 +84,9 @@ export async function desiredBuildFor(
       -- expects and never pushes, which is what makes this safe to run beside
       -- an MDM: two systems racing to own one executable is worse than either
       -- owning it alone.
-      WHERE p.id = ANY($1::uuid[]) AND p.agent_channel = 'managed'
+      -- and standing. A group that has been stood down asserts nothing,
+      -- including which build its machines should run.
+      WHERE p.id = ANY($1::uuid[]) AND p.agent_channel = 'managed' AND p.enabled
       LIMIT 1`,
     [poolIds],
   )

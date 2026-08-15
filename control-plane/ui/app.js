@@ -25,6 +25,7 @@ import {
   bodySkeleton, buildUrl, callableHere, formatResponse, groupOperations,
   isReadOnly, matchesOperation, operationsFrom, responseSize, statusTone,
   whyNotCallable,
+  rankLine, readinessSummary, shouldKeepWatching,
 } from './view.js'
 
 const $ = (sel) => document.querySelector(sel)
@@ -960,7 +961,8 @@ function renderGroups(nodes, pools, models) {
 
   const { groups, ungrouped } = groupMachines(nodes, pools, matchesGroup)
 
-  const card = (title, subtitle, members, poolId, warning, extra = '', off = false) => `
+  const card = (title, subtitle, members, poolId, warning, extra = '', off = false,
+                readiness = '') => `
     <section class="panel group${off ? ' stood-down' : ''}" ${poolId ? `data-drop="${escape(poolId)}"` : ''}>
       <div class="panel-head">
         <h2>${escape(title)}</h2>
@@ -970,6 +972,7 @@ function renderGroups(nodes, pools, models) {
         <span class="hint">${escape(subtitle)}</span>
         ${extra}
       </div>
+      ${readiness}
       ${members.length === 0
         ? '<p class="empty">Nothing here. Drag a machine in.</p>'
         : `<div class="chips">${members.map((n) => `
@@ -1019,9 +1022,18 @@ function renderGroups(nodes, pools, models) {
       ? `, serving ${g.pool.servingModelId.split('/').pop()}${wide ? ` across ${wide}` : ''}`
       : ''
     const state = off ? 'stood down, ' : ''
+    // A cluster group gets a readiness strip. Standing one up means waiting for
+    // weights to reach every machine and for each to build its share, and until
+    // this existed the only way to find out was to send a request and read the
+    // refusal - a diagnostic disguised as a failure, arriving minutes after an
+    // operator could have acted on it.
+    const readiness = g.pool.tier === 'cluster'
+      ? `<div class="readiness" data-readiness="${escape(g.pool.id)}">
+           <span class="hint">checking&hellip;</span></div>`
+      : ''
     return card(g.pool.name, `${state}${g.pool.tier} tier, ${mode}${at}${serves}`,
                 g.nodes, g.pool.id,
-                warning, socket + stand + remove, off)
+                warning, socket + stand + remove, off, readiness)
   }).join('') + (ungrouped.length > 0
     ? card('In no group', 'not scheduled by any pool, and holding no assigned models',
       ungrouped, null, null)
@@ -1183,6 +1195,59 @@ function bindTierDragging(box, nodes) {
       if (node) await apply(node, button.dataset.tier, 'remove')
     })
   }
+}
+
+/**
+ * Fill in the readiness strip on every cluster group's card.
+ *
+ * Fetched per card rather than folded into the main payload: it asks each
+ * machine's residency and the group's own membership, and a fleet view that has
+ * to wait for that before painting anything is a fleet view that feels broken
+ * whenever one machine is slow.
+ */
+let readinessTimer = null
+
+async function loadReadiness(pools) {
+  if (readinessTimer) { clearTimeout(readinessTimer); readinessTimer = null }
+  const slots = document.querySelectorAll('[data-readiness]')
+  if (slots.length === 0) return
+
+  let watching = false
+  await Promise.all([...slots].map(async (slot) => {
+    let r
+    try {
+      r = await api(`/pools/${slot.dataset.readiness}/readiness`)
+    } catch {
+      // A group whose readiness cannot be fetched is not a group in trouble -
+      // it is a request that failed. Saying "blocked" here would invent a fault.
+      slot.innerHTML = '<span class="hint">readiness unavailable</span>'
+      return
+    }
+    if (shouldKeepWatching(r)) watching = true
+    const s = readinessSummary(r)
+    slot.innerHTML = `
+      <div class="ready-head">
+        <span class="ready-pill ${s.level}">${escape(s.label)}</span>
+        <span class="hint">${escape(s.detail)}</span>
+      </div>
+      ${(r.ranks ?? []).length === 0 ? '' : `
+        <div class="ranks">${r.ranks.map((raw) => {
+          const line = rankLine(raw)
+          return `<div class="rank-line ${escape(line.state)}"
+                       title="${escape(line.detail)}">
+            <b>${escape(line.hostname)}</b>
+            ${line.where ? `<span class="ready-rank">${escape(line.where)}</span>` : ''}
+            <span class="marks">${line.marks.map((m) =>
+              `<span class="mark ${/^no |^not /.test(m) ? 'off' : 'on'}">${escape(m)}</span>`
+            ).join('')}</span>
+          </div>`
+        }).join('')}</div>`}`
+  }))
+
+  // Only while something is actually changing. Ready and blocked are stable,
+  // and polling them is a request every few seconds for an answer nobody is
+  // waiting on.
+  if (watching) readinessTimer = setTimeout(() => loadReadiness(pools), 4000)
 }
 
 function bindGroupDragging(box, pools) {
@@ -2213,6 +2278,7 @@ function paint({ summary, nodes, jobs, models, pools, details, imports = [] }) {
 
   if (view === 'machines') {
     renderGroups(nodes, pools, models)
+    loadReadiness(pools)
     renderNodes(nodes, details)
   }
   if (view === 'models') {

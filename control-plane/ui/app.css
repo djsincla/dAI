@@ -785,3 +785,22 @@ th.sortable.desc::after { content: ' \2193'; opacity: 1; color: var(--accent); }
   .ready-pill.bad  { background: rgba(224,110,110,.16); color: #e06e6e; }
   .mark.off { border-color: rgba(224,110,110,.45); color: #e06e6e; }
 }
+
+/* The consequences of a choice, said before it is made. */
+.consequence {
+  margin: 8px 0; padding: 7px 10px; border-radius: 4px; font-size: 13px;
+  border-left: 2px solid var(--rule, rgba(127,127,127,.3));
+}
+.consequence.cost    { border-left-color: #b4541e; }
+.consequence.warn    { border-left-color: #b4541e; opacity: .9; }
+.consequence.blocked { border-left-color: #b02a2a; font-weight: 600; }
+
+.ready-address { margin: 8px 0 0; font-size: 12.5px; opacity: .8; }
+.ready-address code { font-size: 12px; }
+
+.field { display: block; margin: 12px 0; font-size: 13px; }
+.field select, .field input {
+  display: block; width: 100%; margin-top: 4px; padding: 6px 8px;
+  border: 1px solid var(--rule, rgba(127,127,127,.3)); border-radius: 4px;
+  background: inherit; color: inherit; font: inherit;
+}

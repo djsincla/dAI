@@ -3,8 +3,9 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   bodySkeleton, buildUrl, callableHere, formatResponse, groupOperations,
-  isReadOnly, matchesOperation, operationsFrom, rankLine, readinessSummary,
-  resolveRef, responseSize, shouldKeepWatching, statusTone, surfaceOf,
+  groupAddress, isReadOnly, matchesOperation, operationsFrom, rankLine,
+  readinessSummary, resolveRef, responseSize, servableChoices, serveConsequences,
+  shouldKeepWatching, statusTone, surfaceOf,
 } from '../ui/view.js'
 import {
   TIERS, describeTier, inBothTiers, tierMachines, tiersAfter, tiersOf,
@@ -1157,5 +1158,94 @@ describe('how a split group\'s readiness reads', () => {
     expect(shouldKeepWatching({ state: 'ready' })).toBe(false)
     expect(shouldKeepWatching({ state: 'blocked' })).toBe(false)
     expect(shouldKeepWatching(undefined)).toBe(false)
+  })
+})
+
+
+/**
+ * Telling a group what to serve, from the card.
+ *
+ * The console could not do this at all: a group card offered a socket, stand
+ * up and down, delete, and the readiness strip. Everything that assigns a model
+ * was a terminal away.
+ */
+describe('choosing a model for a group', () => {
+  const models = [
+    { id: 'mlx-community/Qwen3-30B', sizeBytes: 17e9, machines: 1 },
+    { id: 'mlx-community/Qwen2.5-Coder-32B', sizeBytes: 18.4e9, machines: 2 },
+    { id: 'ane:embed', sizeBytes: 3e8 },
+  ]
+
+  it('offers everything the fleet knows, not only what is already here', () => {
+    // Telling a group to serve something is also telling it to fetch it.
+    // Offering only what a machine already holds would make the console unable
+    // to express deploying something new, which is the ordinary case.
+    expect(servableChoices(models).map((c) => c.label))
+      .toEqual(['Qwen2.5-Coder-32B', 'Qwen3-30B'])
+  })
+
+  it('leaves out embedding models', () => {
+    // They answer a different endpoint. Offering one is offering a choice that
+    // produces a confusing failure rather than an error.
+    expect(servableChoices(models).some((c) => c.id.startsWith('ane:'))).toBe(false)
+  })
+
+  it('survives a fleet with no models', () => {
+    expect(servableChoices([])).toEqual([])
+    expect(servableChoices(undefined as never)).toEqual([])
+  })
+})
+
+describe('what serving it will do, said beforehand', () => {
+  const split = { id: 'org/32B', label: '32B', sizeBytes: 18.4e9, machines: 2 }
+  const whole = { id: 'org/30B', label: '30B', sizeBytes: 17e9, machines: 1 }
+
+  it('names the cost of a split, which is the machines', () => {
+    const out = serveConsequences(split, 2, 2, [])
+    expect(out.some((c) => c.level === 'cost' && /harvesting/.test(c.text))).toBe(true)
+  })
+
+  it('says nothing about harvesting for a whole model', () => {
+    // A dedicated group holding one model is not a gang and preempts nobody.
+    expect(serveConsequences(whole, 1, 2, [])).toEqual([])
+  })
+
+  it('says when the group is too small before anything is written', () => {
+    const out = serveConsequences(split, 3, 2, [])
+    expect(out.some((c) => c.level === 'blocked' && /2 machines/.test(c.text))).toBe(true)
+  })
+
+  it('warns that the width belongs to the model, not the assignment', () => {
+    // machines is a column on the model, so two cluster groups serving it
+    // cannot divide it differently - and the second group's machines rebuild.
+    // Not something to discover afterwards.
+    const out = serveConsequences(split, 3, 4,
+      [{ name: 'split-b', servingModelId: 'org/32B' }])
+    expect(out.some((c) => c.level === 'warn' && /split-b/.test(c.text))).toBe(true)
+  })
+
+  it('stays quiet when nothing else serves it', () => {
+    const out = serveConsequences(split, 3, 4,
+      [{ name: 'split-b', servingModelId: 'org/other' }])
+    expect(out.some((c) => c.level === 'warn')).toBe(false)
+  })
+
+  it('stays quiet when the width is not changing', () => {
+    // Assigning a model at the width it already has changes nothing elsewhere.
+    const out = serveConsequences(split, 2, 4,
+      [{ name: 'split-b', servingModelId: 'org/32B' }])
+    expect(out.some((c) => c.level === 'warn')).toBe(false)
+  })
+})
+
+describe('the address to point an application at', () => {
+  it('is the group\'s own socket, in a form somebody can paste', () => {
+    expect(groupAddress({ servingPort: 8461 }, 'https://rotorua:8452/ui/'))
+      .toBe('https://rotorua:8461')
+  })
+
+  it('is nothing at all for a group without one', () => {
+    // Rather than a plausible-looking address that reaches the wrong group.
+    expect(groupAddress({ servingPort: null }, 'https://rotorua:8452/')).toBeNull()
   })
 })

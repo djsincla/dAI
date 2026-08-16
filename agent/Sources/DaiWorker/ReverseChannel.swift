@@ -60,6 +60,16 @@ public actor ReverseChannel {
     /// than the wrong trust anchor.
     private var splitIdentity: (identity: NodeIdentity, peerCAPEM: String)?
 
+    /// This machine's built share of a split model, kept between requests.
+    ///
+    /// Building it reads weights off disk and constructs a model, which is most
+    /// of what a cold split request costs. The channel it runs over does not
+    /// last and is not kept; the model is.
+    private var share: SplitRunner?
+    /// What the held share was built for. A different rank or gang size means
+    /// different layers, so the share is for a fleet that no longer exists.
+    private var heldPlan: SplitRunner.Plan?
+
     public init(controlPlane: any ControlPlaneClient, gpu: MLXRuntime?,
                 source: SignalSource = MacSignalSource(),
                 status: StatusPublisher = StatusPublisher(),
@@ -250,6 +260,41 @@ public actor ReverseChannel {
     /// and the listener is frequently not up when the first attempt arrives.
     /// That is ordinary rather than a failure; a peer that never comes is
     /// separated from one that is slow by giving up after a bounded time.
+    /// The built share for this plan, kept across requests.
+    ///
+    /// One at a time, and keyed by the whole plan rather than the model alone.
+    /// A rank or a gang size that differs means the layers this machine owns
+    /// differ, so the built model is for a fleet that no longer exists and has
+    /// to be replaced rather than reused. The dispatch stays authoritative: a
+    /// kept share is an optimisation and never a claim about what the control
+    /// plane decided.
+    private func shareFor(_ plan: SplitRunner.Plan) async -> SplitRunner {
+        if let held = share, heldPlan == plan { return held }
+        if share != nil {
+            log("this machine's share is for \(heldPlan.map(String.init(describing:)) ?? "nothing")"
+                + "; rebuilding for \(plan)")
+            await share?.release()
+        }
+        let runner = SplitRunner(plan: plan)
+        share = runner
+        heldPlan = plan
+        return runner
+    }
+
+    /// Let go of the built share and its memory.
+    ///
+    /// Called when this machine stops being part of a split. Releasing lives
+    /// here, with the thing that owns it, for the reason 21100c2 records: two
+    /// loops releasing one model is how the batch loop freed the model the
+    /// serving loop was using.
+    public func releaseShare() async {
+        guard let held = share else { return }
+        await held.release()
+        share = nil
+        heldPlan = nil
+        log("released this machine\'s share of a split model")
+    }
+
     private func runSplit(_ split: SplitDispatch,
                           dispatch: ControlPlane.Dispatch) async {
         let directory = MLXRuntime.modelDirectory
@@ -301,9 +346,14 @@ public actor ReverseChannel {
                 log("rank \(split.rank) connected to \(split.peer!)")
             }
 
-            let runner = SplitRunner(
-                plan: .init(modelId: split.model, rank: split.rank, size: split.size),
-                channel: channel)
+            // Kept between requests when the plan has not changed, because
+            // building the share is most of what a cold split costs. The
+            // channel is not kept - one is opened per request and closed on
+            // every exit path - so the model is pointed at this request's link
+            // rather than rebuilt against it.
+            let runner = await shareFor(
+                .init(modelId: split.model, rank: split.rank, size: split.size))
+            await runner.rebind(channel)
             // The cap the control plane already applied, computed from the
             // presence of the machine holding the head. Read rather than
             // recomputed, so the decision lives in one place.

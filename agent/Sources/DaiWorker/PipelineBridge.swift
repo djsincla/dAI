@@ -90,21 +90,67 @@ public enum TensorBridge {
 /// purpose. That thread is a compute thread mid-token; there is no other work
 /// for it.
 public final class ChannelPipelineTransport: PipelineTransport, @unchecked Sendable {
-    private let channel: PipelineChannel
+    private let lock = NSLock()
+    private var channel: PipelineChannel?
     private let timeout: TimeInterval
 
-    public init(channel: PipelineChannel, timeout: TimeInterval = 120) {
+    public init(channel: PipelineChannel? = nil, timeout: TimeInterval = 120) {
         self.channel = channel
         self.timeout = timeout
     }
 
+    /// Point this transport at the link for the request about to run.
+    ///
+    /// The channel is bound into the model when it is built - `pipeline(_:
+    /// transport:fault:)` hands this object to every layer - and channels do not
+    /// last: one is opened per request and closed on every exit path, because a
+    /// leaked listener does not merely waste a port, it answers.
+    ///
+    /// Without rebinding, a built model can serve only the request it was built
+    /// for, so every split request rebuilds its share from disk. This is the
+    /// same move `ReverseChannel.adopt(controlPlane:splitIdentity:)` makes after
+    /// a certificate renewal: the expensive thing stays, the connection is
+    /// replaced.
+    ///
+    /// Mutable state is why the `@unchecked Sendable` on this type stopped being
+    /// trivially true. It was honest before because nothing changed; the lock is
+    /// what keeps it honest now.
+    public func adopt(_ channel: PipelineChannel?) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.channel = channel
+    }
+
+    /// A transport asked to carry something before it was pointed anywhere.
+    public enum Unbound: Error, CustomStringConvertible {
+        case noChannel
+        public var description: String {
+            "this rank's model is not connected to a peer for this request"
+        }
+    }
+
+    /// The link to use right now, or a failure that says so immediately.
+    ///
+    /// Throwing beats waiting. A model holding no channel would otherwise block
+    /// inside `blocking` until the 120 s deadline and then report a timeout,
+    /// which says the peer was slow rather than that nothing was ever
+    /// connected - two minutes spent to learn the wrong thing.
+    private func current() throws -> PipelineChannel {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let channel else { throw Unbound.noChannel }
+        return channel
+    }
+
     public func send(_ x: MLXArray, to rank: Int) throws {
+        let channel = try current()
         let frame = try TensorBridge.encode(x)
-        try blocking { try await self.channel.send(frame) }
+        try blocking { try await channel.send(frame) }
     }
 
     public func receive(like: MLXArray, from rank: Int) throws -> MLXArray {
-        let frame = try blocking { try await self.channel.receive() }
+        let channel = try current()
+        let frame = try blocking { try await channel.receive() }
         return try TensorBridge.decode(frame, expecting: like)
     }
 

@@ -26,6 +26,12 @@ public actor ReverseChannel {
     /// loop owns that decision and hands the new runtime over, the same way it
     /// hands over a renewed certificate.
     private var gpu: MLXRuntime?
+    /// Reported, not used. Both loops heartbeat and each replaces
+    /// `resident_models` wholesale, so a loop that can only see half of what
+    /// this machine holds erases the other half every twenty seconds - which
+    /// made residency flap between the two answers and the readiness strip
+    /// flicker between ready and preparing.
+    private let ane: ANERuntime?
     private let source: SignalSource
     private let monitor: PresenceMonitor
     private let pauseSwitch = PauseSwitch()
@@ -86,6 +92,7 @@ public actor ReverseChannel {
     private var heldPlan: SplitRunner.Plan?
 
     public init(controlPlane: any ControlPlaneClient, gpu: MLXRuntime?,
+                ane: ANERuntime? = nil,
                 source: SignalSource = MacSignalSource(),
                 status: StatusPublisher = StatusPublisher(),
                 promoteAfter: TimeInterval = idlePromoteSeconds,
@@ -93,6 +100,7 @@ public actor ReverseChannel {
         self.status = status
         self.controlPlane = controlPlane
         self.gpu = gpu
+        self.ane = ane
         self.source = source
         self.monitor = PresenceMonitor(promoteAfter: promoteAfter)
         self.splitIdentity = splitIdentity
@@ -259,6 +267,7 @@ public actor ReverseChannel {
         // request still built cold.
         var resident: [String: Double] = [:]
         if let gpu, await gpu.isLoaded { resident[await gpu.name] = await gpu.residentGb }
+        if let ane, await ane.isLoaded { resident["ane:embed"] = 0.3 }
         if let held = share, let plan = heldPlan, await held.isBuilt {
             resident[plan.modelId] = await held.residentGb
         }
@@ -296,7 +305,18 @@ public actor ReverseChannel {
         guard directives.keepLoaded,
               let model = directives.servingModel,
               let seat = directives.standingSplit
-        else { return }
+        else {
+            // No split stands here any more - the group was stood down, or this
+            // machine was handed back. Let the share go.
+            //
+            // releaseShare existed and nothing called it, which is the same
+            // shape as keepLoaded reaching the agent and being acted on by
+            // nothing: written, plausible, and doing nothing. The socket already
+            // tells callers the machines have been handed back, and that has to
+            // be true of the workstation as well as the scheduler.
+            await releaseShare()
+            return
+        }
 
         let directory = MLXRuntime.modelDirectory.appendingPathComponent(model)
         guard FileManager.default.fileExists(atPath: directory.path) else {
@@ -368,6 +388,15 @@ public actor ReverseChannel {
         share = runner
         heldPlan = plan
         return runner
+    }
+
+    /// What this loop is holding, for the loop that cannot see it.
+    ///
+    /// Both heartbeat and each replaces resident_models wholesale, so each has
+    /// to report the whole picture or it erases the other's half.
+    public func residentShare() async -> [String: Double] {
+        guard let held = share, let plan = heldPlan, await held.isBuilt else { return [:] }
+        return [plan.modelId: await held.residentGb]
     }
 
     /// Let go of the built share and its memory.

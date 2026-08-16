@@ -124,6 +124,9 @@ public actor Worker {
     /// Told when this machine starts serving a different model, so the loop
     /// that answers requests stops holding the old runtime.
     private let onServingModelChanged: (@Sendable (MLXRuntime, String) async -> Void)?
+    /// What the serving loop holds that this one cannot see. Read rather than
+    /// owned: the split share belongs to the actor that serves requests.
+    private let sharedModels: (@Sendable () async -> [String: Double])?
 
     /// Holds the machine awake while it is on AC and nobody has paused it.
     /// Released when either stops being true, and when the process dies.
@@ -149,11 +152,13 @@ public actor Worker {
                 renewer: (any CertificateRenewing)? = nil,
                 onRenewed: (@Sendable (any ControlPlaneClient) async -> Void)? = nil,
                 onServingModelChanged: (@Sendable (MLXRuntime, String) async -> Void)? = nil,
+                sharedModels: (@Sendable () async -> [String: Double])? = nil,
                 sleepAssertion: SleepAssertion = SleepAssertion(),
                 promoteAfter: TimeInterval = idlePromoteSeconds) {
         self.renewer = renewer
         self.onRenewed = onRenewed
         self.onServingModelChanged = onServingModelChanged
+        self.sharedModels = sharedModels
         self.renderer = renderer
         self.scenes = scenes
         self.attachments = attachments
@@ -215,6 +220,14 @@ public actor Worker {
         var out: [String: Double] = [:]
         if let gpu, await gpu.isLoaded { out[await gpu.name] = await gpu.residentGb }
         if let ane, await ane.isLoaded { out["ane:embed"] = 0.3 }
+        // Whatever the serving loop is holding as its share of a split.
+        //
+        // Both loops heartbeat and each replaces resident_models wholesale, so
+        // a loop reporting only what it can see erases what it cannot. That
+        // made residency alternate between two partial answers every twenty
+        // seconds, and the readiness strip flicker between ready and preparing
+        // - a machine appearing to load and unload a model it never touched.
+        for (name, gb) in await sharedModels?() ?? [:] { out[name] = gb }
         return out
     }
 

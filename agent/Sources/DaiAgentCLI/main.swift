@@ -448,6 +448,13 @@ case "work":
                                 await serving.get()?.adopt(runtime: runtime,
                                                            named: named)
                             },
+                            // What the serving loop holds and this one cannot
+                            // see. Both heartbeat and each replaces
+                            // resident_models wholesale, so each has to report
+                            // the whole picture or it erases the other's half.
+                            sharedModels: {
+                                await serving.get()?.residentShare() ?? [:]
+                            },
                             promoteAfter: promote)
 
         // Batch and serving run side by side in one process, because a node
@@ -464,7 +471,7 @@ case "work":
             let peerCA = try? String(
                 contentsOf: dir.appendingPathComponent("node-ca.crt"), encoding: .utf8)
             let splitCredentials = peerCA.map { (identity: identity, peerCAPEM: $0) }
-            let channel = ReverseChannel(controlPlane: cp, gpu: gpu,
+            let channel = ReverseChannel(controlPlane: cp, gpu: gpu, ane: ane,
                                          status: status, promoteAfter: promote,
                                          splitIdentity: splitCredentials)
             if let servedPolicy = try? await cp.fetchPolicy() {

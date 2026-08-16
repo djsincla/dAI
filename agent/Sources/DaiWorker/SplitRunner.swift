@@ -95,6 +95,16 @@ public actor SplitRunner {
         transport.adopt(channel)
     }
 
+    /// What this machine's share is taking, in gigabytes.
+    ///
+    /// From the same global counter `MLXRuntime` reads, so it is the process
+    /// rather than this model: approximate, and it always was. Reported so a
+    /// readiness view can say something rather than nothing, not so anybody can
+    /// attribute bytes.
+    public var residentGb: Double {
+        built == nil ? 0 : Double(GPU.snapshot().activeMemory) / 1_073_741_824
+    }
+
     /// Whether this runner already holds a built share for the plan it was
     /// created with. Asked by the owner deciding whether to keep it.
     public var isBuilt: Bool { built != nil }

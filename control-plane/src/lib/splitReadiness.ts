@@ -20,6 +20,8 @@
  * traffic, which is the one that is nearly always a cable.
  */
 
+import { assignRanks } from './splitRanks.js'
+
 export interface RankFacts {
   nodeId: string
   hostname: string
@@ -125,21 +127,33 @@ export function splitReadiness(input: {
 
   const assessed = members.map((f) => ({ facts: f, ...stateOf(f, model) }))
 
-  // Rank 0 holds the output head and listens; everything else dials it. A
-  // machine with no address cannot be dialled, so it cannot be rank 0 - the
-  // same rule the router applies, so that a group reported ready here is
-  // admitted there.
-  const ordered = [...assessed].sort(
-    (a, b) => Number(b.dialable) - Number(a.dialable))
-  const canAssignRanks = ordered.length > 0 && ordered[0]!.dialable
+  // The same assignment the router makes at dispatch and the heartbeat sends
+  // ahead of it, from one implementation - so a group reported ready here is a
+  // group admitted there, and a machine warms the share it will be asked for.
+  const assigned = assignRanks(assessed.map((a) => ({
+    id: a.facts.nodeId, hostname: a.facts.hostname,
+    pipelineAddress: a.facts.pipelineAddress,
+  })))
+  const canAssignRanks = assigned !== null
+  const seatFor = new Map((assigned ?? []).map((r) => [r.member.id, r]))
 
-  const ranks: RankReadiness[] = ordered.map((a, i) => ({
-    hostname: a.facts.hostname,
-    rank: canAssignRanks ? i : null,
-    role: canAssignRanks ? (i === 0 ? 'output head' : 'feeds the next rank') : null,
-    state: a.state, detail: a.detail,
-    weights: a.weights, loaded: a.loaded, dialable: a.dialable,
-  }))
+  // Listed in rank order when there is one, so the head reads first. Without an
+  // ordering the machines are listed as they came, because inventing an order
+  // for a group that cannot form implies a decision nobody made.
+  const inOrder = canAssignRanks
+    ? assigned!.map((r) => assessed.find((a) => a.facts.nodeId === r.member.id)!)
+    : assessed
+
+  const ranks: RankReadiness[] = inOrder.map((a) => {
+    const seat = seatFor.get(a.facts.nodeId)
+    return {
+      hostname: a.facts.hostname,
+      rank: seat?.rank ?? null,
+      role: seat?.role ?? null,
+      state: a.state, detail: a.detail,
+      weights: a.weights, loaded: a.loaded, dialable: a.dialable,
+    }
+  })
 
   const present = members.length
   if (present < machines) {

@@ -896,3 +896,79 @@ describe('whether a split group is ready to serve', () => {
     expect(r.status).toBe(404)
   })
 })
+
+
+/**
+ * The rank a machine is told before anything asks for it.
+ *
+ * Rank was decided per request at dispatch, which is too late to have built
+ * anything - a cold gang pays the slowest machine's load before the first
+ * token. Sent with the heartbeat, from the same assignment the router makes, so
+ * the share a machine warms is the one it will be asked for.
+ */
+describe('the share a machine is told to hold', () => {
+  const model = 'mlx-community/Qwen2.5-Coder-32B-Instruct-4bit'
+
+  const clusterNode = async (hostname: string, address: string | null) => {
+    const { rows } = await db.query(
+      `INSERT INTO nodes (hostname, tiers, state, cert_fingerprint, last_heartbeat,
+                          pipeline_address)
+       VALUES ($1, ARRAY['cluster']::text[], 'active', $2, now(), $3)
+       RETURNING id`, [hostname, `fp-${hostname}`, address])
+    return rows[0]!.id as string
+  }
+
+  const splitGroup = async () => {
+    await db.query(
+      `INSERT INTO models (id, size_bytes, machines, runtime, kind)
+       VALUES ($1, 1, 2, 'mlx', 'generate')
+       ON CONFLICT (id) DO UPDATE SET machines = 2`, [model])
+    await db.query(
+      `INSERT INTO pools (name, tier, schedule, preempt, serving_model_id, enabled)
+       VALUES ('split-cluster','cluster','gang','never',$1,true)`, [model])
+  }
+
+  const beat = (fp: string) =>
+    fetch(`${base}/agent/v1/heartbeat`, {
+      method: 'POST', headers: asNode(fp),
+      body: JSON.stringify({ presenceState: 'IDLE' }),
+    })
+
+  it('gives the output head to a machine that can be dialled', async () => {
+    await splitGroup()
+    await clusterNode('rotorua-split', null)
+    await clusterNode('orca-split', '192.168.99.2')
+
+    const head = await (await beat('fp-orca-split')).json() as any
+    const feeder = await (await beat('fp-rotorua-split')).json() as any
+    expect(head.rank).toBe(0)
+    expect(head.size).toBe(2)
+    expect(feeder.rank).toBe(1)
+    // And the width, so the machine knows this is a share rather than a model.
+    expect(head.machines).toBe(2)
+  })
+
+  it('sends no rank when nobody can be dialled', async () => {
+    // A machine told a rank would build a share for a gang that cannot form.
+    await splitGroup()
+    await clusterNode('a-split', null)
+    await clusterNode('b-split', null)
+
+    const body = await (await beat('fp-a-split')).json() as any
+    expect(body.rank).toBeUndefined()
+    expect(body.size).toBeUndefined()
+  })
+
+  it('sends no rank for a model that runs on one machine', async () => {
+    // Nothing to build ahead: the machine holds the whole model.
+    await db.query(
+      `INSERT INTO models (id, size_bytes, machines, runtime, kind)
+       VALUES ('org/whole', 1, 1, 'mlx', 'generate') ON CONFLICT DO NOTHING`)
+    await db.query(
+      `UPDATE pools SET serving_model_id = 'org/whole' WHERE id = $1`, [fx.poolId])
+
+    const body = await (await beat(fx.fingerprint)).json() as any
+    expect(body.rank).toBeUndefined()
+    expect(body.machines).toBe(1)
+  })
+})

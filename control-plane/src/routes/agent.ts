@@ -4,6 +4,7 @@ import type { Db } from '../lib/db.js'
 import { agentAuth } from '../lib/auth.js'
 import { poolsFor } from '../lib/pools.js'
 import { effectiveServing } from '../lib/groupRules.js'
+import { assignRanks, rankOf } from '../lib/splitRanks.js'
 import { repositoryRoot, safePath } from '../lib/repository.js'
 import { outputsRoot, sceneById, scenesRoot } from '../lib/scenes.js'
 import { blobPath, finishIfDone, manifestFor, outputPath } from '../lib/attachments.js'
@@ -537,8 +538,52 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
       // presence policy already covers "somebody wants their machine back",
       // and this covers "nobody wants anything", which nothing did.
       idleUnloadSeconds: serving.idleUnloadSeconds,
+      // Which share of a split this machine holds, before anything asks for it.
+      //
+      // Rank is decided per request at dispatch, which is too late for a machine
+      // to have built anything: a cold gang pays the slowest machine's load
+      // before the first token. This is the same assignment from the same
+      // function, sent ahead so the share can be ready.
+      //
+      // The dispatch stays authoritative. If it names a different rank -
+      // membership changed, an address came or went - the machine rebuilds,
+      // because the share it warmed was for a fleet that no longer exists.
+      ...(await standingRank(db, node, serving)),
     })
   })
+
+  /**
+   * This machine's seat in a split, decided the same way the router decides it.
+   *
+   * Only for a group serving a model that runs across machines: everything else
+   * gets nothing, and a node that is told nothing warms whatever it holds
+   * whole. Costs one query, and only on the heartbeats that need it.
+   */
+  async function standingRank(
+    db: Db, node: { id: string }, serving: { machines: number; groupId: string | null },
+  ): Promise<{ rank?: number; size?: number }> {
+    if (serving.machines <= 1 || !serving.groupId) return {}
+
+    const { rows: pool } = await db.query(
+      `SELECT id, tier, membership FROM pools WHERE id = $1 AND enabled`,
+      [serving.groupId])
+    if (pool.length === 0) return {}
+
+    const { rows: nodes } = await db.query(
+      `SELECT id, hostname, tier, chip, memory_gb, pipeline_address
+         FROM nodes WHERE state = 'active'`)
+    const members = (nodes as any[])
+      .filter((n) => poolsFor(n as never, pool as never).length > 0)
+      .map((n) => ({
+        id: n.id as string, hostname: n.hostname as string,
+        pipelineAddress: (n.pipeline_address as string | null) ?? null,
+      }))
+
+    const rank = rankOf(assignRanks(members), node.id)
+    // No rank when nobody can be dialled. Sending one anyway would have a
+    // machine build a share for a gang that cannot form.
+    return rank === null ? {} : { rank, size: members.length }
+  }
 
   /**
    * What this node should be holding.

@@ -8,6 +8,7 @@ import { candidatesFor, isRefusal, selectGang, selectNode,
 import { shapeOf } from '../lib/shape.js'
 import { membersOf } from '../lib/pools.js'
 import { splitReport } from '../lib/splitReport.js'
+import { assignRanks } from '../lib/splitRanks.js'
 
 /**
  * OpenAI-compatible serving surface.
@@ -170,9 +171,14 @@ async function gangFor(
   // Rank 0 holds the last layers and the output head, and listens. Everything
   // else dials it. A rank with no address cannot be dialled, so it cannot be
   // rank 0 - and if no member has one, there is no gang to form.
-  const ordered = [...gang].sort((a, b) =>
-    Number(!!address.get(b.id)) - Number(!!address.get(a.id)))
-  if (!address.get(ordered[0]!.id)) {
+  //
+  // From the same implementation the readiness view and the heartbeat use, so a
+  // group reported ready is a group admitted here, and a machine that warmed a
+  // share warmed the one it is about to be asked for.
+  const ordered = assignRanks(gang.map((c) => ({
+    id: c.id, hostname: c.hostname, pipelineAddress: address.get(c.id) ?? null,
+  })))
+  if (ordered === null) {
     return { refusal: {
       refused: 'gang-short',
       detail: 'no machine in this group has said where a peer should dial it; '
@@ -181,11 +187,11 @@ async function gangFor(
   }
 
   return {
-    members: ordered.map((c, rank) => ({
-      nodeId: c.id, hostname: c.hostname, rank,
-      address: address.get(c.id) ?? null,
+    members: ordered.map((r) => ({
+      nodeId: r.member.id, hostname: r.member.hostname, rank: r.rank,
+      address: r.member.pipelineAddress,
     })),
-    listenAt: address.get(ordered[0]!.id)!,
+    listenAt: ordered[0]!.member.pipelineAddress!,
   }
 }
 

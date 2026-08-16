@@ -20,7 +20,15 @@ import Tokenizers
 /// picks a different token, and the two halves quietly diverge into a
 /// conversation neither of them is having.
 public actor SplitRunner {
-    public struct Plan: Sendable {
+    /// Equatable because the owner keeps a built share and has to answer "is
+    /// what I hold the same division of the same model". A different rank or
+    /// gang size means different layers, which is a different model in memory
+    /// however alike the plans look.
+    public struct Plan: Sendable, Equatable, CustomStringConvertible {
+        public var description: String {
+            "rank \(rank) of \(size) for \(modelId)"
+        }
+
         public let modelId: String
         public let rank: Int
         public let size: Int
@@ -60,15 +68,41 @@ public actor SplitRunner {
 
     private let plan: Plan
     private let transport: ChannelPipelineTransport
-    private let channel: PipelineChannel
     /// Where the model records a link failure it had no way to throw. Checked
     /// after every step, before anything is sampled.
     private let fault = PipelineFault()
 
-    public init(plan: Plan, channel: PipelineChannel) {
+    /// This machine's share, once built.
+    ///
+    /// Kept rather than rebuilt. Building it reads weights off disk and
+    /// constructs a model, which is most of what a cold split request costs;
+    /// the channel it was built against does not last, but the model does, and
+    /// the transport is what stands between them.
+    private var built: Loaded?
+
+    public init(plan: Plan, channel: PipelineChannel? = nil) {
         self.plan = plan
-        self.channel = channel
         self.transport = ChannelPipelineTransport(channel: channel)
+    }
+
+    /// Point the built model at the link for the request about to run.
+    ///
+    /// Called before every generation, including the first. A model that keeps
+    /// a channel from a previous request would send into a socket that has been
+    /// closed - and `close()` on every exit path is deliberate, so that is the
+    /// normal state between requests rather than an unusual one.
+    public func rebind(_ channel: PipelineChannel?) {
+        transport.adopt(channel)
+    }
+
+    /// Whether this runner already holds a built share for the plan it was
+    /// created with. Asked by the owner deciding whether to keep it.
+    public var isBuilt: Bool { built != nil }
+
+    /// Let go of the built share, so its memory returns.
+    public func release() {
+        built = nil
+        transport.adopt(nil)
     }
 
     /// Load only this machine's share of the model.
@@ -263,8 +297,21 @@ public actor SplitRunner {
     /// out because it runs at top level with no isolation to cross. A loop that
     /// is an actor cannot, so the two steps stay inside and only the answer
     /// leaves.
+    /// Build this machine's share if it is not already built.
+    ///
+    /// Separate from `run` so a machine can be made ready before anything is
+    /// asked of it: a split cannot begin until every rank has built its share,
+    /// so a cold gang pays the slowest machine's load before the first token.
+    @discardableResult
+    public func prepare(directory: URL) async throws -> Bool {
+        if built != nil { return false }
+        built = try await load(directory: directory)
+        return true
+    }
+
     public func run(directory: URL, prompt: String, maxTokens: Int) async throws -> Completed {
-        let loaded = try await load(directory: directory)
+        try await prepare(directory: directory)
+        guard let loaded = built else { throw Failure.notPipelineable(plan.modelId) }
         let outcome = try generate(loaded, prompt: prompt, maxTokens: maxTokens)
         return Completed(outcome: outcome, isHead: loaded.split.isLast,
                          layers: loaded.split.startIndex ..< loaded.split.endIndex,

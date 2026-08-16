@@ -539,6 +539,36 @@ paths:
                       which the node treats as "keep what you have" rather than
                       "stop serving" - a group that has not been given a model
                       is not an instruction to unload one.
+                  keepLoaded:
+                    type: boolean
+                    description: >
+                      Whether to hold the model in memory rather than loading it
+                      when a request arrives. Intent, not tier: a node never
+                      learns which groups it is in, and "hold this loaded" is an
+                      instruction it can follow without knowing why.
+
+
+                      True for a cluster group, because a split cannot begin
+                      until every rank has built its share - a cold gang pays
+                      the slowest machine's load before the first token, and
+                      pays it again whenever the group falls idle. False for
+                      harvest, where the machine belongs to whoever is sitting
+                      at it.
+                  machines:
+                    type: integer
+                    minimum: 1
+                    description: >
+                      How many machines this model runs across, as declared on
+                      the model. Sent because a node cannot work it out and must
+                      not guess.
+
+
+                      Warming a model that runs across machines by loading the
+                      whole thing is worse than not warming at all: it holds
+                      roughly twice the memory the share needs, and the warm
+                      copy is never used, because the split path builds its own
+                      model with num_hidden_layers cut to this rank's range from
+                      the same weights.
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
 

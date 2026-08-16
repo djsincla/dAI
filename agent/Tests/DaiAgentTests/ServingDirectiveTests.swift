@@ -103,3 +103,49 @@ struct KeepLoadedTests {
         #expect(d.renewRequested)
     }
 }
+
+
+/// What a machine may warm, and what it must not.
+///
+/// `MLXRuntime` knows nothing about splits: loading it builds the whole model.
+/// So a machine warming half of a 32B took all 18.4 GB to serve 9.45 GB of it,
+/// and then never used the result - the split path builds its own model with
+/// num_hidden_layers cut to this rank's range. Peak memory became both at once
+/// on a machine with a 37.4 GB working set: a mechanism meant to halve memory
+/// multiplying it instead.
+@Suite("what a machine may warm")
+struct WarmEligibilityTests {
+    @Test("a whole model on a dedicated group is warmed")
+    func wholeModel() {
+        let d = ControlPlane.Directives(servingModel: "m", keepLoaded: true, machines: 1)
+        #expect(d.keepLoaded)
+        #expect(!d.isSplit)
+    }
+
+    @Test("a model that runs across machines is not")
+    func splitModel() {
+        // The instruction to hold it loaded still stands; what must not happen
+        // is holding the wrong thing. Doing nothing is strictly better than
+        // taking twice the memory for a copy nobody reads.
+        let d = ControlPlane.Directives(servingModel: "m", keepLoaded: true, machines: 2)
+        #expect(d.keepLoaded)
+        #expect(d.isSplit)
+    }
+
+    @Test("a control plane too old to say means whole, so warming is skipped safely")
+    func absentMeansOne() {
+        // Absent has to fail toward the safe side. Treating an unknown model as
+        // split would stop warming a machine that should be warm; treating it as
+        // whole and warming it wrongly is the failure being fixed. One is a
+        // missed optimisation, the other doubles memory - so absent means 1 and
+        // an older control plane simply keeps the behaviour it had.
+        #expect(ControlPlane.Directives().machines == 1)
+        #expect(!ControlPlane.Directives(servingModel: "m", keepLoaded: true).isSplit)
+    }
+
+    @Test("a nonsense width is clamped rather than believed")
+    func clamped() {
+        #expect(ControlPlane.Directives(machines: 0).machines == 1)
+        #expect(ControlPlane.Directives(machines: -3).machines == 1)
+    }
+}

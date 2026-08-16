@@ -490,9 +490,16 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
     const { rows: pools } = await db.query(
       `SELECT id, name, tier, membership, serving_model_id FROM pools
         WHERE serving_model_id IS NOT NULL AND enabled`)
+    // How wide each model was declared, so the node can be told whether what it
+    // has been asked to hold runs across machines. One query rather than one
+    // per pool: there are few models and this runs on every heartbeat.
+    const { rows: widths } = await db.query(`SELECT id, machines FROM models`)
+    const machinesFor = new Map((widths as { id: string; machines: number }[])
+      .map((m) => [m.id, Math.max(1, Number(m.machines ?? 1))]))
+
     const serving = effectiveServing(node as never, (pools as any[]).map((p) => ({
       ...p, servingModelId: p.serving_model_id as string,
-    })) as never)
+    })) as never, (id) => machinesFor.get(id) ?? 1)
 
     res.json({
       renewRequested: asked[0]?.renew_requested_at != null,
@@ -512,6 +519,14 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
       // the first token, and pays it again whenever the group falls idle. False
       // for harvest, where the machine belongs to whoever is sitting at it.
       keepLoaded: serving.keepLoaded,
+      // How many machines this model runs across.
+      //
+      // Sent because a node cannot know it and must not guess. Warming a split
+      // by loading the whole model is worse than not warming at all: it holds
+      // twice the memory the share needs, and the split path never uses it -
+      // it builds its own model with num_hidden_layers cut to this rank's
+      // range, straight from the same weights.
+      machines: serving.machines,
     })
   })
 

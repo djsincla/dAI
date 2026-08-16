@@ -522,7 +522,12 @@ public actor Worker {
     /// They arrive here with no window at all rather than a very long one,
     /// because a very long number is one somebody eventually sets short.
     static func shouldReleaseWhenIdle(lastRequestEndedAt: Date?, now: Date,
-                                      window: TimeInterval?) -> Bool {
+                                      window: TimeInterval?, serving: Int = 0) -> Bool {
+        // Never while answering. The window is decided from when the last
+        // request ended, which is stale for the whole of the one running now -
+        // so a long request would otherwise be judged idle and have its model
+        // unloaded the instant it finished, taking the prompt cache with it.
+        guard serving == 0 else { return false }
         guard let window else { return false }
         // Nothing has been served since this machine started or last let go.
         // There is nothing held that this rule put there, so there is nothing

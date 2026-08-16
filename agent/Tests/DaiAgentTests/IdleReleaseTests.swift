@@ -49,6 +49,33 @@ struct IdleReleaseTests {
             lastRequestEndedAt: now.addingTimeInterval(-100_000), now: now, window: nil))
     }
 
+    @Test("never while a request is being answered")
+    func whileServing() {
+        // The bug this guard exists for. The window is decided from when the
+        // last request *ended*, which is stale for the whole of the one running
+        // now - so a request longer than the window would be judged idle and
+        // have its model unloaded the instant it finished, taking the prompt
+        // cache with it. There is a measured example: 19,243 tokens took 377
+        // seconds against a 300 second default.
+        #expect(!Worker.shouldReleaseWhenIdle(
+            lastRequestEndedAt: now.addingTimeInterval(-100_000), now: now,
+            window: window, serving: 1))
+        // And with several in flight, which is the ordinary case on a machine
+        // answering more than one caller.
+        #expect(!Worker.shouldReleaseWhenIdle(
+            lastRequestEndedAt: now.addingTimeInterval(-100_000), now: now,
+            window: window, serving: 3))
+    }
+
+    @Test("releases once the last of them finishes")
+    func afterServing() {
+        // The counter reaching zero is what makes the machine idle; the clock
+        // then decides whether it has been idle long enough.
+        #expect(Worker.shouldReleaseWhenIdle(
+            lastRequestEndedAt: now.addingTimeInterval(-301), now: now,
+            window: window, serving: 0))
+    }
+
     @Test("a machine that has served nothing has nothing to release")
     func neverServed() {
         // Whatever it holds was not put there by serving, so this rule is not

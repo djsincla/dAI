@@ -579,6 +579,19 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
         pipelineAddress: (n.pipeline_address as string | null) ?? null,
       }))
 
+    // Only when the group is exactly the size the model needs.
+    //
+    // The router forms a gang of `machines` machines and picks which ones; this
+    // is a prediction made ahead of that, and it can only be right when there
+    // is nothing to pick. A group of three serving a two-machine model would
+    // have every machine warm rank r of three, the dispatch would say two, and
+    // all of them would rebuild - pre-warming quietly doing nothing while
+    // appearing to work.
+    //
+    // Refusing to guess is safe: warming is an optimisation, and a machine told
+    // nothing builds its share when the request arrives, as it always did.
+    if (members.length !== serving.machines) return {}
+
     const rank = rankOf(assignRanks(members), node.id)
     // No rank when nobody can be dialled. Sending one anyway would have a
     // machine build a share for a gang that cannot form.

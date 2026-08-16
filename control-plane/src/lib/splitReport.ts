@@ -110,21 +110,3 @@ export function splitReport(
     })),
   }
 }
-
-/**
- * One line an operator can read, for a log or a terminal.
- *
- * The layer ranges are the part that proves division actually happened: two
- * hostnames prove only that two machines were sent the work, where
- * `0..<24` beside `24..<48` proves neither of them held the whole model.
- */
-export function describeSplit(report: SplitReport): string {
-  const parts = report.ranks.map((r) => {
-    const where = r.layers ? ` layers ${r.layers[0]}..<${r.layers[1]}` : ''
-    return `${r.hostname} (rank ${r.rank}${where}${r.rank === 0 ? ', head' : ''})`
-  })
-  const caveat = report.layersReported
-    ? ''
-    : ' - layer ranges not reported by this agent version'
-  return `${report.machines} machines: ${parts.join(', ')}${caveat}`
-}

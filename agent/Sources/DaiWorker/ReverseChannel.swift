@@ -84,6 +84,20 @@ public actor ReverseChannel {
     /// the batch loop released the model the serving loop was using, destroying
     /// the prompt cache on every request and turning 0.5s into 37.5s.
     private var lastRequestEndedAt: Date?
+    /// Requests being served right now.
+    ///
+    /// The idle window is decided from when the last request *ended*, which is
+    /// stale for the whole of the one currently running: this loop suspends at
+    /// every await, so a heartbeat can run mid-request, read a timestamp from
+    /// the previous one and decide the machine has gone quiet. The unload then
+    /// queues behind the generation and executes the instant it finishes,
+    /// discarding the prompt cache of a request that just completed.
+    ///
+    /// Guaranteed for anything longer than the window, and there is a measured
+    /// example: 19,243 tokens took 377 seconds against a 300 second default.
+    /// That is the failure Worker.swift:707 records, reintroduced by the
+    /// mechanism written to respect it.
+    private var serving = 0
     private var idleWindow: TimeInterval?
 
     private var share: SplitRunner?
@@ -347,9 +361,12 @@ public actor ReverseChannel {
     /// Nil window means never, which is what a dedicated group gets and what
     /// every machine did before this existed.
     private func releaseIfIdle() async {
+        // Never while answering. Idleness is about nothing being asked, and
+        // something is being asked.
         guard let gpu, await gpu.isLoaded else { return }
         guard Worker.shouldReleaseWhenIdle(lastRequestEndedAt: lastRequestEndedAt,
-                                           now: Date(), window: idleWindow)
+                                           now: Date(), window: idleWindow,
+                                           serving: serving)
         else { return }
         let freed = await gpu.unload()
         lastRequestEndedAt = nil
@@ -420,7 +437,8 @@ public actor ReverseChannel {
         // anyway: a machine that stops being part of a split becomes an
         // ordinary one, and should not then be treated as having been idle for
         // however long the split was running.
-        defer { lastRequestEndedAt = Date() }
+        serving += 1
+        defer { serving -= 1; lastRequestEndedAt = Date() }
 
         let directory = MLXRuntime.modelDirectory
             .appendingPathComponent(split.model)
@@ -525,7 +543,8 @@ public actor ReverseChannel {
         // still means somebody was asking a moment ago, and starting the idle
         // clock from a success only would release the model out from under a
         // client that is retrying.
-        defer { lastRequestEndedAt = Date() }
+        serving += 1
+        defer { serving -= 1; lastRequestEndedAt = Date() }
 
         guard let gpu else {
             try? await controlPlane.reportDispatch(

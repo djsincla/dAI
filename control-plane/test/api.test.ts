@@ -959,6 +959,24 @@ describe('the share a machine is told to hold', () => {
     expect(body.size).toBeUndefined()
   })
 
+  it('sends no rank when the group is bigger than the model needs', async () => {
+    // The router forms a gang of exactly `machines` and picks which machines.
+    // A prediction made ahead of that can only be right when there is nothing
+    // to pick: with three machines and a two-machine model, every one of them
+    // would warm rank r of three, the dispatch would say two, and all three
+    // would rebuild - pre-warming quietly doing nothing while appearing to
+    // work. Invisible on a two-machine fleet, which is why it is asserted.
+    await splitGroup()
+    await clusterNode('one-split', '192.168.99.11')
+    await clusterNode('two-split', '192.168.99.12')
+    await clusterNode('three-split', '192.168.99.13')
+
+    const body = await (await beat('fp-one-split')).json() as any
+    expect(body.machines).toBe(2)
+    expect(body.rank).toBeUndefined()
+    expect(body.size).toBeUndefined()
+  })
+
   it('sends no rank for a model that runs on one machine', async () => {
     // Nothing to build ahead: the machine holds the whole model.
     await db.query(

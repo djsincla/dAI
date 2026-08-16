@@ -164,8 +164,33 @@ async function gangFor(
   // the machines share, which is deliberately not always the one they use to
   // reach here.
   const { rows: addrs } = await db.query(
-    `SELECT id, pipeline_address FROM nodes WHERE id = ANY($1::uuid[])`,
+    `SELECT id, pipeline_address, agent_fingerprint
+       FROM nodes WHERE id = ANY($1::uuid[])`,
     [gang.map((c) => c.id)])
+
+  // Every rank has to be running the same build.
+  //
+  // What the ranks say to each other is an internal protocol with no version
+  // field and no negotiation: hidden states, sampled tokens, and now a proposal
+  // about how much of the prompt has already been read. A rank that does not
+  // know about the last of those receives nine words where it expects a hidden
+  // state, and either throws on the shape or waits out the 120 s transport
+  // deadline.
+  //
+  // This is not hypothetical. Rolling 0.6.0 across this fleet left one machine
+  // on 0.5.1 and the other on 0.6.0 for eight minutes; a split request in that
+  // window would have hung. Refusing is the honest answer - the gang genuinely
+  // cannot run - and it resolves itself as the upgrade finishes.
+  const builds = new Set((addrs as { agent_fingerprint: string | null }[])
+    .map((a) => a.agent_fingerprint ?? 'unknown'))
+  if (builds.size > 1) {
+    return { refusal: {
+      refused: 'gang-short',
+      detail: 'the machines in this group are running different agent builds, and '
+        + 'the ranks of a split speak a protocol with no version negotiation. '
+        + 'This resolves itself when the rollout finishes.',
+    } }
+  }
   const address = new Map(addrs.map((a) => [a.id as string, a.pipeline_address as string | null]))
 
   // Rank 0 holds the last layers and the output head, and listens. Everything

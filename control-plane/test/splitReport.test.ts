@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { describeSplit, parseLayerPlan, splitReport, type GangMember }
-  from '../src/lib/splitReport.js'
+import { parseLayerPlan, splitReport, type GangMember } from '../src/lib/splitReport.js'
 
 const gang = (n: number): GangMember[] =>
   Array.from({ length: n }, (_, rank) => ({
@@ -81,20 +80,6 @@ describe('a layer plan that cannot be believed is not shown', () => {
     expect(parseLayerPlan([['0', '24']], 1)).toBeNull()  // not numbers
     expect(parseLayerPlan('0..24', 1)).toBeNull()
     expect(parseLayerPlan(null, 2)).toBeNull()
-  })
-})
-
-describe('the line an operator reads', () => {
-  it('puts the layers beside the machine that held them', () => {
-    const line = describeSplit(splitReport(gang(2), [[24, 48], [0, 24]])!)
-    expect(line).toContain('2 machines')
-    expect(line).toContain('orca (rank 0 layers 24..<48, head)')
-    expect(line).toContain('node-1 (rank 1 layers 0..<24)')
-  })
-
-  it('says when the layers are missing rather than looking complete', () => {
-    const line = describeSplit(splitReport(gang(2), null)!)
-    expect(line).toContain('not reported')
   })
 })
 

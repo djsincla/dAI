@@ -972,3 +972,51 @@ describe('the share a machine is told to hold', () => {
     expect(body.machines).toBe(1)
   })
 })
+
+
+/**
+ * A stood-down group claims no machines, on the surfaces the agent asks.
+ *
+ * poolsFor drops a disabled group and cannot do that without the column. Two
+ * agent queries selected id, tier and membership and not enabled, which made
+ * every group look live to the filter. Harmless in both cases only by accident -
+ * each had a second filter downstream - and the same omission has already
+ * produced three separate faults, found and fixed one at a time.
+ */
+describe('what a stood-down group offers an agent', () => {
+  it('does not name the build a disabled group wanted', async () => {
+    // The fault this shape caused before: two managed groups, one stood down
+    // holding an older version, and the fleet pinned to a build nobody had
+    // asked for since.
+    await db.query(
+      `INSERT INTO agent_builds (version, sha256, size_bytes)
+       VALUES ('8.8.8', repeat('b',64), 1) ON CONFLICT DO NOTHING`)
+    await db.query(
+      `INSERT INTO pools (name, tier, schedule, preempt, agent_channel,
+                          desired_agent_version, enabled)
+       VALUES ('stale-desired','harvest','independent-units','on-user-activity',
+               'managed','8.8.8', false)`)
+
+    const r = await fetch(`${base}/agent/v1/agent/desired`,
+      { headers: asNode(fx.fingerprint) })
+    const body = await r.json() as any
+    expect(body.version).not.toBe('8.8.8')
+  })
+
+  it('does not assign models from a disabled group', async () => {
+    await db.query(
+      `INSERT INTO models (id, size_bytes, machines, runtime, kind)
+       VALUES ('org/ghost', 1, 1, 'mlx', 'generate') ON CONFLICT DO NOTHING`)
+    const { rows } = await db.query(
+      `INSERT INTO pools (name, tier, schedule, preempt, serving_model_id, enabled)
+       VALUES ('ghost-group','harvest','independent-units','on-user-activity',
+               'org/ghost', false)
+       RETURNING id`)
+    expect(rows[0]).toBeDefined()
+
+    const r = await fetch(`${base}/agent/v1/models/assigned`,
+      { headers: asNode(fx.fingerprint) })
+    const assigned = await r.json() as any[]
+    expect(assigned.some((m) => m.id === 'org/ghost')).toBe(false)
+  })
+})

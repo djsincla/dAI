@@ -105,3 +105,69 @@ describe('a group nobody is asking anything of', () => {
     expect(out.state).toBe('idle')
   })
 })
+
+
+/**
+ * A cluster group that is not split.
+ *
+ * Dedicated and loaded, every machine holding the whole model and able to answer
+ * alone, which is an ordinary thing to want. The loading already works -
+ * keepLoaded with machines 1 warms it. This view was written for splits and
+ * applied to every cluster group, so it described a pipeline whether or not one
+ * existed.
+ */
+describe('a dedicated group with nothing to dial', () => {
+  const whole = (members: RankFacts[]) =>
+    splitReadiness({ enabled: true, model: MODEL, machines: 1, members })
+
+  it('is ready without any pipeline address, because there is no peer', () => {
+    // The rule: an address only matters when there is somebody to dial. A
+    // machine holding a whole model answers on its own.
+    const out = whole([machine('orca', { pipelineAddress: null })])
+    expect(out.state).toBe('ready')
+  })
+
+  it('names no ranks, because there is no pipeline to have a head of', () => {
+    // "output head" and "feeds the next rank" describe a division. Printing
+    // them for a machine holding the whole model is fiction.
+    const out = whole([machine('orca'), machine('rotorua')])
+    expect(out.ranks.every((r) => r.rank === null)).toBe(true)
+    expect(out.ranks.every((r) => r.role === null)).toBe(true)
+  })
+
+  it('still reports what each machine is missing', () => {
+    // The rest of the view is just as useful without a split: weights arriving,
+    // a model not built yet, a machine that has gone away.
+    const out = whole([machine('orca', { onDisk: [], loaded: [] })])
+    expect(out.state).toBe('preparing')
+    expect(out.detail).toContain('fetching')
+  })
+
+  it('is still blocked when a machine is unreachable', () => {
+    const out = whole([machine('orca', { connected: false })])
+    expect(out.state).toBe('blocked')
+  })
+})
+
+/**
+ * Whether the machines were ever told to hold the model.
+ *
+ * Serving a model and holding it are different tables: pools.serving_model_id
+ * decides what a group's machines run, pool_models decides what they fetch.
+ * Setting the first without the second leaves a group waiting forever with
+ * nothing fetching anything - and this view could not say so, because the route
+ * fed the check the same value it compared against.
+ */
+describe('told to hold it, or not', () => {
+  it('separates fetching from never having been asked', () => {
+    const fetching = group([machine('orca'),
+                            machine('rotorua', { onDisk: [], loaded: [],
+                                                 assigned: MODEL })])
+    expect(fetching.detail).toContain('fetching the weights')
+
+    const never = group([machine('orca'),
+                         machine('rotorua', { onDisk: [], loaded: [],
+                                              assigned: null })])
+    expect(never.detail).toContain('not been told')
+  })
+})

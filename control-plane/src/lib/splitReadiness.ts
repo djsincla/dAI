@@ -65,7 +65,7 @@ export interface Readiness {
   ranks: RankReadiness[]
 }
 
-function stateOf(f: RankFacts, model: string): Omit<RankReadiness,
+function stateOf(f: RankFacts, model: string, split: boolean): Omit<RankReadiness,
   'hostname' | 'rank' | 'role'> {
   const weights = f.onDisk.includes(model) ? 'present' : 'missing'
   const loaded = f.loaded.includes(model)
@@ -88,7 +88,10 @@ function stateOf(f: RankFacts, model: string): Omit<RankReadiness,
         ? 'fetching the weights'
         : 'has not been told to hold this model yet' }
   }
-  if (!dialable) {
+  // Only when there is a peer to dial. A machine holding a whole model answers
+  // on its own and needs no address; reporting it unreachable would describe a
+  // link it will never use.
+  if (split && !dialable) {
     // Named rather than described, because the fix is a setting and the symptom
     // is a group that will not form. The interface is usually a cable that came
     // out, and bridge0 stays up with no address when it does.
@@ -125,23 +128,36 @@ export function splitReadiness(input: {
     }
   }
 
-  const assessed = members.map((f) => ({ facts: f, ...stateOf(f, model) }))
+  const split = machines > 1
+  const assessed = members.map((f) => ({ facts: f, ...stateOf(f, model, split) }))
 
   // The same assignment the router makes at dispatch and the heartbeat sends
   // ahead of it, from one implementation - so a group reported ready here is a
   // group admitted there, and a machine warms the share it will be asked for.
-  const assigned = assignRanks(assessed.map((a) => ({
-    id: a.facts.nodeId, hostname: a.facts.hostname,
-    pipelineAddress: a.facts.pipelineAddress,
-  })))
-  const canAssignRanks = assigned !== null
+  // A peer address only matters when there is a peer.
+  //
+  // This view was written for splits and is used for every cluster group, so a
+  // group holding a whole model - dedicated and loaded, every machine able to
+  // answer alone - was run through the same rank assignment and reported
+  // blocked for want of an address it would never use. With addresses it was
+  // worse: it named an output head and a rank that feeds the next one, for a
+  // pipeline that does not exist.
+  const assigned = split
+    ? assignRanks(assessed.map((a) => ({
+        id: a.facts.nodeId, hostname: a.facts.hostname,
+        pipelineAddress: a.facts.pipelineAddress,
+      })))
+    : null
+  const canAssignRanks = !split || assigned !== null
   const seatFor = new Map((assigned ?? []).map((r) => [r.member.id, r]))
 
   // Listed in rank order when there is one, so the head reads first. Without an
   // ordering the machines are listed as they came, because inventing an order
   // for a group that cannot form implies a decision nobody made.
-  const inOrder = canAssignRanks
-    ? assigned!.map((r) => assessed.find((a) => a.facts.nodeId === r.member.id)!)
+  // Rank order when there is one. Without a pipeline the machines are listed as
+  // they came, because inventing an order implies a decision nobody made.
+  const inOrder = assigned
+    ? assigned.map((r) => assessed.find((a) => a.facts.nodeId === r.member.id)!)
     : assessed
 
   const ranks: RankReadiness[] = inOrder.map((a) => {
@@ -163,7 +179,7 @@ export function splitReadiness(input: {
         + 'all at once or not at all',
     }
   }
-  if (!canAssignRanks) {
+  if (split && !canAssignRanks) {
     return {
       state: 'blocked', model, machines, present, ranks,
       detail: 'no machine has said where a peer should dial it, so no rank can '

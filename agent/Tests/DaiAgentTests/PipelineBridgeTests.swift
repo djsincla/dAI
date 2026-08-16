@@ -275,7 +275,7 @@ struct SplitUsageTests {
                      totalLayers: Int = 48, size: Int = 2) -> SplitRunner.Completed {
         SplitRunner.Completed(
             outcome: SplitRunner.Outcome(text: isHead ? "hello" : "", tokens: produced,
-                                         promptTokens: prompt, promptSeconds: 0.1,
+                                         promptTokens: prompt, promptSeconds: 0.1, reusedTokens: 0,
                                          decodeSeconds: 0.2, residentGb: 4.5),
             isHead: isHead, layers: 0..<24, totalLayers: totalLayers, size: size)
     }

@@ -787,7 +787,10 @@ public actor ControlPlane {
             // an older control plane cannot say, and treating an unknown model
             // as whole means warming is skipped rather than warming the wrong
             // thing.
-            machines: reply["machines"]?.intValue ?? 1)
+            machines: reply["machines"]?.intValue ?? 1,
+            // Absent means no window, which is what every machine did before
+            // this existed: hold until presence says otherwise.
+            idleUnloadSeconds: reply["idleUnloadSeconds"]?.intValue)
     }
 
     /// What the control plane asked of this node on the last beat.
@@ -842,12 +845,26 @@ public actor ControlPlane {
         /// model rather than a whole one.
         public var isSplit: Bool { machines > 1 }
 
+        /// How long to hold the model once nothing is being asked of it.
+        ///
+        /// Nil for a dedicated group, which holds its model for as long as it
+        /// stands, and for a control plane too old to say - both of which mean
+        /// "no window", which is the behaviour every machine had before this.
+        ///
+        /// The presence policy already covers somebody wanting their machine
+        /// back. This covers nobody wanting anything, which nothing did: a
+        /// machine that answered one request at nine in the morning held
+        /// gigabytes until its owner returned.
+        public let idleUnloadSeconds: Int?
+
         public init(renewRequested: Bool = false, servingModel: String? = nil,
-                    keepLoaded: Bool = false, machines: Int = 1) {
+                    keepLoaded: Bool = false, machines: Int = 1,
+                    idleUnloadSeconds: Int? = nil) {
             self.renewRequested = renewRequested
             self.servingModel = servingModel
             self.keepLoaded = keepLoaded
             self.machines = max(1, machines)
+            self.idleUnloadSeconds = idleUnloadSeconds.map { max(1, $0) }
         }
     }
 

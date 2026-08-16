@@ -65,6 +65,21 @@ public actor ReverseChannel {
     /// Building it reads weights off disk and constructs a model, which is most
     /// of what a cold split request costs. The channel it runs over does not
     /// last and is not kept; the model is.
+    /// When the last request finished, and how long to hold the model after it.
+    ///
+    /// The presence policy answers "somebody wants their machine back". This
+    /// answers "nobody wants anything", which nothing did: a machine that served
+    /// one request at nine in the morning held gigabytes until its owner
+    /// returned.
+    ///
+    /// Decided here rather than in the batch loop deliberately. This actor is
+    /// the one that serves requests, so when it decides to let go there is
+    /// nothing in flight - and 21100c2 records what the other arrangement cost:
+    /// the batch loop released the model the serving loop was using, destroying
+    /// the prompt cache on every request and turning 0.5s into 37.5s.
+    private var lastRequestEndedAt: Date?
+    private var idleWindow: TimeInterval?
+
     private var share: SplitRunner?
     /// What the held share was built for. A different rank or gang size means
     /// different layers, so the share is for a fleet that no longer exists.
@@ -242,10 +257,31 @@ public actor ReverseChannel {
         // way.
         var info: [String: Int] = [:]
         if let gpu, let context = await gpu.contextLength { info[await gpu.name] = context }
-        try? await controlPlane.heartbeat(
+        // The directives were already coming back and being discarded. The
+        // window is a property of the group this machine serves for, so it
+        // arrives the same way its model does.
+        let directives = try? await controlPlane.heartbeat(
             state: state, onACPower: signals.onACPower, thermalOK: signals.thermalOK,
             userPaused: pauseSwitch.read().paused,
             residentModels: resident, modelInfo: info)
+        idleWindow = directives?.idleUnloadSeconds.map(TimeInterval.init)
+        await releaseIfIdle()
+    }
+
+    /// Let go of the model when nothing has been asked of this machine for a
+    /// while.
+    ///
+    /// Nil window means never, which is what a dedicated group gets and what
+    /// every machine did before this existed.
+    private func releaseIfIdle() async {
+        guard let gpu, await gpu.isLoaded else { return }
+        guard Worker.shouldReleaseWhenIdle(lastRequestEndedAt: lastRequestEndedAt,
+                                           now: Date(), window: idleWindow)
+        else { return }
+        let freed = await gpu.unload()
+        lastRequestEndedAt = nil
+        log(String(format: "idle for %.0fs; released %@ in %.1fs",
+                   idleWindow ?? 0, await gpu.name, freed))
     }
 
     /// Be one rank of a split model.
@@ -297,6 +333,13 @@ public actor ReverseChannel {
 
     private func runSplit(_ split: SplitDispatch,
                           dispatch: ControlPlane.Dispatch) async {
+        // A split is a request too. It does not release on idleness - a cluster
+        // group is sent no window - but the clock is kept for the same reason
+        // anyway: a machine that stops being part of a split becomes an
+        // ordinary one, and should not then be treated as having been idle for
+        // however long the split was running.
+        defer { lastRequestEndedAt = Date() }
+
         let directory = MLXRuntime.modelDirectory
             .appendingPathComponent(split.model)
         guard FileManager.default.fileExists(atPath: directory.path) else {
@@ -396,6 +439,12 @@ public actor ReverseChannel {
     }
 
     private func handle(_ dispatch: ControlPlane.Dispatch, maxTokens: Int) async {
+        // Stamped however this ends, including badly. A request that failed
+        // still means somebody was asking a moment ago, and starting the idle
+        // clock from a success only would release the model out from under a
+        // client that is retrying.
+        defer { lastRequestEndedAt = Date() }
+
         guard let gpu else {
             try? await controlPlane.reportDispatch(
                 id: dispatch.id, text: nil, error: "no GPU runtime on this node")

@@ -49,6 +49,14 @@ export interface Group extends PoolSpec {
    * turns that into a compile error at every site at once.
    */
   enabled: boolean
+
+  /**
+   * How long a machine in this group holds a model after the last request.
+   *
+   * Null means the fleet default. Only meaningful for harvest: a cluster group
+   * is dedicated and loaded, and is not sent a window at all.
+   */
+  idleUnloadSeconds?: number | null
 }
 
 /** Groups that are asserting something. The rest are configuration at rest. */
@@ -204,9 +212,24 @@ export function effectiveModel(node: NodeFacts, groups: Group[]): string | null 
  * carry the shape of the fleet - and "hold this loaded" is an instruction it can
  * follow without knowing why.
  */
+/**
+ * How long a machine holds a model when nothing is being asked of it.
+ *
+ * Five minutes, and the number matters more than the knob because most fleets
+ * will never change it. It is not really a setting about weights: unloading
+ * clears the prompt cache with them, and that is the expensive half - releasing
+ * too eagerly once turned a 0.5 s warm request into 37.5 s. Read it as how long
+ * to keep a conversation warm, and five minutes covers an agentic client whose
+ * turns are seconds apart with room to spare.
+ */
+export const DEFAULT_IDLE_UNLOAD_SECONDS = 300
+
 export function effectiveServing(
   node: NodeFacts, groups: Group[], machinesFor?: (modelId: string) => number,
-): { model: string | null; keepLoaded: boolean; machines: number } {
+): {
+  model: string | null; keepLoaded: boolean; machines: number
+  idleUnloadSeconds: number | null
+} {
   const mine = (poolsFor(node, active(groups)) as Group[])
     .filter((g) => g.servingModelId !== null)
   // Cluster preempts harvest where a machine is in both. A split rank cannot be
@@ -225,6 +248,13 @@ export function effectiveServing(
     // and the warm copy never used, because the split path builds its own
     // reduced model from the same weights.
     machines: model ? Math.max(1, machinesFor?.(model) ?? 1) : 1,
+    // Null for a cluster group, which is dedicated and loaded and has no idle
+    // window. Sending it one that is merely very long invites somebody to set
+    // it short, and a split that unloads between requests is a split that
+    // rebuilds its share every time.
+    idleUnloadSeconds: winner === undefined || winner.tier === 'cluster'
+      ? null
+      : winner.idleUnloadSeconds ?? DEFAULT_IDLE_UNLOAD_SECONDS,
   }
 }
 

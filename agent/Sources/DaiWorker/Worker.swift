@@ -493,6 +493,31 @@ public actor Worker {
     /// Failure is logged and not retried here. The next heartbeat asks again,
     /// which is the right cadence for something whose usual cause is a machine
     /// busy with the request that is keeping it warm in the first place.
+    /// Whether a machine should let go of the model it is holding.
+    ///
+    /// The presence policy already answers "somebody wants their machine back".
+    /// Nothing answered "nobody wants anything", so a harvest machine that
+    /// served one request at nine in the morning held gigabytes until its owner
+    /// returned - memory belonging to a person who was not being asked.
+    ///
+    /// A pure function so the rule can be tested without a GPU, as `passIsStuck`
+    /// and `directive` already are. The clock is a parameter for the same
+    /// reason.
+    ///
+    /// Cluster machines never release on idleness: dedicated means loaded, and a
+    /// split that unloaded between requests would rebuild its share every time.
+    /// They arrive here with no window at all rather than a very long one,
+    /// because a very long number is one somebody eventually sets short.
+    static func shouldReleaseWhenIdle(lastRequestEndedAt: Date?, now: Date,
+                                      window: TimeInterval?) -> Bool {
+        guard let window else { return false }
+        // Nothing has been served since this machine started or last let go.
+        // There is nothing held that this rule put there, so there is nothing
+        // for it to release.
+        guard let lastRequestEndedAt else { return false }
+        return now.timeIntervalSince(lastRequestEndedAt) >= window
+    }
+
     private func warmIfAsked(_ directives: ControlPlane.Directives) async {
         guard directives.keepLoaded, let runtime = gpu else { return }
 

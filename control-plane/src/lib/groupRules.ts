@@ -229,6 +229,8 @@ export function effectiveServing(
 ): {
   model: string | null; keepLoaded: boolean; machines: number
   idleUnloadSeconds: number | null
+  /** The group that decided all of it, so a caller can ask about its members. */
+  groupId: string | null
 } {
   const mine = (poolsFor(node, active(groups)) as Group[])
     .filter((g) => g.servingModelId !== null)
@@ -255,6 +257,7 @@ export function effectiveServing(
     idleUnloadSeconds: winner === undefined || winner.tier === 'cluster'
       ? null
       : winner.idleUnloadSeconds ?? DEFAULT_IDLE_UNLOAD_SECONDS,
+    groupId: winner?.id ?? null,
   }
 }
 

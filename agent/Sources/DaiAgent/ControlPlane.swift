@@ -790,7 +790,8 @@ public actor ControlPlane {
             machines: reply["machines"]?.intValue ?? 1,
             // Absent means no window, which is what every machine did before
             // this existed: hold until presence says otherwise.
-            idleUnloadSeconds: reply["idleUnloadSeconds"]?.intValue)
+            idleUnloadSeconds: reply["idleUnloadSeconds"]?.intValue,
+            rank: reply["rank"]?.intValue, size: reply["size"]?.intValue)
     }
 
     /// What the control plane asked of this node on the last beat.
@@ -857,14 +858,39 @@ public actor ControlPlane {
         /// gigabytes until its owner returned.
         public let idleUnloadSeconds: Int?
 
+        /// Which share of a split this machine holds, sent before anything asks
+        /// for it.
+        ///
+        /// Rank is decided again at dispatch and that decision wins. This
+        /// arrives early only so the share can be built beforehand: a cold gang
+        /// pays the slowest machine's load before the first token, and pays it
+        /// again whenever the group falls idle.
+        ///
+        /// Nil when the model is not split, when no machine in the group can be
+        /// dialled, or from a control plane too old to say - all of which mean
+        /// there is nothing to build ahead of time.
+        public let rank: Int?
+        /// How many machines the pipeline has. Needed with `rank` to know which
+        /// layers this machine owns; one without the other says nothing.
+        public let size: Int?
+
+        /// The share to build ahead of a request, when there is one to build.
+        public var standingSplit: (rank: Int, size: Int)? {
+            guard let rank, let size, size > 1, rank >= 0, rank < size else { return nil }
+            return (rank, size)
+        }
+
         public init(renewRequested: Bool = false, servingModel: String? = nil,
                     keepLoaded: Bool = false, machines: Int = 1,
-                    idleUnloadSeconds: Int? = nil) {
+                    idleUnloadSeconds: Int? = nil,
+                    rank: Int? = nil, size: Int? = nil) {
             self.renewRequested = renewRequested
             self.servingModel = servingModel
             self.keepLoaded = keepLoaded
             self.machines = max(1, machines)
             self.idleUnloadSeconds = idleUnloadSeconds.map { max(1, $0) }
+            self.rank = rank
+            self.size = size
         }
     }
 

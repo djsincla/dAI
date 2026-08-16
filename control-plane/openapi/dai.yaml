@@ -588,6 +588,32 @@ paths:
                       Not really a setting about weights: unloading clears the
                       prompt cache with them, and that is the expensive half.
                       Read it as how long to keep a conversation warm.
+                  rank:
+                    type: integer
+                    minimum: 0
+                    description: >
+                      Which share of a split this machine holds, sent before
+                      anything asks for it. Absent unless the model runs across
+                      machines and the group can form a pipeline.
+
+
+                      Rank 0 holds the last layers and the output head, and
+                      listens; everything else dials it. Ranks are numbered in
+                      reverse for that reason.
+
+
+                      Rank is decided again at dispatch and that decision wins.
+                      This is sent early so the share can be built beforehand -
+                      a cold gang otherwise pays the slowest machine's load
+                      before the first token. If a dispatch names a different
+                      rank the machine rebuilds, because the share it warmed was
+                      for a fleet that no longer exists.
+                  size:
+                    type: integer
+                    minimum: 2
+                    description: >
+                      How many machines the pipeline has, sent with rank. Both
+                      are needed to know which layers this machine owns.
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
 

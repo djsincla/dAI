@@ -249,8 +249,19 @@ public actor ReverseChannel {
         // nil: a heartbeat is not an activity, and claiming one here would
         // overwrite whatever the loop last said it was doing.
         await publish(state, activity: nil)
-        let resident: [String: Double] = await (gpu?.isLoaded ?? false)
-            ? [await gpu!.name: await gpu!.residentGb] : [:]
+        // What this machine actually has built.
+        //
+        // Reported under the model's own id whether it is the whole model or
+        // this rank's share of it, because that is what the catalogue reads to
+        // decide what can be served here. Before splits stopped warming the
+        // whole model, "loaded" on a split group meant the monolith was resident
+        // and the share was not - the readiness view said warm while every
+        // request still built cold.
+        var resident: [String: Double] = [:]
+        if let gpu, await gpu.isLoaded { resident[await gpu.name] = await gpu.residentGb }
+        if let held = share, let plan = heldPlan, await held.isBuilt {
+            resident[plan.modelId] = await held.residentGb
+        }
         // Advertised whether or not the model is loaded right now: the window a
         // model accepts does not depend on whether it happens to be resident,
         // and a client asking what this node can serve wants the answer either
@@ -266,6 +277,48 @@ public actor ReverseChannel {
             residentModels: resident, modelInfo: info)
         idleWindow = directives?.idleUnloadSeconds.map(TimeInterval.init)
         await releaseIfIdle()
+        if let directives { await warmShareIfAsked(directives) }
+    }
+
+    /// Build this machine's share of a split before anything asks for it.
+    ///
+    /// A split cannot begin until every rank has built its share, so a cold gang
+    /// pays the slowest machine's load before the first token - and pays it
+    /// again whenever the group falls idle. The operator already accepted that
+    /// cost by standing the group up: these machines are out of harvesting for
+    /// as long as it stands, so the memory is spoken for whether or not it holds
+    /// anything.
+    ///
+    /// The rank arrives from the heartbeat and the dispatch decides again. This
+    /// is an optimisation and never a claim: a dispatch naming a different rank
+    /// rebuilds, because the share was built for a fleet that no longer exists.
+    private func warmShareIfAsked(_ directives: ControlPlane.Directives) async {
+        guard directives.keepLoaded,
+              let model = directives.servingModel,
+              let seat = directives.standingSplit
+        else { return }
+
+        let directory = MLXRuntime.modelDirectory.appendingPathComponent(model)
+        guard FileManager.default.fileExists(atPath: directory.path) else {
+            // The weights have not arrived. Not a fault: model sync is still
+            // working, and the readiness view says so in those words.
+            return
+        }
+
+        let plan = SplitRunner.Plan(modelId: model, rank: seat.rank, size: seat.size)
+        let runner = await shareFor(plan)
+        guard await !runner.isBuilt else { return }
+        do {
+            let started = Date()
+            if try await runner.prepare(directory: directory) {
+                log(String(format: "built %@ in %.1fs, held for this group",
+                           String(describing: plan), Date().timeIntervalSince(started)))
+            }
+        } catch {
+            // Left for the next heartbeat rather than retried here. The usual
+            // cause is a machine busy with the request that is keeping it warm.
+            log("could not build \(plan): \(error)")
+        }
     }
 
     /// Let go of the model when nothing has been asked of this machine for a

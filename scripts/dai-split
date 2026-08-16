@@ -1,0 +1,321 @@
+#!/usr/bin/env python3
+"""Stand a split model up, take it down, and see whether it is ready.
+
+    dai-split groups
+    dai-split status
+    dai-split prepare mlx-community/Qwen2.5-Coder-32B-Instruct-4bit --machines 2
+    dai-split up
+    dai-split down
+
+Everything here was a sequence of curl calls against the admin API, run by hand
+and in the right order: declare how wide the model is, assign it to a cluster
+group, confirm the cost, enable the group, then poll readiness until the
+machines have built their shares. Getting the order wrong produces refusals that
+read like faults, and the polling is the part nobody wants to do by hand.
+
+**Credentials.** Admin operations use a session, so this needs an operator
+account:
+
+    export DAI_BASE_URL=https://your-control-plane:8452
+    export DAI_CA_CERT=/path/to/srv-ca.crt      # the installer prints this
+    export DAI_ADMIN_USER=admin
+    export DAI_ADMIN_PASSWORD=...
+
+Standard library only, so this can be copied to any machine that can reach the
+control plane without installing anything.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import ssl
+import sys
+import time
+import urllib.error
+import urllib.request
+
+DEFAULT_BASE_URL = "https://localhost:8452"
+DEFAULT_CA_PATHS = [
+    "/var/db/dai-control/certs/srv-ca.crt",
+    os.path.expanduser("~/.dai/srv-ca.crt"),
+    "/Library/Application Support/dAI/server-ca.crt",
+]
+
+
+class Failed(RuntimeError):
+    """Something the operator has to read, rather than a stack trace."""
+
+
+class Admin:
+    def __init__(self) -> None:
+        self.base = (os.environ.get("DAI_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
+        ca = os.environ.get("DAI_CA_CERT") or next(
+            (p for p in DEFAULT_CA_PATHS if os.path.exists(p)), None)
+        if os.environ.get("DAI_INSECURE") == "1":
+            self._ssl = ssl._create_unverified_context()
+        else:
+            # cafile=None would fall back to the system roots, which cannot
+            # verify a certificate the control plane signed itself - and the
+            # failure would arrive much later as a TLS error saying nothing
+            # about the missing file.
+            if not ca:
+                raise Failed(
+                    "no CA certificate found.\n"
+                    "  Set DAI_CA_CERT to the control plane's srv-ca.crt - the\n"
+                    "  installer prints its path when it finishes.")
+            self._ssl = ssl.create_default_context(cafile=ca)
+        self._token: str | None = None
+
+    def _request(self, method: str, path: str, body=None, auth=True):
+        data = json.dumps(body).encode() if body is not None else None
+        headers = {"accept": "application/json"}
+        if data is not None:
+            headers["content-type"] = "application/json"
+        if auth:
+            headers["authorization"] = f"Bearer {self.token()}"
+        req = urllib.request.Request(f"{self.base}{path}", data=data,
+                                     headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=60, context=self._ssl) as r:
+                raw = r.read()
+                return r.status, (json.loads(raw) if raw else None)
+        except urllib.error.HTTPError as e:
+            raw = e.read()
+            try:
+                return e.code, json.loads(raw)
+            except json.JSONDecodeError:
+                return e.code, raw.decode(errors="replace")
+        except urllib.error.URLError as e:
+            raise Failed(f"cannot reach {self.base}: {e.reason}") from e
+
+    def token(self) -> str:
+        if self._token:
+            return self._token
+        user = os.environ.get("DAI_ADMIN_USER")
+        password = os.environ.get("DAI_ADMIN_PASSWORD")
+        if not user or not password:
+            raise Failed(
+                "admin operations need an operator account.\n"
+                "  export DAI_ADMIN_USER=... DAI_ADMIN_PASSWORD=...")
+        status, body = self._request(
+            "POST", "/admin/v1/auth/login", auth=False,
+            body={"username": user, "password": password})
+        if status != 200 or not isinstance(body, dict) or not body.get("token"):
+            raise Failed(f"could not sign in as {user}: {detail(body)}")
+        self._token = body["token"]
+        return self._token
+
+    def get(self, path):
+        status, body = self._request("GET", path)
+        if status != 200:
+            raise Failed(f"GET {path}: {detail(body)}")
+        return body
+
+    def put(self, path, body):
+        return self._request("PUT", path, body)
+
+
+def detail(body) -> str:
+    if isinstance(body, dict):
+        return str(body.get("detail") or body.get("error") or body)
+    return str(body)
+
+
+# ----------------------------------------------------------------- reporting
+
+def group_named(admin: Admin, name: str | None) -> dict:
+    """The group to act on, or the only cluster group if there is just one."""
+    pools = admin.get("/admin/v1/pools")
+    if name:
+        match = next((p for p in pools if p["name"] == name), None)
+        if not match:
+            raise Failed(f"no group called {name}.\n"
+                         "  dai-split groups   to see them")
+        return match
+
+    clusters = [p for p in pools if p["tier"] == "cluster"]
+    if len(clusters) == 1:
+        return clusters[0]
+    if not clusters:
+        raise Failed("there is no cluster group. A split runs where an operator "
+                     "assigned it, so one has to exist first.")
+    raise Failed("more than one cluster group; say which with --group:\n"
+                 + "\n".join(f"  {p['name']}" for p in clusters))
+
+
+def show_readiness(admin: Admin, pool: dict) -> str:
+    r = admin.get(f"/admin/v1/pools/{pool['id']}/readiness")
+    state = r["state"]
+    mark = {"ready": "ready", "preparing": "preparing", "blocked": "needs attention",
+            "idle": "stood down"}.get(state, state)
+    print(f"{pool['name']}  [{mark}]")
+    print(f"  {r['detail']}")
+    for rank in r.get("ranks", []):
+        seat = "" if rank["rank"] is None else f"rank {rank['rank']}"
+        if rank["role"] == "output head":
+            seat += " (head)"
+        marks = [
+            "weights" if rank["weights"] == "present" else "NO weights",
+            "loaded" if rank["loaded"] else "not loaded",
+            "dialable" if rank["dialable"] else "NO address",
+        ]
+        print(f"    {rank['hostname']:<12} {seat:<16} {', '.join(marks)}")
+    return state
+
+
+def wait_until_ready(admin: Admin, pool: dict, seconds: int) -> bool:
+    """Poll until the group is ready, or until it clearly will not be.
+
+    `preparing` resolves on its own and is worth waiting through. `blocked`
+    needs somebody to go and look at a machine, so waiting is just delay - the
+    difference is the whole reason the two states are separate.
+    """
+    deadline = time.time() + seconds
+    last = None
+    while time.time() < deadline:
+        r = admin.get(f"/admin/v1/pools/{pool['id']}/readiness")
+        if r["state"] != last:
+            print(f"  {r['state']}: {r['detail']}")
+            last = r["state"]
+        if r["state"] == "ready":
+            return True
+        if r["state"] == "blocked":
+            return False
+        time.sleep(5)
+    print(f"  still {last} after {seconds}s")
+    return False
+
+
+# ------------------------------------------------------------------ commands
+
+def cmd_groups(admin: Admin, args) -> int:
+    for p in admin.get("/admin/v1/pools"):
+        standing = "standing" if p["enabled"] else "stood down"
+        model = (p["servingModelId"] or "-").split("/")[-1]
+        port = f":{p['servingPort']}" if p.get("servingPort") else ""
+        print(f"  {p['name']:<20} {p['tier']:<8} {standing:<11} {port:<7} {model}")
+    return 0
+
+
+def cmd_status(admin: Admin, args) -> int:
+    pools = admin.get("/admin/v1/pools")
+    clusters = [p for p in pools if p["tier"] == "cluster"]
+    if args.group:
+        clusters = [group_named(admin, args.group)]
+    if not clusters:
+        print("no cluster group, so nothing is split")
+        return 0
+    for p in clusters:
+        show_readiness(admin, p)
+    return 0
+
+
+def cmd_prepare(admin: Admin, args) -> int:
+    pool = group_named(admin, args.group)
+
+    # Declared width first. A group cannot be given a split model before the
+    # model says it is one, and the refusal for doing it the other way round
+    # names a rule rather than an order.
+    model_path = args.model.replace("/", "%2F")
+    status, body = admin.put(f"/admin/v1/models/{model_path}/shape",
+                             {"machines": args.machines})
+    if status != 200:
+        raise Failed(f"could not declare {args.model} as {args.machines} machines: "
+                     f"{detail(body)}")
+    print(f"  {args.model} runs across {args.machines} machines "
+          f"({body.get('perMachineGb')} GB each)")
+
+    # Then the assignment, which asks first. Serving a split takes those
+    # machines out of harvesting for as long as it stands, and that is a
+    # decision rather than a side effect.
+    status, body = admin.put(f"/admin/v1/pools/{pool['id']}/serving-model",
+                             {"modelId": args.model, "confirm": True})
+    if status not in (200, 204):
+        raise Failed(f"could not assign it to {pool['name']}: {detail(body)}")
+    print(f"  {pool['name']} serves it")
+
+    if not pool["enabled"]:
+        status, body = admin.put(f"/admin/v1/pools/{pool['id']}/enabled",
+                                 {"enabled": True})
+        if status != 200:
+            raise Failed(f"could not stand {pool['name']} up: {detail(body)}")
+        print(f"  {pool['name']} is standing")
+
+    print(f"waiting for the machines to build their shares (up to {args.wait}s)")
+    ready = wait_until_ready(admin, pool, args.wait)
+    print()
+    show_readiness(admin, pool)
+    return 0 if ready else 1
+
+
+def cmd_up(admin: Admin, args) -> int:
+    pool = group_named(admin, args.group)
+    status, body = admin.put(f"/admin/v1/pools/{pool['id']}/enabled",
+                             {"enabled": True})
+    if status != 200:
+        raise Failed(f"could not stand {pool['name']} up: {detail(body)}")
+    for m in body.get("machines", []):
+        print(f"  {m['hostname']} now serves {(m.get('nowServes') or '-').split('/')[-1]}")
+    print(f"waiting for the machines to build their shares (up to {args.wait}s)")
+    ready = wait_until_ready(admin, pool, args.wait)
+    print()
+    show_readiness(admin, pool)
+    return 0 if ready else 1
+
+
+def cmd_down(admin: Admin, args) -> int:
+    pool = group_named(admin, args.group)
+    status, body = admin.put(f"/admin/v1/pools/{pool['id']}/enabled",
+                             {"enabled": False})
+    if status != 200:
+        raise Failed(f"could not stand {pool['name']} down: {detail(body)}")
+    print(f"{pool['name']} is stood down; its machines have been handed back")
+    for m in body.get("machines", []):
+        print(f"  {m['hostname']} now serves {(m.get('nowServes') or 'nothing').split('/')[-1]}")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--group", help="which cluster group; the only one, by default")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("groups", help="every group, and whether it is standing")
+    sub.add_parser("status", help="whether a split could serve a request right now")
+
+    p = sub.add_parser("prepare", help="declare a model split, assign it, and stand it up")
+    p.add_argument("model", help="the model id, as the catalogue knows it")
+    p.add_argument("--machines", type=int, required=True,
+                   help="how many machines it runs across")
+    p.add_argument("--wait", type=int, default=600,
+                   help="seconds to wait for the shares to build (default 600)")
+
+    p = sub.add_parser("up", help="stand the group up and wait for it")
+    p.add_argument("--wait", type=int, default=600)
+
+    sub.add_parser("down", help="stand the group down, handing its machines back")
+
+    args = parser.parse_args()
+    # --group is on the parent so it can be given before or after the verb,
+    # which is where an operator will type it either way.
+    if not hasattr(args, "wait"):
+        args.wait = 600
+
+    try:
+        admin = Admin()
+        return {
+            "groups": cmd_groups, "status": cmd_status, "prepare": cmd_prepare,
+            "up": cmd_up, "down": cmd_down,
+        }[args.command](admin, args)
+    except Failed as e:
+        print(f"\n{e}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -493,8 +493,22 @@ public actor Worker {
     /// Failure is logged and not retried here. The next heartbeat asks again,
     /// which is the right cadence for something whose usual cause is a machine
     /// busy with the request that is keeping it warm in the first place.
-    private func warmIfAsked(_ keepLoaded: Bool) async {
-        guard keepLoaded, let runtime = gpu else { return }
+    private func warmIfAsked(_ directives: ControlPlane.Directives) async {
+        guard directives.keepLoaded, let runtime = gpu else { return }
+
+        // A model that runs across machines is not this runtime's to hold.
+        //
+        // `MLXRuntime` knows nothing about splits: loading it builds the whole
+        // model, so a machine warming half of a 32B would take all 18.4 GB to
+        // serve 9.45 GB of it - and then never use it, because the split path
+        // builds its own model with num_hidden_layers cut to this rank's range.
+        // Peak memory became both at once on a machine with a 37.4 GB working
+        // set: a mechanism meant to halve memory multiplying it instead.
+        //
+        // Warming the share itself is a different piece of work. Until it
+        // exists, doing nothing is strictly better than doing this.
+        guard !directives.isSplit else { return }
+
         guard await !runtime.isLoaded else { return }
         do {
             let seconds = try await runtime.load()
@@ -557,7 +571,7 @@ public actor Worker {
             // never listens.
             if directives.renewRequested { renewRequested = true }
             await adoptServingModel(directives.servingModel)
-            await warmIfAsked(directives.keepLoaded)
+            await warmIfAsked(directives)
             // Cleared only once the report has actually landed. A dropped
             // heartbeat is common and the reason a node is not holding its
             // models is exactly the sort of thing that would be lost by

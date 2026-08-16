@@ -205,17 +205,26 @@ export function effectiveModel(node: NodeFacts, groups: Group[]): string | null 
  * follow without knowing why.
  */
 export function effectiveServing(
-  node: NodeFacts, groups: Group[],
-): { model: string | null; keepLoaded: boolean } {
+  node: NodeFacts, groups: Group[], machinesFor?: (modelId: string) => number,
+): { model: string | null; keepLoaded: boolean; machines: number } {
   const mine = (poolsFor(node, active(groups)) as Group[])
     .filter((g) => g.servingModelId !== null)
   // Cluster preempts harvest where a machine is in both. A split rank cannot be
   // preempted and harvest membership is the promise that a machine can be taken
   // away; only one of those survives contact with one machine.
   const winner = mine.find((g) => g.tier === 'cluster') ?? mine[0]
+  const model = winner?.servingModelId ?? null
   return {
-    model: winner?.servingModelId ?? null,
+    model,
     keepLoaded: winner?.tier === 'cluster',
+    // How many machines the model was declared to need.
+    //
+    // The node cannot work this out and must not guess: warming a model that
+    // runs across machines by loading the whole thing is the failure this
+    // exists to stop - 18.4 GB held on every machine to serve 9.45 GB of it,
+    // and the warm copy never used, because the split path builds its own
+    // reduced model from the same weights.
+    machines: model ? Math.max(1, machinesFor?.(model) ?? 1) : 1,
   }
 }
 

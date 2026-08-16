@@ -782,7 +782,12 @@ public actor ControlPlane {
             // Absent on a control plane older than the release that began
             // sending it, and false is the right reading there: lazy is what
             // every machine did before this existed.
-            keepLoaded: reply["keepLoaded"]?.boolValue ?? false)
+            keepLoaded: reply["keepLoaded"]?.boolValue ?? false,
+            // 1 when absent, which is both the honest default and the safe one:
+            // an older control plane cannot say, and treating an unknown model
+            // as whole means warming is skipped rather than warming the wrong
+            // thing.
+            machines: reply["machines"]?.intValue ?? 1)
     }
 
     /// What the control plane asked of this node on the last beat.
@@ -823,11 +828,26 @@ public actor ControlPlane {
         /// today is the behaviour the presence policy exists to prevent.
         public let keepLoaded: Bool
 
+        /// How many machines the model runs across, as the operator declared it.
+        ///
+        /// A node cannot work this out and must not guess. Warming a model that
+        /// runs across machines by loading the whole thing is worse than not
+        /// warming at all: it holds roughly twice the memory the share needs,
+        /// and the warm copy is never used - the split path builds its own model
+        /// with `num_hidden_layers` cut to this rank's range, from the same
+        /// weights on disk.
+        public let machines: Int
+
+        /// Whether what this machine has been asked to hold is a share of a
+        /// model rather than a whole one.
+        public var isSplit: Bool { machines > 1 }
+
         public init(renewRequested: Bool = false, servingModel: String? = nil,
-                    keepLoaded: Bool = false) {
+                    keepLoaded: Bool = false, machines: Int = 1) {
             self.renewRequested = renewRequested
             self.servingModel = servingModel
             self.keepLoaded = keepLoaded
+            self.machines = max(1, machines)
         }
     }
 

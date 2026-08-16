@@ -1152,3 +1152,79 @@ export function rankLine(rank) {
 export function shouldKeepWatching(r) {
   return r?.state === 'preparing'
 }
+
+/* ------------------------------------------------------- serving a model */
+
+/**
+ * Which models a group could be told to serve.
+ *
+ * Everything the fleet knows about, not only what these machines already hold:
+ * telling a group to serve something is also telling it to fetch it, and
+ * offering only what is already here would make the console unable to express
+ * the ordinary case of deploying something new.
+ *
+ * Embedding models are excluded. They answer a different endpoint and a group
+ * cannot serve one as its model, so listing them offers a choice that produces
+ * a confusing failure rather than an error.
+ */
+export function servableChoices(models) {
+  return (models ?? [])
+    .filter((m) => !String(m.id ?? '').startsWith('ane:'))
+    .map((m) => ({
+      id: m.id,
+      label: String(m.id).split('/').pop(),
+      sizeBytes: m.sizeBytes ?? 0,
+      machines: Math.max(1, Number(m.machines ?? 1)),
+    }))
+    .sort((a, b) => a.label.localeCompare(b.label))
+}
+
+/**
+ * What serving this model at this width will do, said before it is done.
+ *
+ * Two facts an operator needs and one warning they cannot otherwise discover.
+ * `machines` is a column on the model rather than on the assignment, so setting
+ * a width here sets it everywhere - a second cluster group serving the same
+ * model gets the same division, and its machines rebuild. That is not something
+ * to find out afterwards.
+ */
+export function serveConsequences(choice, machinesWanted, groupSize, otherGroups) {
+  const out = []
+  const machines = Math.max(1, Number(machinesWanted ?? 1))
+
+  if (machines > 1) {
+    out.push({ level: 'cost',
+      text: `takes ${machines} machines out of harvesting for as long as it stands` })
+  }
+  if (groupSize && machines > groupSize) {
+    out.push({ level: 'blocked',
+      text: `this group has ${groupSize} machine${groupSize === 1 ? '' : 's'} and `
+        + `${machines} are needed` })
+  }
+  // Only worth saying when it is actually about to change something else.
+  const elsewhere = (otherGroups ?? []).filter((g) => g.servingModelId === choice?.id)
+  if (elsewhere.length > 0 && choice && machines !== choice.machines) {
+    out.push({ level: 'warn',
+      text: `${choice.label} is also served by `
+        + elsewhere.map((g) => g.name).join(', ')
+        + `, and the width belongs to the model - they will run it across `
+        + `${machines} too, and rebuild` })
+  }
+  return out
+}
+
+/**
+ * The address a caller should point at this group.
+ *
+ * The catalogue says which model ids run across machines; nothing says which
+ * port reaches which group. With one group that is obvious and with several it
+ * is the only question, and an operator who has to look a port up in a database
+ * is one who will point an application at the wrong group's machines.
+ */
+export function groupAddress(pool, origin) {
+  if (!pool?.servingPort) return null
+  const host = (() => {
+    try { return new URL(origin).hostname } catch { return 'localhost' }
+  })()
+  return `https://${host}:${pool.servingPort}`
+}

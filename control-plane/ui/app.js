@@ -26,6 +26,7 @@ import {
   isReadOnly, matchesOperation, operationsFrom, responseSize, statusTone,
   whyNotCallable,
   rankLine, readinessSummary, shouldKeepWatching,
+  groupAddress, servableChoices, serveConsequences,
 } from './view.js'
 
 const $ = (sel) => document.querySelector(sel)
@@ -631,6 +632,100 @@ function renderModels(models, pools) {
  * cannot be pushed to and a mechanism that only works on a machine somebody is
  * watching is not a fleet mechanism.
  */
+/**
+ * Tell a cluster group what to serve, and across how many machines.
+ *
+ * The console could not do this at all; it was a terminal away. What matters
+ * here is saying what the choice does before it is made: a split takes its
+ * machines out of harvesting for as long as it stands, a width bigger than the
+ * group cannot run, and the width belongs to the model rather than to this
+ * assignment - so a second group serving the same model gets the same division
+ * and rebuilds. None of that is discoverable afterwards.
+ */
+function showServe(poolId, models, pools, nodes) {
+  const pool = pools.find((p) => p.id === poolId)
+  const others = pools.filter((p) => p.id !== poolId)
+  const choices = servableChoices(models)
+  // The machines this group actually has, by the same membership rule the
+  // scheduler uses - a count from anywhere else would disagree with the one the
+  // request is judged against.
+  const members = (nodes ?? []).filter((n) => matchesGroup(n, pool))
+
+  const say = (choice, machines) => serveConsequences(
+    choice, machines, members.length, others).map((c) => `
+      <p class="consequence ${escape(c.level)}">${escape(c.text)}</p>`).join('')
+
+  drawer.open({
+    kind: 'Serve a model',
+    title: pool?.name ?? 'group',
+    body: () => `
+      <p class="dim">What this group's machines run. They will fetch the weights
+         if they do not have them, and hold the model loaded for as long as the
+         group stands - a cluster group is dedicated, not harvested.</p>
+      <label class="field">Model
+        <select id="serve-model">
+          ${choices.map((c) => `
+            <option value="${escape(c.id)}" ${c.id === pool?.servingModelId ? 'selected' : ''}
+              >${escape(c.label)} &middot; ${humanBytes(c.sizeBytes)}</option>`).join('')}
+        </select>
+      </label>
+      <label class="field">Across how many machines
+        <input id="serve-machines" type="number" min="1" max="${Math.max(1, members.length)}"
+               value="${escape(String(choices.find((c) => c.id === pool?.servingModelId)?.machines ?? 1))}">
+      </label>
+      <div id="serve-says"></div>
+      <button class="primary" id="serve-go">Serve it</button>`,
+    mount(root) {
+      const model = root.querySelector('#serve-model')
+      const machines = root.querySelector('#serve-machines')
+      const says = root.querySelector('#serve-says')
+      const go = root.querySelector('#serve-go')
+
+      const update = () => {
+        const choice = choices.find((c) => c.id === model.value)
+        says.innerHTML = say(choice, Number(machines.value))
+      }
+      model.addEventListener('change', update)
+      machines.addEventListener('input', update)
+      update()
+
+      go.addEventListener('click', async () => {
+        go.disabled = true
+        const body = { modelId: model.value, machines: Number(machines.value) }
+        try {
+          await api(`/pools/${poolId}/serve`, { method: 'PUT', body })
+          toast('serving; the machines will fetch and build')
+          drawer.close()
+          refresh()
+        } catch (err) {
+          // The 409 is the question, and the control plane's own sentence is
+          // what asks it - the same bargain the delete button already makes.
+          // A generic "are you sure" would drop the part somebody needs.
+          if (!/harvesting|out of/.test(err.message)) {
+            toast(err.message, true)
+            go.disabled = false
+            return
+          }
+          if (!confirm(`${err.message}\n\nServe it anyway?`)) {
+            go.disabled = false
+            return
+          }
+          try {
+            await api(`/pools/${poolId}/serve`,
+              { method: 'PUT', body: { ...body, confirm: true } })
+            toast('serving; the machines will fetch and build')
+            drawer.close()
+            refresh()
+          } catch (e2) {
+            toast(e2.message, true)
+            go.disabled = false
+          }
+        }
+      })
+    },
+  })
+}
+
 function showPush(modelId, models, pools) {
   const model = models.find((m) => m.id === modelId)
   const assigned = new Set(model?.assignedPools ?? [])
@@ -1031,9 +1126,17 @@ function renderGroups(nodes, pools, models) {
       ? `<div class="readiness" data-readiness="${escape(g.pool.id)}">
            <span class="hint">checking&hellip;</span></div>`
       : ''
+    // Only on a cluster group. A harvest group's model is a different
+    // proposition - its machines are preemptible and hold whatever they are
+    // pushed - and giving it a machines field would say otherwise.
+    const serve = g.pool.tier === 'cluster'
+      ? `<button class="link" data-serve="${escape(g.pool.id)}"
+                 title="Choose what this group's machines run, and across how many of them"
+                 >serve a model</button>`
+      : ''
     return card(g.pool.name, `${state}${g.pool.tier} tier, ${mode}${at}${serves}`,
                 g.nodes, g.pool.id,
-                warning, socket + stand + remove, off, readiness)
+                warning, serve + socket + stand + remove, off, readiness)
   }).join('') + (ungrouped.length > 0
     ? card('In no group', 'not scheduled by any pool, and holding no assigned models',
       ungrouped, null, null)
@@ -1045,6 +1148,12 @@ function renderGroups(nodes, pools, models) {
   // Deleting asks first, and what it asks with is the control plane's own
   // sentence rather than a generic "are you sure": the refusal names the jobs,
   // the assignments and the machines, which is the part somebody needs to weigh.
+  box.querySelectorAll('[data-serve]').forEach((btn) =>
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation()
+      showServe(btn.dataset.serve, models, pools, nodes)
+    }))
+
   box.querySelectorAll('[data-delete]').forEach((btn) =>
     btn.addEventListener('click', async (ev) => {
       ev.stopPropagation()
@@ -1225,11 +1334,24 @@ async function loadReadiness(pools) {
     }
     if (shouldKeepWatching(r)) watching = true
     const s = readinessSummary(r)
+    // Where to point an application at this group.
+    //
+    // The catalogue says which model ids run across machines; nothing said
+    // which port reaches which group. With one group that is obvious and with
+    // several it is the only question - and an operator who has to look a port
+    // up in a database is one who will address the wrong group's machines.
+    const pool = (pools ?? []).find((p) => p.id === slot.dataset.readiness)
+    const address = groupAddress(pool, window.location.href)
     slot.innerHTML = `
       <div class="ready-head">
         <span class="ready-pill ${s.level}">${escape(s.label)}</span>
         <span class="hint">${escape(s.detail)}</span>
       </div>
+      ${address && r.state === 'ready'
+        ? `<p class="ready-address">answer requests for
+             <code>${escape(r.model ?? '')}</code> at
+             <code>${escape(address)}</code></p>`
+        : ''}
       ${(r.ranks ?? []).length === 0 ? '' : `
         <div class="ranks">${r.ranks.map((raw) => {
           const line = rankLine(raw)

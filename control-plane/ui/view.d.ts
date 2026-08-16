@@ -147,3 +147,10 @@ export function rankLine(rank: any): {
   detail: string
 }
 export function shouldKeepWatching(r: any): boolean
+export function servableChoices(models: any[]): {
+  id: string; label: string; sizeBytes: number; machines: number
+}[]
+export function serveConsequences(
+  choice: any, machinesWanted: number, groupSize: number, otherGroups: any[],
+): { level: 'cost' | 'blocked' | 'warn'; text: string }[]
+export function groupAddress(pool: any, origin: string): string | null

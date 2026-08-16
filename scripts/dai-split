@@ -215,26 +215,31 @@ def cmd_status(admin: Admin, args) -> int:
 def cmd_prepare(admin: Admin, args) -> int:
     pool = group_named(admin, args.group)
 
-    # Declared width first. A group cannot be given a split model before the
-    # model says it is one, and the refusal for doing it the other way round
-    # names a rule rather than an order.
-    model_path = args.model.replace("/", "%2F")
-    status, body = admin.put(f"/admin/v1/models/{model_path}/shape",
-                             {"machines": args.machines})
+    # One call, because the order matters and the console does the same thing.
+    #
+    # Declaring the width has to come before the assignment, and the group has
+    # to be told to hold the weights as well as to serve them - that last was
+    # missing here, and a model nobody had pushed would have left the group
+    # waiting forever with nothing fetching anything. Keeping the order in the
+    # control plane is what stops this script and the console drifting apart.
+    status, body = admin.put(f"/admin/v1/pools/{pool['id']}/serve",
+                             {"modelId": args.model, "machines": args.machines,
+                              "confirm": True})
+    if status == 404 and "not found" == str(detail(body)).strip().lower():
+        # The contract is enforced, so an undocumented path 404s at the router
+        # rather than reaching a handler. That is what a control plane older
+        # than this route looks like from here, and it is worth saying rather
+        # than reporting a missing group or a missing model.
+        raise Failed(
+            "this control plane has no /serve route, so it predates this tool.\n"
+            "  Upgrade it, or do the three steps by hand:\n"
+            "    PUT /admin/v1/models/{id}/shape        {\"machines\": N}\n"
+            "    PUT /admin/v1/pools/{id}/models/{id}   (so the machines fetch it)\n"
+            "    PUT /admin/v1/pools/{id}/serving-model {\"modelId\": ..., \"confirm\": true}")
     if status != 200:
-        raise Failed(f"could not declare {args.model} as {args.machines} machines: "
-                     f"{detail(body)}")
-    print(f"  {args.model} runs across {args.machines} machines "
-          f"({body.get('perMachineGb')} GB each)")
-
-    # Then the assignment, which asks first. Serving a split takes those
-    # machines out of harvesting for as long as it stands, and that is a
-    # decision rather than a side effect.
-    status, body = admin.put(f"/admin/v1/pools/{pool['id']}/serving-model",
-                             {"modelId": args.model, "confirm": True})
-    if status not in (200, 204):
-        raise Failed(f"could not assign it to {pool['name']}: {detail(body)}")
-    print(f"  {pool['name']} serves it")
+        raise Failed(f"could not serve {args.model} from {pool['name']}: {detail(body)}")
+    print(f"  {pool['name']} serves {args.model} across {body.get('machines')} "
+          f"machines ({body.get('perMachineGb')} GB each)")
 
     if not pool["enabled"]:
         status, body = admin.put(f"/admin/v1/pools/{pool['id']}/enabled",

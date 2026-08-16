@@ -1101,3 +1101,112 @@ describe('how long a group keeps a model when nothing is asking', () => {
     expect((await beat.json() as any).idleUnloadSeconds).toBe(90)
   })
 })
+
+
+/**
+ * Telling a group to serve a model, in the order that works.
+ *
+ * Three writes, and until now every caller did them separately. The middle one
+ * was simply missing: serving a model and holding it are different tables, and
+ * setting only pools.serving_model_id leaves a group waiting forever with
+ * nothing fetching anything. It went unnoticed because every model on this
+ * fleet had been pushed long before.
+ */
+describe('telling a group what to serve', () => {
+  const model = 'org/serve-me'
+
+  const known = () => db.query(
+    `INSERT INTO models (id, size_bytes, machines, runtime, kind)
+     VALUES ($1, 1000, 1, 'mlx', 'generate') ON CONFLICT (id) DO NOTHING`, [model])
+
+  const serve = (poolId: string, body: object) =>
+    fetch(`${base}/admin/v1/pools/${poolId}/serve`, {
+      method: 'PUT', headers: asUser(fx.operatorToken), body: JSON.stringify(body),
+    })
+
+  it('writes all three, including the one that was missing', async () => {
+    await known()
+    const r = await serve(fx.poolId, { modelId: model, machines: 1 })
+    expect(r.status).toBe(200)
+
+    const { rows: pool } = await db.query(
+      `SELECT serving_model_id FROM pools WHERE id = $1`, [fx.poolId])
+    expect(pool[0].serving_model_id).toBe(model)
+
+    // The step that was missing. Without it the machines are told to serve
+    // something they were never told to fetch.
+    const { rows: held } = await db.query(
+      `SELECT 1 FROM pool_models WHERE pool_id = $1 AND model_id = $2`,
+      [fx.poolId, model])
+    expect(held).toHaveLength(1)
+
+    const { rows: m } = await db.query(`SELECT machines FROM models WHERE id = $1`, [model])
+    expect(Number(m[0].machines)).toBe(1)
+  })
+
+  it('is idempotent, because it is not a transaction', async () => {
+    // Three statements with no transaction around them: a failure between them
+    // leaves a group half-prepared, and running it again has to finish the job
+    // rather than fail on what already succeeded.
+    await known()
+    expect((await serve(fx.poolId, { modelId: model, machines: 1 })).status).toBe(200)
+    expect((await serve(fx.poolId, { modelId: model, machines: 1 })).status).toBe(200)
+    const { rows } = await db.query(
+      `SELECT count(*)::int AS n FROM pool_models WHERE pool_id=$1 AND model_id=$2`,
+      [fx.poolId, model])
+    expect(rows[0].n).toBe(1)
+  })
+
+  it('404s for a model nobody has imported', async () => {
+    const r = await serve(fx.poolId, { modelId: 'org/not-here' })
+    expect(r.status).toBe(404)
+  })
+
+  it('404s for a group that does not exist', async () => {
+    await known()
+    const r = await serve('00000000-0000-0000-0000-000000000000', { modelId: model })
+    expect(r.status).toBe(404)
+  })
+
+  it('needs a model named', async () => {
+    expect((await serve(fx.poolId, { machines: 2 })).status).toBe(400)
+  })
+
+  it('refuses a width the machines cannot hold', async () => {
+    // Asked here rather than at dispatch, where the answer arrives as a request
+    // that hangs, weeks later, found by whoever happens to send one.
+    await db.query(
+      `INSERT INTO models (id, size_bytes, machines, runtime, kind)
+       VALUES ('org/enormous', 900000000000, 1, 'mlx', 'generate')
+       ON CONFLICT (id) DO NOTHING`)
+    const r = await serve(fx.poolId, { modelId: 'org/enormous', machines: 1 })
+    expect(r.status).toBe(409)
+    expect(JSON.stringify(await r.json())).toContain('cannot run')
+  })
+})
+
+/**
+ * Whether readiness can tell fetching from never having been asked.
+ *
+ * The route fed the check pools.serving_model_id and compared it against
+ * itself, so the branch that says "nothing was ever asked for" could not fire.
+ */
+describe('readiness knows what the machines were told to hold', () => {
+  it('says so when a group serves a model nobody pushed', async () => {
+    const model = 'org/never-pushed'
+    await db.query(
+      `INSERT INTO models (id, size_bytes, machines, runtime, kind)
+       VALUES ($1, 1000, 1, 'mlx', 'generate') ON CONFLICT DO NOTHING`, [model])
+    const { rows } = await db.query(
+      `INSERT INTO pools (name, tier, schedule, preempt, serving_model_id, enabled)
+       VALUES ('unpushed','cluster','gang','never',$1,true) RETURNING id`, [model])
+    await db.query(
+      `INSERT INTO nodes (hostname, tiers, state, cert_fingerprint, last_heartbeat)
+       VALUES ('lonely', ARRAY['cluster']::text[], 'active', 'fp-lonely', now())`)
+
+    const r = await fetch(`${base}/admin/v1/pools/${rows[0].id}/readiness`,
+      { headers: asUser(fx.operatorToken) })
+    const body = await r.json() as any
+    expect(JSON.stringify(body)).toContain('not been told')
+  })
+})

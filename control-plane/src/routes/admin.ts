@@ -1012,6 +1012,110 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
    * the refusal - a diagnostic disguised as a failure, minutes after an operator
    * could have acted on it.
    */
+  /**
+   * Tell a group to serve a model: how wide, hold the weights, run it.
+   *
+   * These are three writes in an order that matters, and until now every caller
+   * did them separately. Declaring the width has to come first, because a group
+   * cannot be given a model that runs across machines before the model says it
+   * does - and the refusal for the other order names a rule rather than an
+   * order, which reads as a fault.
+   *
+   * The middle one was simply missing. Serving a model and holding it are
+   * different tables: `pools.serving_model_id` decides what a group's machines
+   * run, `pool_models` decides what they fetch. Setting only the first leaves a
+   * group waiting forever with nothing fetching anything, and it went unnoticed
+   * because every model on this fleet had been pushed long before.
+   *
+   * Named for what it does rather than for splits. `machines: 1` is a dedicated
+   * group holding a whole model - the same three writes, and the only difference
+   * is that nobody dials anybody.
+   *
+   * Not a transaction, and worth saying so. The order is chosen so the
+   * half-states are inert: a width nobody serves is a number, and weights nobody
+   * serves is a download. It is idempotent, so running it again finishes it.
+   */
+  r.put('/pools/:poolId/serve', async (req, res) => {
+    const { poolId } = req.params as { poolId: string }
+    const b = req.body as { modelId?: string; machines?: number; confirm?: boolean }
+    const modelId = b.modelId
+    const machines = Math.max(1, Number(b.machines ?? 1))
+    if (!modelId) {
+      res.status(400).json({ error: 'bad_request', detail: 'modelId is required' })
+      return
+    }
+
+    const { rows: pools } = await db.query(
+      `SELECT id, name, tier, membership, serving_model_id, enabled
+         FROM pools WHERE id = $1`, [poolId])
+    const pool = pools[0] as { name: string; tier: string } | undefined
+    if (!pool) { res.status(404).json({ error: 'not_found', detail: 'no such group' }); return }
+
+    const { rows: known } = await db.query(
+      `SELECT size_bytes, min_memory_gb FROM models WHERE id = $1`, [modelId])
+    if (known.length === 0) {
+      res.status(404).json({ error: 'not_found', detail: `no model called ${modelId}` })
+      return
+    }
+
+    const { rows: nodes } = await db.query(
+      `SELECT id, hostname, tier, chip, memory_gb, metal_working_set_gb
+         FROM nodes WHERE state = 'active'`)
+    const members = (nodes as never[]).filter(
+      (n: never) => poolsFor(n, [pool] as never).length > 0)
+
+    // Can these machines actually run it, at this width? Asked here rather than
+    // at dispatch, where the answer arrives as a request that hangs.
+    const shape = shapeOf({
+      size_bytes: (known[0] as { size_bytes: number }).size_bytes,
+      machines,
+      min_memory_gb: (known[0] as { min_memory_gb: number | null }).min_memory_gb ?? null,
+    })
+    const why = whyGroupCannotHost(
+      (members as { hostname: string; metal_working_set_gb: string | null }[]).map((n) => ({
+        hostname: n.hostname,
+        metalWorkingSetGb: n.metal_working_set_gb === null
+          ? null : Number(n.metal_working_set_gb),
+      })), shape)
+    if (why) {
+      res.status(409).json({
+        error: 'conflict', detail: `${pool.name} cannot run ${modelId}: ${why}`,
+      })
+      return
+    }
+
+    // What it costs, before it costs it. A split takes those machines out of
+    // harvesting for as long as it stands, which is a decision rather than a
+    // side effect.
+    if (!b.confirm) {
+      const { rows: allPools } = await db.query(
+        `SELECT id, name, tier, membership, serving_model_id, enabled FROM pools`)
+      const cost = costOfServing(modelId, machines, members as never,
+        (allPools as any[]).map((p) => ({
+          ...p, servingModelId: p.serving_model_id ?? null,
+          enabled: p.enabled !== false,
+        })) as never)
+      if (cost) {
+        res.status(409).json({ error: 'confirm_required', detail: cost })
+        return
+      }
+    }
+
+    await db.query(`UPDATE models SET machines = $2 WHERE id = $1`, [modelId, machines])
+    await db.query(
+      `INSERT INTO pool_models (pool_id, model_id, assigned_by) VALUES ($1,$2,$3)
+       ON CONFLICT DO NOTHING`, [poolId, modelId, req.user!.id])
+    await db.query(
+      `UPDATE pools SET serving_model_id = $2 WHERE id = $1`, [poolId, modelId])
+    await audit(db, req.user!.id, 'pool.serve', poolId, { modelId, machines })
+
+    res.json({
+      group: pool.name, modelId, machines,
+      perMachineGb: Number(shape.perMachineGb.toFixed(2)),
+      machinesInGroup: members.length,
+    })
+  })
+
   r.get('/pools/:poolId/readiness', async (req, res) => {
     const { poolId } = req.params as { poolId: string }
     const { rows: pools } = await db.query(
@@ -1031,6 +1135,19 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
               pipeline_address, model_sync_faults, last_heartbeat
          FROM nodes WHERE state = 'active'`)
 
+    // Whether this group's machines have been told to hold the model at all.
+    //
+    // Serving it and holding it are different tables: pools.serving_model_id
+    // decides what they run, pool_models decides what they fetch. This read the
+    // serving model and compared it against itself, so the branch that says
+    // "nothing was ever asked for" could not fire - a group set to serve a model
+    // nobody had pushed reported "fetching the weights" indefinitely, about
+    // machines fetching nothing.
+    const { rows: held } = await db.query(
+      `SELECT 1 FROM pool_models WHERE pool_id = $1 AND model_id = $2`,
+      [poolId, pool.serving_model_id])
+    const toldToHold = held.length > 0 ? pool.serving_model_id : null
+
     // The group's own machines, by the same membership rule everything else
     // uses, so this describes the group an operator is looking at rather than
     // the fleet.
@@ -1044,7 +1161,7 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
         // machine as missing.
         connected: n.last_heartbeat != null
           && Date.now() - new Date(n.last_heartbeat).getTime() < 120_000,
-        assigned: pool.serving_model_id,
+        assigned: toldToHold,
         // On disk is what the node has fetched; model_context is written when a
         // model has been opened, which is the only evidence available that the
         // weights are actually here.

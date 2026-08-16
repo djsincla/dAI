@@ -547,7 +547,8 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
   r.get('/pools', async (_req, res) => {
     const { rows } = await db.query(
       `SELECT id, name, tier, schedule, preempt, priority,
-              agent_channel, desired_agent_version, serving_model_id, serving_port, enabled
+              agent_channel, desired_agent_version, serving_model_id, serving_port,
+              enabled, idle_unload_seconds
          FROM pools ORDER BY name`,
     )
     res.json(rows.map((p) => ({
@@ -566,7 +567,46 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
       // configuration at rest: everything here is still true of it and none of
       // it is in force.
       enabled: p.enabled !== false,
+      // How long these machines hold a model once nothing is being asked of
+      // them. Null means the fleet default, and a cluster group is never sent
+      // one at all - dedicated means loaded.
+      idleUnloadSeconds: p.idle_unload_seconds === null
+        ? null : Number(p.idle_unload_seconds),
     })))
+  })
+
+  /**
+   * How long this group's machines keep a model when nothing is asking.
+   *
+   * Not really a setting about weights. Unloading clears the prompt cache with
+   * them and that is the expensive half: a loop that released too eagerly once
+   * turned a 0.5s warm request into 37.5s, an 18s reload and a full prefill on
+   * every one. Read it as how long to keep a conversation warm.
+   *
+   * Null restores the fleet default. Meaningless on a cluster group, which is
+   * dedicated and holds its model for as long as it stands - accepted rather
+   * than refused there, because an operator moving a group between tiers should
+   * not have a setting silently rejected on the way.
+   */
+  r.put('/pools/:poolId/idle-unload', async (req, res) => {
+    const { poolId } = req.params as { poolId: string }
+    const seconds = (req.body as { seconds?: number | null })?.seconds ?? null
+
+    if (seconds !== null && (!Number.isInteger(seconds) || seconds < 1)) {
+      res.status(400).json({
+        error: 'bad_request',
+        detail: 'seconds must be a whole number of seconds, or null for the default',
+      })
+      return
+    }
+    const { rowCount } = await db.query(
+      `UPDATE pools SET idle_unload_seconds = $2 WHERE id = $1`, [poolId, seconds])
+    if (rowCount === 0) {
+      res.status(404).json({ error: 'not_found', detail: 'no such group' })
+      return
+    }
+    await audit(db, req.user!.id, 'pool.idle-unload', poolId, { seconds })
+    res.json({ idleUnloadSeconds: seconds })
   })
 
   /**

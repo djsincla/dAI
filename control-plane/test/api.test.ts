@@ -1020,3 +1020,66 @@ describe('what a stood-down group offers an agent', () => {
     expect(assigned.some((m) => m.id === 'org/ghost')).toBe(false)
   })
 })
+
+
+/**
+ * A setting nobody can set is worse than a fleet constant.
+ *
+ * The column, the resolution and the directive all shipped before anything
+ * could read or write it: an operator could neither see the window nor change
+ * it, so every group was on the default whether that suited it or not.
+ */
+describe('how long a group keeps a model when nothing is asking', () => {
+  const set = (poolId: string, seconds: number | null) =>
+    fetch(`${base}/admin/v1/pools/${poolId}/idle-unload`, {
+      method: 'PUT', headers: asUser(fx.operatorToken),
+      body: JSON.stringify({ seconds }),
+    })
+
+  it('sets a window and shows it back', async () => {
+    expect((await set(fx.poolId, 60)).status).toBe(200)
+    const pools = await (await fetch(`${base}/admin/v1/pools`,
+      { headers: asUser(fx.operatorToken) })).json() as any[]
+    expect(pools.find((p) => p.id === fx.poolId).idleUnloadSeconds).toBe(60)
+  })
+
+  it('null restores the fleet default', async () => {
+    // Distinct from zero, which is refused. Null means "whatever the fleet
+    // says"; a group that had been given a number needs a way back.
+    await set(fx.poolId, 60)
+    expect((await set(fx.poolId, null)).status).toBe(200)
+    const pools = await (await fetch(`${base}/admin/v1/pools`,
+      { headers: asUser(fx.operatorToken) })).json() as any[]
+    expect(pools.find((p) => p.id === fx.poolId).idleUnloadSeconds).toBeNull()
+  })
+
+  it('refuses a window that would release between the turns of a conversation', async () => {
+    // Zero would unload after every request, which is the behaviour that cost
+    // 37 seconds a request the last time a loop released too eagerly.
+    expect((await set(fx.poolId, 0)).status).toBe(400)
+    expect((await set(fx.poolId, -30)).status).toBe(400)
+    expect((await set(fx.poolId, 1.5 as never)).status).toBe(400)
+  })
+
+  it('404s for a group that does not exist', async () => {
+    const r = await set('00000000-0000-0000-0000-000000000000', 60)
+    expect(r.status).toBe(404)
+  })
+
+  it('reaches the machine as a directive', async () => {
+    // The whole point: set on the group, resolved by the same winner that
+    // decides the model, and sent as intent rather than topology.
+    await set(fx.poolId, 90)
+    await db.query(
+      `INSERT INTO models (id, size_bytes, machines, runtime, kind)
+       VALUES ('org/idle', 1, 1, 'mlx', 'generate') ON CONFLICT DO NOTHING`)
+    await db.query(
+      `UPDATE pools SET serving_model_id = 'org/idle' WHERE id = $1`, [fx.poolId])
+
+    const beat = await fetch(`${base}/agent/v1/heartbeat`, {
+      method: 'POST', headers: asNode(fx.fingerprint),
+      body: JSON.stringify({ presenceState: 'IDLE' }),
+    })
+    expect((await beat.json() as any).idleUnloadSeconds).toBe(90)
+  })
+})

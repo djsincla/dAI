@@ -1847,6 +1847,60 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '401': { $ref: '#/components/responses/Unauthorized' }
 
+  /admin/v1/pools/{poolId}/idle-unload:
+    parameters:
+      - name: poolId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      tags: [admin]
+      summary: How long this group's machines keep a model when nothing is asking
+      description: >
+        The presence policy already covers "somebody wants their machine back".
+        This covers "nobody wants anything", which nothing did: a machine that
+        answered one request held gigabytes until its owner returned.
+
+
+        Not really a setting about weights. Unloading clears the prompt cache
+        with them and that is the expensive half - a loop that released too
+        eagerly once turned a 0.5s warm request into 37.5s. Read it as how long
+        to keep a conversation warm.
+
+
+        Null restores the fleet default. Meaningless on a cluster group, which
+        is dedicated and holds its model for as long as it stands.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                seconds:
+                  type: integer
+                  nullable: true
+                  minimum: 1
+      responses:
+        '200':
+          description: What the group will now do
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  idleUnloadSeconds: { type: integer, nullable: true }
+        '400':
+          description: Not a whole number of seconds
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: No such group
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /admin/v1/pools/{poolId}/readiness:
     parameters:
       - name: poolId

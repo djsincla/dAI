@@ -488,7 +488,8 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
     // run, and the harvest group promises the opposite. Only one of those
     // survives contact with a single machine.
     const { rows: pools } = await db.query(
-      `SELECT id, name, tier, membership, serving_model_id FROM pools
+      `SELECT id, name, tier, membership, serving_model_id, idle_unload_seconds
+         FROM pools
         WHERE serving_model_id IS NOT NULL AND enabled`)
     // How wide each model was declared, so the node can be told whether what it
     // has been asked to hold runs across machines. One query rather than one
@@ -498,7 +499,9 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
       .map((m) => [m.id, Math.max(1, Number(m.machines ?? 1))]))
 
     const serving = effectiveServing(node as never, (pools as any[]).map((p) => ({
-      ...p, servingModelId: p.serving_model_id as string,
+      ...p,
+      servingModelId: p.serving_model_id as string,
+      idleUnloadSeconds: p.idle_unload_seconds as number | null,
     })) as never, (id) => machinesFor.get(id) ?? 1)
 
     res.json({
@@ -527,6 +530,13 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
       // it builds its own model with num_hidden_layers cut to this rank's
       // range, straight from the same weights.
       machines: serving.machines,
+      // How long to hold the model once nothing is being asked of it.
+      //
+      // Null for a dedicated group, which holds its model for as long as it
+      // stands. A number is a harvest machine being told when to let go: the
+      // presence policy already covers "somebody wants their machine back",
+      // and this covers "nobody wants anything", which nothing did.
+      idleUnloadSeconds: serving.idleUnloadSeconds,
     })
   })
 

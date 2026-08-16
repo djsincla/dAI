@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { effectiveServing, type Group } from '../src/lib/groupRules.js'
+import { DEFAULT_IDLE_UNLOAD_SECONDS, effectiveServing, type Group }
+  from '../src/lib/groupRules.js'
 
 const node = { id: 'n1', hostname: 'orca', tier: 'cluster',
                chip: 'Apple M4 Pro', memory_gb: 48 } as never
@@ -26,12 +27,12 @@ describe('what a machine serves', () => {
     // Somebody is sitting at it. Holding gigabytes for a request that may not
     // come today is what the presence policy exists to prevent.
     expect(effectiveServing(node, [harvest]))
-      .toEqual({ model: '30B', keepLoaded: false, machines: 1 })
+      .toEqual({ model: '30B', keepLoaded: false, machines: 1, idleUnloadSeconds: 300 })
   })
 
   it('a cluster machine holds its model loaded', () => {
     expect(effectiveServing(node, [cluster]))
-      .toEqual({ model: '32B', keepLoaded: true, machines: 1 })
+      .toEqual({ model: '32B', keepLoaded: true, machines: 1, idleUnloadSeconds: null })
   })
 
   it('cluster preempts harvest where a machine is in both', () => {
@@ -39,28 +40,28 @@ describe('what a machine serves', () => {
     // that a machine can be taken away. Only one survives contact with one
     // machine, and it is the split.
     expect(effectiveServing(node, [harvest, cluster]))
-      .toEqual({ model: '32B', keepLoaded: true, machines: 1 })
+      .toEqual({ model: '32B', keepLoaded: true, machines: 1, idleUnloadSeconds: null })
   })
 
   it('hands the machine back when the cluster group is stood down', () => {
     // The whole lifecycle in one assertion: disable the split and the harvest
     // group's model applies again, lazily, as though the split had never been.
     expect(effectiveServing(node, [harvest, { ...cluster, enabled: false }]))
-      .toEqual({ model: '30B', keepLoaded: false, machines: 1 })
+      .toEqual({ model: '30B', keepLoaded: false, machines: 1, idleUnloadSeconds: 300 })
   })
 
   it('says nothing when no enabled group names a model', () => {
     // Which the node reads as "keep what you have" unless what it holds was
     // adopted - the machine decides that, not the control plane.
     expect(effectiveServing(node, [{ ...harvest, servingModelId: null }]))
-      .toEqual({ model: null, keepLoaded: false, machines: 1 })
+      .toEqual({ model: null, keepLoaded: false, machines: 1, idleUnloadSeconds: null })
     expect(effectiveServing(node, []))
-      .toEqual({ model: null, keepLoaded: false, machines: 1 })
+      .toEqual({ model: null, keepLoaded: false, machines: 1, idleUnloadSeconds: null })
   })
 
   it('a disabled cluster group does not keep anything warm', () => {
     expect(effectiveServing(node, [{ ...cluster, enabled: false }]))
-      .toEqual({ model: null, keepLoaded: false, machines: 1 })
+      .toEqual({ model: null, keepLoaded: false, machines: 1, idleUnloadSeconds: null })
   })
 })
 
@@ -88,7 +89,7 @@ describe('how wide the model is', () => {
     // model does. Reporting the harvest group's width beside the cluster
     // group's model is how a node would warm the wrong thing correctly.
     expect(effectiveServing(node, [harvest, cluster], widths))
-      .toEqual({ model: '32B', keepLoaded: true, machines: 2 })
+      .toEqual({ model: '32B', keepLoaded: true, machines: 2, idleUnloadSeconds: null })
   })
 
   it('is 1 when nothing is being served', () => {
@@ -104,5 +105,66 @@ describe('how wide the model is', () => {
   it('never reports less than one machine', () => {
     expect(effectiveServing(node, [cluster], () => 0).machines).toBe(1)
     expect(effectiveServing(node, [cluster], () => -2).machines).toBe(1)
+  })
+})
+
+
+/**
+ * How long a machine holds a model when nothing is being asked of it.
+ *
+ * The presence policy already covered "somebody wants their machine back".
+ * Nothing covered "nobody wants anything", so a harvest machine that answered
+ * one request held gigabytes until its owner returned.
+ */
+describe('how long to hold when nothing is being asked', () => {
+  const harvest = group({ name: 'Cluster', tier: 'harvest', servingModelId: '30B' })
+  const cluster = group({ name: 'split-cluster', tier: 'cluster', servingModelId: '32B' })
+
+  it('gives a harvest group the fleet default when it has not chosen', () => {
+    expect(effectiveServing(node, [harvest]).idleUnloadSeconds)
+      .toBe(DEFAULT_IDLE_UNLOAD_SECONDS)
+  })
+
+  it('lets a group choose its own', () => {
+    // An overnight batch pool and a daytime ad-hoc pool want different answers,
+    // which is why this lives on the group beside every other decision of the
+    // same kind.
+    expect(effectiveServing(node, [{ ...harvest, idleUnloadSeconds: 60 }])
+      .idleUnloadSeconds).toBe(60)
+  })
+
+  it('sends a dedicated group no window at all', () => {
+    // Not a very long one. A number somebody can see is a number somebody
+    // eventually sets short, and a split that unloads between requests rebuilds
+    // its share every time.
+    expect(effectiveServing(node, [cluster]).idleUnloadSeconds).toBeNull()
+    expect(effectiveServing(node, [{ ...cluster, idleUnloadSeconds: 30 }])
+      .idleUnloadSeconds).toBeNull()
+  })
+
+  it('follows the same winner as the model does', () => {
+    // Cluster preempts harvest. A machine holding the cluster group's model on
+    // the harvest group's window would release the split's share underneath it.
+    expect(effectiveServing(node, [{ ...harvest, idleUnloadSeconds: 60 }, cluster])
+      .idleUnloadSeconds).toBeNull()
+  })
+
+  it('gives a machine no window when nothing is served', () => {
+    expect(effectiveServing(node, []).idleUnloadSeconds).toBeNull()
+  })
+
+  it('hands the window back once the cluster group stands down', () => {
+    // The whole lifecycle: the machine is handed back and becomes an ordinary
+    // harvest machine again, window and all.
+    expect(effectiveServing(node, [harvest, { ...cluster, enabled: false }])
+      .idleUnloadSeconds).toBe(DEFAULT_IDLE_UNLOAD_SECONDS)
+  })
+
+  it('defaults to five minutes, which protects the prompt cache', () => {
+    // Unloading clears the prompt cache with the weights, and that is the
+    // expensive half - releasing too eagerly once turned a 0.5s warm request
+    // into 37.5s. Five minutes covers an agentic client whose turns are seconds
+    // apart with room to spare.
+    expect(DEFAULT_IDLE_UNLOAD_SECONDS).toBe(300)
   })
 })

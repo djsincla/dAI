@@ -540,6 +540,24 @@ END $$;
 -- belongs. Split in two for the same reason the file splits everything else:
 -- re-applying has to be a no-op.
 ALTER TABLE pools ADD COLUMN IF NOT EXISTS serving_model_id text;
+
+-- How long a machine in this group holds a model after the last request.
+--
+-- Harvest is ad-hoc: it loads cold and should let go when nothing is being
+-- asked of it. Until this existed a machine released only when its owner came
+-- back, so one request at 9am held gigabytes all day - the presence policy
+-- covers "somebody wants their machine", and nothing covered "nobody wants
+-- anything".
+--
+-- Per group rather than per fleet because an overnight batch pool and a daytime
+-- ad-hoc pool want different answers, and every other decision of this kind -
+-- schedule, preempt, priority, agent_channel - already lives here. Null means
+-- the fleet default.
+--
+-- It is not really a weights setting. Unloading clears the prompt cache too,
+-- and that is the expensive half: releasing too eagerly once turned a 0.5s warm
+-- request into 37.5s. This is how long to keep a conversation warm.
+ALTER TABLE pools ADD COLUMN IF NOT EXISTS idle_unload_seconds int;
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'pools_serving_model_fk')

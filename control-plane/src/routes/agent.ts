@@ -599,7 +599,12 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
    */
   r.get('/models/assigned', async (req, res) => {
     const node = req.node!
-    const { rows: pools } = await db.query(`SELECT id, tier, membership FROM pools`)
+    // enabled, because poolsFor drops a stood-down group and cannot do that
+    // without the column. Harmless here only by accident - the query below
+    // filters again - and the same omission has already produced three separate
+    // faults, each found and fixed on its own.
+    const { rows: pools } = await db.query(
+      `SELECT id, tier, membership, enabled FROM pools`)
     const mine = poolsFor(node as never, pools as never).map((p) => p.id)
     if (mine.length === 0) { res.json([]); return }
 
@@ -664,7 +669,8 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
    * software somebody else is responsible for.
    */
   r.get('/agent/desired', async (req, res) => {
-    const { rows: pools } = await db.query(`SELECT id, tier, membership FROM pools`)
+    const { rows: pools } = await db.query(
+      `SELECT id, tier, membership, enabled FROM pools`)
     const mine = poolsFor(req.node! as never, pools as never).map((p) => p.id)
     const build = await desiredBuildFor(db, mine)
     res.json(build ?? {})

@@ -49,6 +49,12 @@ public actor SplitRunner {
         /// cannot compare the two, or bill for either.
         public let promptTokens: Int
         public let promptSeconds: Double
+        /// Prompt tokens every machine agreed to skip, having already read them.
+        ///
+        /// Zero when nothing was agreed, which is what a restarted rank or a
+        /// different prompt produces - and what every split request did before
+        /// the cache crossed the split boundary.
+        public let reusedTokens: Int
         public let decodeSeconds: Double
         public let residentGb: Double
     }
@@ -328,12 +334,102 @@ public actor SplitRunner {
                          totalLayers: loaded.totalLayers, size: loaded.split.size)
     }
 
+    /// One conversation's prefix, kept between requests.
+    ///
+    /// The single-machine path has had this since 6125f8f9 - 47.2s down to 0.57s
+    /// on a repeated prefix - and it never crossed the split boundary. Nothing
+    /// was removed: SplitRunner has started from a fresh cache since its first
+    /// commit, so the same model silently lost its cache the moment its group
+    /// became a split.
+    private let promptCache = PromptCache()
+
+    /// Whether this machine can honour what rank 0 proposed.
+    ///
+    /// The whole safety of the mechanism is here, so it is a function rather
+    /// than a few lines inside a network exchange: a version that trusted the
+    /// proposal, or compared only lengths, would pass every naive test and
+    /// answer wrongly on real hardware.
+    ///
+    /// Three ways to say no, and each has to be a no. Nothing proposed. Nothing
+    /// cached here - a restarted rank. And a prefix of the right length that is
+    /// not the right tokens, which a length comparison cannot see: two machines
+    /// can hold 1,600 tokens of different prompts, and that is a state a
+    /// dedicated gang should never reach. "Should never" is what layer 26 taught
+    /// this codebase.
+    static func accepts(proposal: (reusable: Int, digest: [Int32]),
+                        mine: (reusable: Int, digest: [Int32])?,
+                        prompt: [Int]) -> Bool {
+        guard proposal.reusable > 0, proposal.reusable <= prompt.count else { return false }
+        guard let mine, mine.reusable >= proposal.reusable else { return false }
+        // Hashed from this machine's own prompt, not from what arrived. Trusting
+        // the sender's digest would verify the proposal against itself.
+        return PromptCache.digest(of: Array(prompt[..<proposal.reusable]))
+            == proposal.digest
+    }
+
+    /// How many tokens of this prompt every machine will skip.
+    ///
+    /// Rank 0 proposes, every other rank verifies, and a single objection makes
+    /// the answer zero for everybody. No rank acts on its own opinion: the
+    /// correctness rule is that a reused prefix must be identical, not similar,
+    /// and here it has to be identical *across machines*.
+    ///
+    /// A machine with no cache offers nothing, so a restarted rank forces a full
+    /// prefill rather than a disagreement. That costs exactly what every split
+    /// request costs today, so the worst case of this whole mechanism is the
+    /// behaviour it replaces.
+    private func agreeOnReuse(_ loaded: Loaded,
+                              promptTokens: [Int]) throws -> PromptCache.Plan {
+        let split = loaded.split
+        let mine = promptCache.offer(for: promptTokens)
+
+        // Nothing is split: no one to agree with, and the ordinary rule applies.
+        guard split.size > 1 else {
+            return promptCache.commit(reuse: mine?.reusable ?? 0, for: promptTokens,
+                                      model: loaded.model, parameters: .init())
+        }
+
+        let agreed: Int
+        if split.isLast {
+            // Rank 0 holds the output head and answers, so it proposes. A
+            // proposal, not an instruction - it is refused by anybody who cannot
+            // match it.
+            let offered = mine?.reusable ?? 0
+            let digest = mine?.digest ?? Array(repeating: Int32(0), count: 8)
+            try transport.send(MLXArray([Int32(offered)] + digest), to: split.rank + 1)
+            let verdict = try transport.receive(like: MLXArray([Int32(0)]),
+                                                from: split.rank + 1)
+            agreed = verdict.item(Int32.self) == 1 ? offered : 0
+        } else {
+            let proposal = try transport.receive(
+                like: MLXArray(Array(repeating: Int32(0), count: 9)),
+                from: split.rank - 1)
+            let words = proposal.asArray(Int32.self)
+            let asked = Int(words[0])
+            let ok = Self.accepts(proposal: (asked, Array(words[1...])),
+                                  mine: mine, prompt: promptTokens)
+            try transport.send(MLXArray([Int32(ok ? 1 : 0)]), to: split.rank - 1)
+            agreed = ok ? asked : 0
+        }
+
+        return promptCache.commit(reuse: agreed, for: promptTokens,
+                                  model: loaded.model, parameters: .init())
+    }
+
     public func generate(_ loaded: Loaded, prompt: String, maxTokens: Int) throws -> Outcome {
         let split = loaded.split
         let promptTokens = try loaded.tokenizer.applyChatTemplate(
             messages: [["role": "user", "content": prompt]])
 
-        let cache = loaded.model.newCache(parameters: nil)
+        // What every machine will reuse of the prompt it has already read.
+        //
+        // Agreed rather than decided, because each rank holds attention state
+        // for its own layers only: if one skips 1,600 tokens and another starts
+        // fresh, the hidden states do not correspond and the answer is
+        // confidently wrong with no error anywhere - the same shape as a layer
+        // owned by nobody.
+        let plan = try agreeOnReuse(loaded, promptTokens: promptTokens)
+        let cache = plan.cache ?? loaded.model.newCache(parameters: nil)
         var produced: [Int] = []
 
         // Everything that ends generation, from all three places one can be
@@ -343,7 +439,10 @@ public actor SplitRunner {
                 .compactMap { $0 }))
 
         let started = Date()
-        var token = try step(loaded, input: MLXArray(promptTokens.map { Int32($0) }),
+        // Only the tokens nobody has read yet. `toProcess` is the whole prompt
+        // when nothing was agreed, which is what every split request did before
+        // this and what any disagreement still produces.
+        var token = try step(loaded, input: MLXArray(plan.toProcess.map { Int32($0) }),
                              cache: cache)
         let firstAt = Date()
 
@@ -371,6 +470,7 @@ public actor SplitRunner {
             tokens: produced.count,
             promptTokens: promptTokens.count,
             promptSeconds: firstAt.timeIntervalSince(started),
+            reusedTokens: plan.reused,
             decodeSeconds: ended.timeIntervalSince(firstAt),
             residentGb: Double(GPU.peakMemory) / 1_073_741_824)
     }

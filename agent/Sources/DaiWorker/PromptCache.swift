@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import MLX
 import MLXLMCommon
@@ -84,6 +85,75 @@ final class PromptCache: @unchecked Sendable {
 
         tokens = Array(full)
         return Plan(toProcess: Array(full[shared...]), cache: existing, reused: shared)
+    }
+
+    // MARK: - Agreeing with another machine
+
+    /// What this cache could offer for this prompt, without committing to it.
+    ///
+    /// `plan(for:)` cannot be used to propose something that might be refused:
+    /// it trims the cache and records the new tokens as it goes, so asking it a
+    /// question changes the answer. A pipeline has to agree before anybody acts,
+    /// so the question and the commitment are separate.
+    ///
+    /// The digest is over the token ids of the prefix being offered. Comparing
+    /// lengths would let two machines agree on 1,600 while holding 1,600 tokens
+    /// of *different* prompts - a state a dedicated gang should never reach, and
+    /// "should never" is what layer 26 taught this codebase.
+    func offer(for full: [Int]) -> (reusable: Int, digest: [Int32])? {
+        guard let existing = cache, !tokens.isEmpty else { return nil }
+        let shared = min(commonPrefix(tokens, full), full.count - 1)
+        guard shared >= Self.minimumReuse else { return nil }
+
+        // A cache that cannot be trimmed cannot be reused for anything shorter
+        // than it holds, so it has nothing to offer.
+        let excess = (existing.first?.offset ?? 0) - shared
+        if excess > 0, !existing.allSatisfy(\.isTrimmable) { return nil }
+
+        return (shared, Self.digest(of: Array(full[..<shared])))
+    }
+
+    /// Reuse exactly this many tokens, having agreed on it.
+    ///
+    /// Zero means every machine starts fresh, which is what any disagreement
+    /// produces and what every split request did before this existed.
+    func commit(reuse: Int, for full: [Int], model: any LanguageModel,
+                parameters: GenerateParameters) -> Plan {
+        guard reuse > 0, let existing = cache else {
+            return fresh(full, model: model, parameters: parameters)
+        }
+        let excess = (existing.first?.offset ?? 0) - reuse
+        if excess > 0 {
+            guard existing.allSatisfy(\.isTrimmable) else {
+                return fresh(full, model: model, parameters: parameters)
+            }
+            for layer in existing { _ = layer.trim(excess) }
+        }
+        tokens = Array(full)
+        return Plan(toProcess: Array(full[reuse...]), cache: existing, reused: reuse)
+    }
+
+    /// SHA256 of a token sequence, as eight words.
+    ///
+    /// Words rather than bytes because the only path between machines carries
+    /// Int32 arrays - the sampled token already travels that way - so a digest
+    /// needs no new wire format. Little-endian explicitly: two machines that
+    /// disagreed about byte order would disagree about every prompt, which is
+    /// safe but would mean the cache never once worked.
+    static func digest(of tokens: [Int]) -> [Int32] {
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(tokens.count * 4)
+        for token in tokens {
+            let v = UInt32(bitPattern: Int32(truncatingIfNeeded: token))
+            bytes.append(contentsOf: [UInt8(v & 0xff), UInt8((v >> 8) & 0xff),
+                                      UInt8((v >> 16) & 0xff), UInt8((v >> 24) & 0xff)])
+        }
+        let hash = SHA256.hash(data: Data(bytes))
+        return stride(from: 0, to: 32, by: 4).map { i in
+            let slice = Array(hash)[i ..< i + 4]
+            return Int32(bitPattern: UInt32(slice[i]) | UInt32(slice[i + 1]) << 8
+                | UInt32(slice[i + 2]) << 16 | UInt32(slice[i + 3]) << 24)
+        }
     }
 
     private func fresh(_ full: [Int], model: any LanguageModel,

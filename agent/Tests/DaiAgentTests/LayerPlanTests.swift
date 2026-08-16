@@ -18,7 +18,7 @@ struct LayerPlanTests {
     static func done(isHead: Bool, totalLayers: Int, size: Int) -> SplitRunner.Completed {
         SplitRunner.Completed(
             outcome: SplitRunner.Outcome(text: "hello", tokens: 205, promptTokens: 935,
-                                         promptSeconds: 0.1, decodeSeconds: 0.2,
+                                         promptSeconds: 0.1, reusedTokens: 0, decodeSeconds: 0.2,
                                          residentGb: 4.5),
             isHead: isHead, layers: 0..<24, totalLayers: totalLayers, size: size)
     }

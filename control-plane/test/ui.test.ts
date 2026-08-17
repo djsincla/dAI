@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { whyNotInPool } from '../src/lib/pools.js'
 import {
   bodySkeleton, buildUrl, callableHere, formatResponse, groupOperations,
   groupAddress, isReadOnly, matchesOperation, operationsFrom, rankLine,
@@ -9,7 +10,8 @@ import {
   servingLine, stagedLines, unpinConsequences,
 } from '../ui/view.js'
 import {
-  TIERS, describeTier, inBothTiers, tierMachines, tiersAfter, tiersOf,
+  TIERS, describeTier, inBothTiers, tiersAfter, tiersOf,
+  tierToggle, needsTierFor, bothTiersNote,
   attentionItems, capacityOf, copyState, distributionOf, humanBytes, importCost,
   bucketFor, certificateStanding, clampWindow, effectiveModelFor, groupMismatches,
   splitNote, suspensionNote, describeWindow, groupMachines,
@@ -876,17 +878,6 @@ describe('what a machine is offered for', () => {
     expect(tiersOf({ tiers: [] })).toEqual(['harvest'])
   })
 
-  it('shows a machine under every tier it is in', () => {
-    // The same rule groups follow: hiding the second one would make a view
-    // that disagrees with the scheduler.
-    const both = { id: 'a', tiers: ['harvest', 'cluster'] }
-    const harvest = { id: 'b', tiers: ['harvest'] }
-    const byTier = tierMachines([both, harvest])
-    expect(byTier.map((t) => t.tier)).toEqual(TIERS)
-    expect(byTier[0]!.nodes.map((n: any) => n.id)).toEqual(['a', 'b'])
-    expect(byTier[1]!.nodes.map((n: any) => n.id)).toEqual(['a'])
-  })
-
   it('points out the machines that are in both', () => {
     expect(inBothTiers({ tiers: ['harvest', 'cluster'] })).toBe(true)
     expect(inBothTiers({ tiers: ['cluster'] })).toBe(false)
@@ -1339,5 +1330,139 @@ describe('what unpinning a group will do', () => {
     const out = unpinConsequences(pool, [])
     expect(out.some((c) => c.level === 'blocked')).toBe(true)
     expect(out.find((c) => c.level === 'blocked')!.text).toContain('push a model to it first')
+  })
+})
+
+/**
+ * Tier as a property of the machine, not an arrangement of the fleet.
+ *
+ * The Machines page used to offer a toggle - Groups or Tiers - which presented
+ * the two as alternative views of one fleet. They are not alternatives:
+ * `whyNotInPool` refuses a cluster group any machine not already offered for
+ * cluster, so a tier is a precondition for membership. The cost was concrete -
+ * dragging a harvest-only machine onto a cluster group returned 409 and the
+ * console stopped, and the operator had to switch view, grant the tier, switch
+ * back, and drag again.
+ */
+describe('what a machine is offered for', () => {
+  const node = (tiers: string[]) => ({ id: 'n1', hostname: 'orca', tiers }) as any
+
+  it('adds a tier the machine does not have', () => {
+    expect(tierToggle(node(['harvest']), 'cluster'))
+      .toEqual({ action: 'add', next: ['harvest', 'cluster'] })
+  })
+
+  it('removes one it does have', () => {
+    expect(tierToggle(node(['harvest', 'cluster']), 'cluster'))
+      .toEqual({ action: 'remove', next: ['harvest'] })
+  })
+
+  it('refuses to leave a machine offered for nothing, and says why', () => {
+    // Such a machine still runs, still heartbeats and never gets work, which
+    // looks exactly like a broken agent and sends somebody to read logs.
+    const out = tierToggle(node(['harvest']), 'harvest')
+    expect(out.action).toBeUndefined()
+    expect(out.refused).toContain('offered for something')
+    expect(out.refused).toContain('never gets work')
+  })
+
+  it('reads the old scalar, for a fleet part-way through an upgrade', () => {
+    expect(tierToggle({ id: 'n', hostname: 'h', tier: 'harvest' } as any, 'cluster'))
+      .toEqual({ action: 'add', next: ['harvest', 'cluster'] })
+  })
+})
+
+describe('putting a machine into a group it is not offered for', () => {
+  const pool = (tier: string) => ({ id: 'p', name: 'split-cluster', tier }) as any
+  const node = (tiers: string[]) => ({ id: 'n1', hostname: 'orca', tiers }) as any
+
+  it('asks before adding a harvest-only machine to a cluster group', () => {
+    const out = needsTierFor(node(['harvest']), pool('cluster'))!
+    expect(out.tier).toBe('cluster')
+    expect(out.next).toEqual(['harvest', 'cluster'])
+    // The consequence, stated where the decision is made. A cluster machine is
+    // never preempted, so a request can land on it while its owner is using it.
+    expect(out.question).toContain('while somebody is using the machine')
+  })
+
+  it('asks nothing when the machine is already offered for cluster', () => {
+    expect(needsTierFor(node(['harvest', 'cluster']), pool('cluster'))).toBeNull()
+  })
+
+  it('asks nothing for a harvest group, which takes anyone', () => {
+    expect(needsTierFor(node(['harvest']), pool('harvest'))).toBeNull()
+    expect(needsTierFor(node(['cluster']), pool('harvest'))).toBeNull()
+  })
+})
+
+describe('the machines in a group that are also somebody desk', () => {
+  const n = (hostname: string, tiers: string[]) => ({ hostname, tiers }) as any
+
+  it('carries the warning the tier panel used to be the only home for', () => {
+    // Deleting a view can delete a fact. This is the one the tier panel said
+    // and the group cards did not.
+    const out = bothTiersNote([n('orca', ['harvest', 'cluster']),
+                               n('rotorua', ['cluster'])])!
+    expect(out.count).toBe(1)
+    expect(out.label).toBe('1 also harvest')
+    expect(out.detail).toContain('while its owner is using it')
+  })
+
+  it('says nothing when no machine in the group is shared', () => {
+    expect(bothTiersNote([n('a', ['cluster']), n('b', ['cluster'])])).toBeNull()
+    expect(bothTiersNote([])).toBeNull()
+  })
+})
+
+/**
+ * The console's rule and the scheduler's rule, checked against each other.
+ *
+ * `needsTierFor` decides whether to offer to grant a tier before adding a
+ * machine to a group. If it ever disagreed with `whyNotInPool`, the console
+ * would either ask a pointless question or let a drop through that the server
+ * then refuses - and a readiness view that disagrees with the router is worse
+ * than none, because it is believed.
+ *
+ * Asserted against the scheduler's own function, imported here, rather than
+ * against a second description of the rule. Binding a test to a reimplementation
+ * is a mistake this codebase has already made once: the copy passed and the real
+ * thing was wrong.
+ */
+describe('the console agrees with the scheduler about tiers', () => {
+  // Membership that matches everything, so only the tier check can fire.
+  const pool = (tier: string) => ({ id: 'p', name: 'g', tier, membership: {} }) as any
+
+  it('offers the grant in exactly the cases the scheduler would refuse', () => {
+    const shapes = [['harvest'], ['cluster'], ['harvest', 'cluster']]
+    for (const tiers of shapes) {
+      for (const poolTier of ['harvest', 'cluster']) {
+        const p = pool(poolTier)
+        // `nodes.tier` is a generated column over `nodes.tiers`: cluster if the
+        // machine is offered for cluster at all. The scheduler reads the scalar
+        // and the console reads the array, so the test derives one from the
+        // other the same way Postgres does.
+        const scheduler = {
+          id: 'n1', hostname: 'orca', chip: 'Apple M4 Pro', memory_gb: 48,
+          tier: tiers.includes('cluster') ? 'cluster' : 'harvest',
+        } as any
+        const ui = { id: 'n1', hostname: 'orca', tiers } as any
+
+        const wouldRefuse = whyNotInPool(scheduler, p) !== null
+        const wouldAsk = needsTierFor(ui, p) !== null
+        expect(wouldAsk, `${tiers.join('+')} into a ${poolTier} group`).toBe(wouldRefuse)
+      }
+    }
+  })
+
+  it('grants exactly what the scheduler is waiting for', () => {
+    // Not merely "some tier": the grant has to be the one that makes the
+    // refusal stop, or the console asks a question and the drop still fails.
+    const p = pool('cluster')
+    const grant = needsTierFor({ id: 'n', hostname: 'orca', tiers: ['harvest'] } as any, p)!
+    const after = {
+      id: 'n', hostname: 'orca', chip: 'Apple M4 Pro', memory_gb: 48,
+      tier: grant.next!.includes('cluster') ? 'cluster' : 'harvest',
+    } as any
+    expect(whyNotInPool(after, p)).toBeNull()
   })
 })

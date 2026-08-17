@@ -104,9 +104,17 @@ export function matchesGroup(node: any, pool: any): boolean
 export const TIERS: string[]
 export function tiersOf(node: any): string[]
 export function inBothTiers(node: any): boolean
-export function tierMachines(nodes: any[]): { tier: string; nodes: any[] }[]
 export function describeTier(tier: string): string
 export function tiersAfter(node: any, tier: string, action: 'add' | 'remove'): string[] | null
+export function tierToggle(node: any, tier: string):
+  | { action: 'add' | 'remove'; next: string[]; refused?: undefined }
+  | { refused: string; action?: undefined; next?: undefined }
+/** Null when the machine may already be claimed by this group. */
+export function needsTierFor(node: any, pool: any):
+  { tier: string; next: string[] | null; question: string } | null
+/** Null when no machine in the group is also somebody's workstation. */
+export function bothTiersNote(members: any[]):
+  { count: number; hostnames: string[]; label: string; detail: string } | null
 
 // The API explorer's helpers, which landed in view.js without reaching this
 // file - so the tests importing them typechecked as errors while passing.

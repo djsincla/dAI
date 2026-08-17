@@ -37,9 +37,25 @@ LOGS="$(mktemp -d)"
 # test run that stops making progress is a failure, not a slow pass, and a
 # release script has to be able to tell the difference.
 #
-# TIMEOUT is generous: the agent suite takes 45 seconds and the control plane's
-# about 90. Anything past ten minutes is not slow, it is stuck.
-TIMEOUT="${DAI_TEST_TIMEOUT:-600}"
+# TIMEOUT is a ceiling on the whole suite, not a measure of progress, and the
+# difference matters because this once reported the wrong thing.
+#
+# The number was written when the control plane's suite took about 90 seconds
+# and 600 was seven times generous. It now takes about eleven minutes - it drops
+# and recreates a schema, and a dozen files talk to a real Postgres - so the
+# guard fell below the suite it was guarding, and a healthy 0.8.1 was refused
+# with "stopped making progress". A guard that fails a good release is worse
+# than no guard, because it teaches people to remove it.
+#
+# Measured on this fleet, on a machine also serving models: agent ~45 s, control
+# plane 505-660 s across four runs. 1800 is not "slow", it is stuck.
+#
+# Progress would be the better thing to measure, and it cannot be measured here:
+# vitest buffers when its output is redirected to a file, so the log sits at 96
+# bytes for the entire run. A stall detector on log growth would fire on every
+# healthy release, which is the failure this comment exists to prevent, in the
+# other direction.
+TIMEOUT="${DAI_TEST_TIMEOUT:-1800}"
 run_suite() {
   local name="$1" dir="$2"; shift 2
   local log="$LOGS/$name.log"
@@ -49,7 +65,11 @@ run_suite() {
     sleep 5; waited=$((waited + 5))
   done
   if kill -0 "$pid" 2>/dev/null; then
-    echo "$name tests stopped making progress after ${waited}s; not building a release" >&2
+    # What was measured, not what was inferred. This said "stopped making
+    # progress" while timing total runtime, so a suite that had merely grown
+    # read as one that had wedged - and the two want opposite responses.
+    echo "$name tests did not finish within ${waited}s; not building a release" >&2
+    echo "  Either they are stuck, or the suite has outgrown DAI_TEST_TIMEOUT." >&2
     echo "  log: $log" >&2
     echo "  last lines:" >&2
     tail -15 "$log" >&2

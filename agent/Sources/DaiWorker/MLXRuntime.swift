@@ -17,6 +17,18 @@ public actor MLXRuntime {
     /// Kept across requests so a conversation is not re-read every turn.
     private let promptCache = PromptCache()
 
+    /// How much prompt cache this runtime may hold, as the group asked and this
+    /// machine allows. Applied on every heartbeat, so a change to the group
+    /// takes effect without restarting anything.
+    public func setPromptCacheBudget(gb: Double?) {
+        promptCache.setBudget(bytes: PromptCache.affordableBytes(
+            askedGb: gb, physicalMemoryGb: MLXRuntime.physicalMemoryGb))
+    }
+
+    static var physicalMemoryGb: Double {
+        Double(ProcessInfo.processInfo.physicalMemory) / 1_000_000_000
+    }
+
     public init(modelId: String) { self.modelId = modelId }
 
     /// Whether the node may reach the hub for weights it does not have.

@@ -57,6 +57,16 @@ export interface Group extends PoolSpec {
    * is dedicated and loaded, and is not sent a window at all.
    */
   idleUnloadSeconds?: number | null
+
+  /**
+   * How many gigabytes of prompt cache this group's machines may hold.
+   *
+   * Null means the fleet default. Unlike the idle window this applies to every
+   * tier: a machine keeps conversations warm whether it is harvested or
+   * dedicated, and holding one prefix was what made two clients evict each other
+   * every turn.
+   */
+  promptCacheGb?: number | null
 }
 
 /** Groups that are asserting something. The rest are configuration at rest. */
@@ -232,11 +242,27 @@ export function effectiveModel(node: NodeFacts, groups: Group[]): string | null 
  */
 export const DEFAULT_IDLE_UNLOAD_SECONDS = 300
 
+/**
+ * How much prompt cache a machine may hold, when nobody has said.
+ *
+ * Eight gigabytes, which on the measurements from this fleet is about three
+ * 19,000-token conversations of the 32B split across two machines, or four of
+ * the unsplit 30B. The number matters more than the knob, as with the idle
+ * window: most fleets will never change it.
+ *
+ * It is a ceiling on conversations kept warm, and the machine clamps it against
+ * its own memory. Set it to zero and every second client pays a full prefill,
+ * which is what a single-entry cache did to every fleet before this existed.
+ */
+export const DEFAULT_PROMPT_CACHE_GB = 8
+
 export function effectiveServing(
   node: NodeFacts, groups: Group[], machinesFor?: (modelId: string) => number,
 ): {
   model: string | null; keepLoaded: boolean; machines: number
   idleUnloadSeconds: number | null
+  /** How much prompt cache the deciding group allows, in gigabytes. */
+  promptCacheGb: number
   /** The group that decided all of it, so a caller can ask about its members. */
   groupId: string | null
 } {
@@ -290,6 +316,12 @@ export function effectiveServing(
     idleUnloadSeconds: winner === undefined || dedicated
       ? null
       : winner.idleUnloadSeconds ?? DEFAULT_IDLE_UNLOAD_SECONDS,
+    // Every tier gets one, unlike the idle window. A harvested machine keeps
+    // conversations warm between requests just as a dedicated one does, and a
+    // machine in no group at all still answers - so the fleet default applies
+    // rather than nothing, which would mean a single entry and the behaviour
+    // this replaced.
+    promptCacheGb: winner?.promptCacheGb ?? DEFAULT_PROMPT_CACHE_GB,
     groupId: winner?.id ?? null,
   }
 }

@@ -55,6 +55,10 @@ public enum JSONValue: Codable, Sendable, Equatable {
     }
     public var stringValue: String? { if case let .string(s) = self { return s }; return nil }
     public var intValue: Int? { if case let .number(n) = self { return Int(n) }; return nil }
+    /// Kept beside `intValue` because gigabytes are not whole numbers: a
+    /// sensible prompt-cache budget for a 48GB workstation is 7.2, and reading
+    /// it through `intValue` would silently make it 7.
+    public var doubleValue: Double? { if case let .number(n) = self { return n }; return nil }
     public var boolValue: Bool? { if case let .bool(b) = self { return b }; return nil }
 }
 

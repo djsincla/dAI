@@ -343,6 +343,14 @@ public actor SplitRunner {
     /// became a split.
     private let promptCache = PromptCache()
 
+    /// The share's own cache gets the same budget as a whole model would. Each
+    /// rank holds only its own layers, and `PromptCache` measures what it
+    /// actually allocated, so this needs no adjusting for the split.
+    public func setPromptCacheBudget(gb: Double?) {
+        promptCache.setBudget(bytes: PromptCache.affordableBytes(
+            askedGb: gb, physicalMemoryGb: MLXRuntime.physicalMemoryGb))
+    }
+
     /// Whether this machine can honour what rank 0 proposed.
     ///
     /// The whole safety of the mechanism is here, so it is a function rather

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_IDLE_UNLOAD_SECONDS, effectiveServing, type Group }
+import { DEFAULT_IDLE_UNLOAD_SECONDS, DEFAULT_PROMPT_CACHE_GB,
+  effectiveServing, type Group }
   from '../src/lib/groupRules.js'
 
 const node = { id: 'n1', hostname: 'orca', tier: 'cluster',
@@ -28,13 +29,13 @@ describe('what a machine serves', () => {
     // come today is what the presence policy exists to prevent.
     expect(effectiveServing(node, [harvest]))
       .toEqual({ model: '30B', keepLoaded: false, machines: 1, idleUnloadSeconds: 300,
-         groupId: 'g-Cluster' })
+         promptCacheGb: 8, groupId: 'g-Cluster' })
   })
 
   it('a cluster machine holds its model loaded', () => {
     expect(effectiveServing(node, [cluster]))
       .toEqual({ model: '32B', keepLoaded: true, machines: 1, idleUnloadSeconds: null,
-         groupId: 'g-split-cluster' })
+         promptCacheGb: 8, groupId: 'g-split-cluster' })
   })
 
   it('cluster preempts harvest where a machine is in both', () => {
@@ -43,7 +44,7 @@ describe('what a machine serves', () => {
     // machine, and it is the split.
     expect(effectiveServing(node, [harvest, cluster]))
       .toEqual({ model: '32B', keepLoaded: true, machines: 1, idleUnloadSeconds: null,
-         groupId: 'g-split-cluster' })
+         promptCacheGb: 8, groupId: 'g-split-cluster' })
   })
 
   it('hands the machine back when the cluster group is stood down', () => {
@@ -51,7 +52,7 @@ describe('what a machine serves', () => {
     // group's model applies again, lazily, as though the split had never been.
     expect(effectiveServing(node, [harvest, { ...cluster, enabled: false }]))
       .toEqual({ model: '30B', keepLoaded: false, machines: 1, idleUnloadSeconds: 300,
-         groupId: 'g-Cluster' })
+         promptCacheGb: 8, groupId: 'g-Cluster' })
   })
 
   it('says nothing when no enabled group names a model', () => {
@@ -59,16 +60,16 @@ describe('what a machine serves', () => {
     // adopted - the machine decides that, not the control plane.
     expect(effectiveServing(node, [{ ...harvest, servingModelId: null }]))
       .toEqual({ model: null, keepLoaded: false, machines: 1, idleUnloadSeconds: null,
-         groupId: null })
+         promptCacheGb: 8, groupId: null })
     expect(effectiveServing(node, []))
       .toEqual({ model: null, keepLoaded: false, machines: 1, idleUnloadSeconds: null,
-         groupId: null })
+         promptCacheGb: 8, groupId: null })
   })
 
   it('a disabled cluster group does not keep anything warm', () => {
     expect(effectiveServing(node, [{ ...cluster, enabled: false }]))
       .toEqual({ model: null, keepLoaded: false, machines: 1, idleUnloadSeconds: null,
-         groupId: null })
+         promptCacheGb: 8, groupId: null })
   })
 })
 
@@ -97,7 +98,7 @@ describe('how wide the model is', () => {
     // group's model is how a node would warm the wrong thing correctly.
     expect(effectiveServing(node, [harvest, cluster], widths))
       .toEqual({ model: '32B', keepLoaded: true, machines: 2, idleUnloadSeconds: null,
-         groupId: 'g-split-cluster' })
+         promptCacheGb: 8, groupId: 'g-split-cluster' })
   })
 
   it('is 1 when nothing is being served', () => {
@@ -257,5 +258,49 @@ describe('a cluster group that serves whatever it is staged with', () => {
     const empty = group({ name: 'empty', tier: 'harvest', servingModelId: null })
     expect(effectiveServing(node, [empty]).groupId).toBeNull()
     expect(effectiveServing(node, [empty]).keepLoaded).toBe(false)
+  })
+})
+
+/**
+ * How much prompt cache a group allows.
+ *
+ * A machine held exactly one conversation's prefix, so two clients evicted each
+ * other every turn and both paid a full prefill - 363s on a 19,243-token
+ * conversation - while the cache still occupied the memory. Two callers were
+ * worse off than one.
+ */
+describe('how much prompt cache a group allows', () => {
+  it('sends the fleet default when a group has not said', () => {
+    // The number matters more than the knob, as with the idle window.
+    expect(effectiveServing(node, [group({ name: 'g', servingModelId: '30B' })])
+      .promptCacheGb).toBe(DEFAULT_PROMPT_CACHE_GB)
+    expect(DEFAULT_PROMPT_CACHE_GB).toBe(8)
+  })
+
+  it('sends what the group asked for', () => {
+    expect(effectiveServing(node, [group({ name: 'g', servingModelId: '30B',
+      promptCacheGb: 12 })]).promptCacheGb).toBe(12)
+  })
+
+  it('honours zero, which is not the same as unset', () => {
+    // Somebody with no memory to spare can say so, and it must not be read as
+    // "you did not answer, have the default".
+    expect(effectiveServing(node, [group({ name: 'g', servingModelId: '30B',
+      promptCacheGb: 0 })]).promptCacheGb).toBe(0)
+  })
+
+  it('applies to every tier, unlike the idle window', () => {
+    // Keeping a conversation warm is not a property of a tier: a harvested
+    // machine does it between requests exactly as a dedicated one does.
+    const cluster = effectiveServing(node, [group({ name: 'c', tier: 'cluster',
+      servingModelId: '32B', promptCacheGb: 4 })])
+    expect(cluster.idleUnloadSeconds).toBeNull()
+    expect(cluster.promptCacheGb).toBe(4)
+  })
+
+  it('gives a machine in no group the default rather than nothing', () => {
+    // Nothing claiming it does not mean it stops answering, and a machine told
+    // to keep nothing warm pays a full prefill every turn.
+    expect(effectiveServing(node, []).promptCacheGb).toBe(DEFAULT_PROMPT_CACHE_GB)
   })
 })

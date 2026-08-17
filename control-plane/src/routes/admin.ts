@@ -548,7 +548,7 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
     const { rows } = await db.query(
       `SELECT id, name, tier, schedule, preempt, priority,
               agent_channel, desired_agent_version, serving_model_id, serving_port,
-              enabled, idle_unload_seconds
+              enabled, idle_unload_seconds, prompt_cache_gb
          FROM pools ORDER BY name`,
     )
     res.json(rows.map((p) => ({
@@ -572,6 +572,8 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
       // one at all - dedicated means loaded.
       idleUnloadSeconds: p.idle_unload_seconds === null
         ? null : Number(p.idle_unload_seconds),
+      promptCacheGb: p.prompt_cache_gb === null || p.prompt_cache_gb === undefined
+        ? null : Number(p.prompt_cache_gb),
     })))
   })
 
@@ -607,6 +609,42 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
     }
     await audit(db, req.user!.id, 'pool.idle-unload', poolId, { seconds })
     res.json({ idleUnloadSeconds: seconds })
+  })
+
+  /**
+   * How much prompt cache this group's machines may hold.
+   *
+   * Bounds conversations kept warm, not weights. A machine used to hold exactly
+   * one prefix, so two clients evicted each other every turn and both paid a full
+   * prefill - 363 s on a 19,243-token conversation - while the cache still
+   * occupied the memory. Two callers were worse off than one.
+   *
+   * The machine clamps this against its own memory: the group says what it is
+   * for, and the machine knows what it actually has.
+   */
+  r.put('/pools/:poolId/prompt-cache', async (req, res) => {
+    const { poolId } = req.params as { poolId: string }
+    const gb = (req.body as { gb?: number | null })?.gb ?? null
+
+    // Zero is allowed and negative is not. Zero means "keep nothing warm", which
+    // is a legitimate choice for a machine with no memory to spare - unlike a
+    // zero idle window, which unloads after every request and is refused.
+    if (gb !== null && (!Number.isFinite(gb) || gb < 0)) {
+      res.status(400).json({
+        error: 'bad_request',
+        detail: 'gb must be a number of gigabytes at or above zero, '
+          + 'or null for the fleet default',
+      })
+      return
+    }
+    const { rowCount } = await db.query(
+      `UPDATE pools SET prompt_cache_gb = $2 WHERE id = $1`, [poolId, gb])
+    if (rowCount === 0) {
+      res.status(404).json({ error: 'not_found', detail: 'no such group' })
+      return
+    }
+    await audit(db, req.user!.id, 'pool.prompt-cache', poolId, { gb })
+    res.json({ promptCacheGb: gb })
   })
 
   /**

@@ -299,6 +299,17 @@ public actor ReverseChannel {
             userPaused: pauseSwitch.read().paused,
             residentModels: resident, modelInfo: info)
         idleWindow = directives?.idleUnloadSeconds.map(TimeInterval.init)
+
+        // Both caches this loop can reach, on every beat, so a change to the
+        // group takes effect without restarting anything.
+        //
+        // Applied before the release below rather than after: lowering the budget
+        // is a reason to let conversations go, and doing it in the other order
+        // would leave the machine over its new ceiling until the next beat.
+        let cacheGb = directives?.promptCacheGb
+        await gpu?.setPromptCacheBudget(gb: cacheGb)
+        await share?.setPromptCacheBudget(gb: cacheGb)
+
         await releaseIfIdle()
         if let directives { await warmShareIfAsked(directives) }
     }

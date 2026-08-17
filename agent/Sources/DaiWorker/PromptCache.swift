@@ -22,6 +22,24 @@ import MLXLMCommon
 /// answering a question nobody asked, confidently and with no error anywhere.
 /// The comparison is therefore on token ids, and any divergence discards
 /// everything from that point.
+///
+/// **Several conversations, not one.** This held a single prefix, which made two
+/// clients destroy each other: each turn found the other's prefix, shared nothing
+/// with it, started fresh, and still paid for the memory. Two callers were
+/// therefore worse off than one, and worst of all on a group pinned to a model,
+/// where nothing unloads and the slot churns for as long as the group stands.
+///
+/// There is no conversation id to key on - the API is stateless and the client
+/// resends everything - so entries are chosen by the longest prefix they share
+/// with the incoming prompt, which is the comparison this type already made,
+/// against several entries instead of one.
+///
+/// Bounded in **bytes and never in entries**: a 500-token conversation and a
+/// 19,000-token one differ by a factor of forty, and a KV cache for the 32B costs
+/// about 256 KiB per token. The size is measured rather than derived, because
+/// `KVCacheSimple` allocates in steps of 256 and a token count times a guess
+/// would under-report the allocation that actually has to fit.
+///
 /// Not an actor, and `@unchecked Sendable` deliberately.
 ///
 /// Every use is inside `ModelContainer.perform`, which already serialises
@@ -34,12 +52,31 @@ import MLXLMCommon
 /// worth stating plainly: use it anywhere else and the annotation becomes a
 /// lie.
 final class PromptCache: @unchecked Sendable {
-    private var tokens: [Int] = []
-    private var cache: [KVCache]?
+    /// One conversation's prefix and the attention state that produced it.
+    private struct Entry {
+        var tokens: [Int]
+        var cache: [KVCache]
+        /// A counter, not a clock. Eviction order has to be testable, and a
+        /// timestamp makes the order depend on how fast the test ran.
+        var lastUsed: Int
+    }
+
+    private var entries: [Entry] = []
+    private var clock = 0
+
+    /// Bytes this cache may hold across every entry.
+    ///
+    /// Eight gigabytes by default, which is about three 19,000-token
+    /// conversations of a 32B split across two machines. The caller normally
+    /// replaces it with what the group asked for, clamped to what the machine
+    /// can afford.
+    private var budget: Int = defaultBudgetBytes
+
+    static let defaultBudgetBytes = 8 * 1_000_000_000
 
     /// Below this there is nothing to save. Building and trimming a cache is
     /// not free, and a short prompt is read in well under a second anyway.
-    private static let minimumReuse = 256
+    static let minimumReuse = 256
 
     struct Plan {
         /// Tokens still to be read. Empty prefix means the whole prompt.
@@ -49,42 +86,143 @@ final class PromptCache: @unchecked Sendable {
         let reused: Int
     }
 
+    // MARK: - The decisions, as functions
+
+    /// An entry, reduced to what choosing between them needs.
+    struct Candidate {
+        let tokens: [Int]
+        let lastUsed: Int
+        init(tokens: [Int], lastUsed: Int) {
+            self.tokens = tokens
+            self.lastUsed = lastUsed
+        }
+    }
+
+    /// Which entry to reuse for this prompt, and how much of it.
+    ///
+    /// Static and pure, so it can be checked without a model - the shape
+    /// `SplitRunner.accepts` and `Worker.directive` already have, and for the
+    /// same reason: it is the decision rather than the doing that is worth being
+    /// able to assert.
+    ///
+    /// **One token is always left to process**, even when the whole prompt is
+    /// already cached. Generation continues from a token, so a prompt reused in
+    /// its entirety leaves the generator nothing to start from. Bailing out to a
+    /// cold read was the wrong answer to that: an identical request found a
+    /// complete match and threw it away, taking 21 s where a near-match took
+    /// 0.5 s.
+    ///
+    /// Ties go to the most recently used, because a tie means two entries share
+    /// the same prefix and diverge later - the one in active use is the one whose
+    /// next turn is coming.
+    static func choose(_ candidates: [Candidate], for full: [Int],
+                       minimumReuse: Int = PromptCache.minimumReuse)
+    -> (index: Int, shared: Int)? {
+        var best: (index: Int, shared: Int, lastUsed: Int)?
+        for (index, candidate) in candidates.enumerated() {
+            let shared = min(commonPrefix(candidate.tokens, full), full.count - 1)
+            guard shared >= minimumReuse else { continue }
+            if let current = best,
+               (shared, candidate.lastUsed) <= (current.shared, current.lastUsed) {
+                continue
+            }
+            best = (index, shared, candidate.lastUsed)
+        }
+        guard let best else { return nil }
+        return (best.index, best.shared)
+    }
+
+    /// Which entries to drop so the total fits, least recently used first.
+    ///
+    /// Whole entries, never a truncation inside one. `maxKVSize` would have been
+    /// the obvious cap and is the wrong one: it swaps in a `RotatingKVCache`
+    /// whose `isTrimmable` is `offset < maxCacheSize`, so past the cap every
+    /// plan falls back to a cold read - reuse would switch itself off for
+    /// exactly the long conversations it exists for - and a rotating cache
+    /// overwrites the middle of a conversation while its offset keeps counting,
+    /// which is the silent wrong answer this file is written to avoid.
+    ///
+    /// `keeping` is never dropped: it is the entry the caller is about to use,
+    /// and evicting it would free memory by throwing away the answer.
+    static func evictions(sizes: [Int], lastUsed: [Int], budget: Int,
+                          keeping: Int) -> [Int] {
+        var total = sizes.reduce(0, +)
+        guard total > budget else { return [] }
+
+        let order = sizes.indices
+            .filter { $0 != keeping }
+            .sorted { lastUsed[$0] < lastUsed[$1] }
+
+        var dropped: [Int] = []
+        for index in order {
+            guard total > budget else { break }
+            dropped.append(index)
+            total -= sizes[index]
+        }
+        return dropped
+    }
+
+    /// What a cache actually occupies.
+    ///
+    /// Measured through `Evaluatable`, not derived from a token count: the arrays
+    /// grow in steps of 256, so the allocation is what has to fit rather than
+    /// what is used. It is also automatically right per rank in a split, where
+    /// each machine holds only its own layers.
+    static func bytes(of cache: [KVCache]) -> Int {
+        cache.reduce(0) { running, layer in
+            running + layer.innerState().reduce(0) { $0 + $1.nbytes }
+        }
+    }
+
+    // MARK: - Using it
+
+    /// What this machine will allow, whatever it was asked for.
+    ///
+    /// The group states intent and the machine has the facts, so the stricter of
+    /// the two wins - the same bargain the presence policy already strikes with
+    /// the fleet policy. A control plane asking for 64 GB of cache on a 48 GB
+    /// workstation is not malicious, it is simply describing a box it cannot see.
+    ///
+    /// Deliberately a fraction of physical memory rather than the presence
+    /// policy's `memFrac`. That number moves every time somebody touches a
+    /// trackpad, and a budget that moved with it would evict conversations
+    /// because the owner walked past - throwing away exactly the work this cache
+    /// exists to keep.
+    ///
+    /// A quarter of memory: 12 GB on a 48 GB machine, 16 on a 64 GB one, so the
+    /// 8 GB default passes through untouched on both and the ceiling only bites
+    /// when a figure is unreasonable.
+    static func affordableBytes(askedGb: Double?, physicalMemoryGb: Double,
+                                ceilingFraction: Double = 0.25) -> Int {
+        let asked = askedGb ?? Double(defaultBudgetBytes) / 1_000_000_000
+        let ceiling = max(0, physicalMemoryGb * ceilingFraction)
+        let allowed = max(0, min(asked, ceiling))
+        return Int(allowed * 1_000_000_000)
+    }
+
+    /// Bytes this cache may hold. Clamped by the caller to what the machine has.
+    func setBudget(bytes: Int) {
+        budget = max(0, bytes)
+        enforceBudget(keeping: -1)
+    }
+
+    /// What is held right now, for whoever reports memory.
+    var residentBytes: Int { entries.reduce(0) { $0 + Self.bytes(of: $1.cache) } }
+
+    var conversations: Int { entries.count }
+
+    private var candidates: [Candidate] {
+        entries.map { Candidate(tokens: $0.tokens, lastUsed: $0.lastUsed) }
+    }
+
     /// Work out what can be skipped for this prompt.
     func plan(for full: [Int], model: any LanguageModel,
               parameters: GenerateParameters) -> Plan {
-        guard let existing = cache, !tokens.isEmpty else {
+        guard let pick = Self.choose(candidates, for: full) else {
             return fresh(full, model: model, parameters: parameters)
         }
-
-        // One token is always left to process, even when the whole prompt is
-        // already cached.
-        //
-        // Generation continues from a token, so a prompt reused in its entirety
-        // leaves the generator nothing to start from. Bailing out to a cold
-        // read was the wrong answer to that: an identical request - the same
-        // prompt sent twice - found a complete match and threw it away, taking
-        // 21s where a near-match took 0.5s. Holding one token back costs
-        // nothing and keeps the other thousands.
-        let shared = min(commonPrefix(tokens, full), full.count - 1)
-
-        guard shared >= Self.minimumReuse else {
-            return fresh(full, model: model, parameters: parameters)
-        }
-
-        // The cache may hold more than the shared prefix - the previous turn's
-        // answer, or a diverging tail - and that has to go before anything new
-        // is appended, or the model attends to tokens this prompt never
-        // contained.
-        let excess = (existing.first?.offset ?? 0) - shared
-        if excess > 0 {
-            guard existing.allSatisfy(\.isTrimmable) else {
-                return fresh(full, model: model, parameters: parameters)
-            }
-            for layer in existing { _ = layer.trim(excess) }
-        }
-
-        tokens = Array(full)
-        return Plan(toProcess: Array(full[shared...]), cache: existing, reused: shared)
+        return reuseEntry(pick.index, upTo: pick.shared, for: full,
+                          model: model, parameters: parameters)
     }
 
     // MARK: - Agreeing with another machine
@@ -101,36 +239,36 @@ final class PromptCache: @unchecked Sendable {
     /// of *different* prompts - a state a dedicated gang should never reach, and
     /// "should never" is what layer 26 taught this codebase.
     func offer(for full: [Int]) -> (reusable: Int, digest: [Int32])? {
-        guard let existing = cache, !tokens.isEmpty else { return nil }
-        let shared = min(commonPrefix(tokens, full), full.count - 1)
-        guard shared >= Self.minimumReuse else { return nil }
+        guard let pick = Self.choose(candidates, for: full) else { return nil }
 
         // A cache that cannot be trimmed cannot be reused for anything shorter
         // than it holds, so it has nothing to offer.
-        let excess = (existing.first?.offset ?? 0) - shared
-        if excess > 0, !existing.allSatisfy(\.isTrimmable) { return nil }
+        let entry = entries[pick.index]
+        let excess = (entry.cache.first?.offset ?? 0) - pick.shared
+        if excess > 0, !entry.cache.allSatisfy(\.isTrimmable) { return nil }
 
-        return (shared, Self.digest(of: Array(full[..<shared])))
+        return (pick.shared, Self.digest(of: Array(full[..<pick.shared])))
     }
 
     /// Reuse exactly this many tokens, having agreed on it.
     ///
     /// Zero means every machine starts fresh, which is what any disagreement
     /// produces and what every split request did before this existed.
+    ///
+    /// The entry is found again rather than remembered from `offer`. Selection is
+    /// a pure function of the same entries and the same prompt, so it lands on
+    /// the same one - and keeping no state between the two preserves the property
+    /// that asking the question does not change the answer. Remembering would
+    /// also be wrong the moment anything else touched the cache in between.
     func commit(reuse: Int, for full: [Int], model: any LanguageModel,
                 parameters: GenerateParameters) -> Plan {
-        guard reuse > 0, let existing = cache else {
+        guard reuse > 0, let pick = Self.choose(candidates, for: full),
+              pick.shared >= reuse
+        else {
             return fresh(full, model: model, parameters: parameters)
         }
-        let excess = (existing.first?.offset ?? 0) - reuse
-        if excess > 0 {
-            guard existing.allSatisfy(\.isTrimmable) else {
-                return fresh(full, model: model, parameters: parameters)
-            }
-            for layer in existing { _ = layer.trim(excess) }
-        }
-        tokens = Array(full)
-        return Plan(toProcess: Array(full[reuse...]), cache: existing, reused: reuse)
+        return reuseEntry(pick.index, upTo: reuse, for: full,
+                          model: model, parameters: parameters)
     }
 
     /// SHA256 of a token sequence, as eight words.
@@ -156,12 +294,51 @@ final class PromptCache: @unchecked Sendable {
         }
     }
 
+    // MARK: - Private
+
+    /// Trim the chosen entry back to the agreed prefix and hand it over.
+    private func reuseEntry(_ index: Int, upTo shared: Int, for full: [Int],
+                            model: any LanguageModel,
+                            parameters: GenerateParameters) -> Plan {
+        var entry = entries[index]
+
+        // The entry may hold more than the shared prefix - the previous turn's
+        // answer, or a diverging tail - and that has to go before anything new
+        // is appended, or the model attends to tokens this prompt never
+        // contained.
+        let excess = (entry.cache.first?.offset ?? 0) - shared
+        if excess > 0 {
+            guard entry.cache.allSatisfy(\.isTrimmable) else {
+                return fresh(full, model: model, parameters: parameters)
+            }
+            for layer in entry.cache { _ = layer.trim(excess) }
+        }
+
+        clock += 1
+        entry.tokens = Array(full)
+        entry.lastUsed = clock
+        entries[index] = entry
+        enforceBudget(keeping: index)
+
+        return Plan(toProcess: Array(full[shared...]), cache: entry.cache, reused: shared)
+    }
+
     private func fresh(_ full: [Int], model: any LanguageModel,
                        parameters: GenerateParameters) -> Plan {
         let made = model.newCache(parameters: parameters)
-        cache = made
-        tokens = Array(full)
+        clock += 1
+        entries.append(Entry(tokens: Array(full), cache: made, lastUsed: clock))
+        enforceBudget(keeping: entries.count - 1)
         return Plan(toProcess: full, cache: made, reused: 0)
+    }
+
+    /// Drop least-recently-used entries until the total fits.
+    private func enforceBudget(keeping: Int) {
+        let sizes = entries.map { Self.bytes(of: $0.cache) }
+        let dropped = Self.evictions(sizes: sizes, lastUsed: entries.map(\.lastUsed),
+                                     budget: budget, keeping: keeping)
+        guard !dropped.isEmpty else { return }
+        for index in dropped.sorted(by: >) { entries.remove(at: index) }
     }
 
     // Generated tokens are deliberately not recorded.
@@ -178,11 +355,10 @@ final class PromptCache: @unchecked Sendable {
     /// Drop everything. Called when the model is released, since a cache
     /// outliving its weights is a large allocation nobody can use.
     func clear() {
-        tokens = []
-        cache = nil
+        entries = []
     }
 
-    private func commonPrefix(_ a: [Int], _ b: [Int]) -> Int {
+    private static func commonPrefix(_ a: [Int], _ b: [Int]) -> Int {
         var i = 0
         let limit = min(a.count, b.count)
         while i < limit, a[i] == b[i] { i += 1 }

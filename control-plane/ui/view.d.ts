@@ -154,3 +154,15 @@ export function serveConsequences(
   choice: any, machinesWanted: number, groupSize: number, otherGroups: any[],
 ): { level: 'cost' | 'blocked' | 'warn'; text: string }[]
 export function groupAddress(pool: any, origin: string): string | null
+export function servingLine(pool: any): {
+  /** Whether an operator named the model, as against leaving it to the caller. */
+  pinned: boolean
+  label: string
+  title: string
+}
+export function stagedLines(r: any): {
+  label: string; modelId: string; ready: boolean; note: string
+}[]
+export function unpinConsequences(
+  pool: any, staged: any[],
+): { level: 'note' | 'cost' | 'blocked'; text: string }[]

@@ -4,6 +4,7 @@
     dai-split groups
     dai-split status
     dai-split prepare mlx-community/Qwen2.5-Coder-32B-Instruct-4bit --machines 2
+    dai-split unpin
     dai-split up
     dai-split down
 
@@ -148,10 +149,25 @@ def group_named(admin: Admin, name: str | None) -> dict:
 def show_readiness(admin: Admin, pool: dict) -> str:
     r = admin.get(f"/admin/v1/pools/{pool['id']}/readiness")
     state = r["state"]
-    mark = {"ready": "ready", "preparing": "preparing", "blocked": "needs attention",
-            "idle": "stood down"}.get(state, state)
+    mark = {"ready": "ready", "preparing": "preparing",
+            "blocked": "needs attention"}.get(state)
+    if mark is None:
+        # Idle covers two states that mean opposite things: a group an operator
+        # stood down, and a standing group nobody has staged anything to. The
+        # first is a decision; the second is a thing to go and do.
+        mark = "nothing staged" if r.get("standing") else "stood down"
     print(f"{pool['name']}  [{mark}]")
     print(f"  {r['detail']}")
+
+    # What an unpinned group can be asked for, worst first - a model on fewer
+    # machines than it needs is a request that will be refused.
+    staged = sorted(r.get("staged", []),
+                    key=lambda s: (s["ready"], s["modelId"]))
+    for s in staged:
+        note = ("ready" if s["ready"]
+                else f"on {s['held']} of the {s['machines']} machines it needs")
+        print(f"    {'ok ' if s['ready'] else '-- '}{s['modelId']:<52} {note}")
+
     for rank in r.get("ranks", []):
         seat = "" if rank["rank"] is None else f"rank {rank['rank']}"
         if rank["role"] == "output head":
@@ -193,7 +209,10 @@ def wait_until_ready(admin: Admin, pool: dict, seconds: int) -> bool:
 def cmd_groups(admin: Admin, args) -> int:
     for p in admin.get("/admin/v1/pools"):
         standing = "standing" if p["enabled"] else "stood down"
-        model = (p["servingModelId"] or "-").split("/")[-1]
+        # A cluster group with no model is not an unconfigured group. It serves
+        # whichever staged model is asked for, and a dash would say otherwise.
+        model = ((p["servingModelId"].split("/")[-1]) if p["servingModelId"]
+                 else ("whatever is staged" if p["tier"] == "cluster" else "-"))
         port = f":{p['servingPort']}" if p.get("servingPort") else ""
         print(f"  {p['name']:<20} {p['tier']:<8} {standing:<11} {port:<7} {model}")
     return 0
@@ -255,6 +274,43 @@ def cmd_prepare(admin: Admin, args) -> int:
     return 0 if ready else 1
 
 
+def cmd_unpin(admin: Admin, args) -> int:
+    """Serve whichever staged model is asked for, instead of one named model.
+
+    Only the pin comes off. Every model already pushed to the group stays on its
+    machines - that is what it serves from - so pinning it back to any of them
+    later costs nothing.
+    """
+    pool = group_named(admin, args.group)
+    status, body = admin.put(f"/admin/v1/pools/{pool['id']}/serve", {"modelId": None})
+    if status == 404 and "not found" == str(detail(body)).strip().lower():
+        raise Failed(
+            "this control plane has no /serve route, so it predates this tool.\n"
+            "  Upgrade it, or do it by hand:\n"
+            "    PUT /admin/v1/pools/{id}/serve   {\"modelId\": null}")
+    if status != 200:
+        raise Failed(f"could not unpin {pool['name']}: {detail(body)}")
+
+    serves = body.get("serves") or []
+    if not serves:
+        # Not a failure - the group is now willing to serve anything staged to
+        # it, and nothing has been. Said plainly because the alternative is a
+        # request refused later for a reason nobody connects to this moment.
+        print(f"{pool['name']} serves whatever it is staged with, and nothing has "
+              "been staged yet.")
+        print("  dai-split push a model to this group to give it something to load")
+        return 0
+
+    print(f"{pool['name']} now serves any of {len(serves)} staged models:")
+    for m in serves:
+        print(f"  {m}")
+    print("\nThe first request for a model it is not already holding pays the build")
+    print("- around a minute for a 32B across two machines.")
+    print()
+    show_readiness(admin, pool)
+    return 0
+
+
 def cmd_up(admin: Admin, args) -> int:
     pool = group_named(admin, args.group)
     status, body = admin.put(f"/admin/v1/pools/{pool['id']}/enabled",
@@ -301,6 +357,8 @@ def main() -> int:
     p = sub.add_parser("up", help="stand the group up and wait for it")
     p.add_argument("--wait", type=int, default=600)
 
+    sub.add_parser("unpin", help="serve whichever staged model is asked for")
+
     sub.add_parser("down", help="stand the group down, handing its machines back")
 
     args = parser.parse_args()
@@ -313,7 +371,7 @@ def main() -> int:
         admin = Admin()
         return {
             "groups": cmd_groups, "status": cmd_status, "prepare": cmd_prepare,
-            "up": cmd_up, "down": cmd_down,
+            "up": cmd_up, "down": cmd_down, "unpin": cmd_unpin,
         }[args.command](admin, args)
     except Failed as e:
         print(f"\n{e}", file=sys.stderr)

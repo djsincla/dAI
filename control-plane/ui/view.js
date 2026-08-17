@@ -1119,8 +1119,86 @@ export function readinessSummary(r) {
     case 'blocked':
       return { level: 'bad', label: 'needs attention', detail: r.detail }
     default:
-      return { level: 'idle', label: 'stood down', detail: r.detail }
+      // Idle covers two states that mean opposite things. A group an operator
+      // stood down is a decision; a standing group nobody has staged anything
+      // to is a thing to go and do, and calling it "stood down" would describe
+      // it as already handled.
+      return r.standing
+        ? { level: 'idle', label: 'nothing staged', detail: r.detail }
+        : { level: 'idle', label: 'stood down', detail: r.detail }
   }
+}
+
+/**
+ * What a group serves, as a phrase rather than a model id or a blank.
+ *
+ * A cluster group with no model used to render as an empty cell, which read as
+ * "not set up yet". It is now a group that serves whichever staged model is
+ * asked for, and that is a thing it does rather than a thing missing from it.
+ */
+export function servingLine(pool) {
+  if (pool?.servingModelId) {
+    return { pinned: true, label: String(pool.servingModelId).split('/').pop(),
+             title: pool.servingModelId }
+  }
+  if (pool?.tier === 'cluster') {
+    return { pinned: false, label: 'whatever is staged',
+             title: 'Serves whichever staged model a caller asks for, loading it at '
+               + 'dispatch. The first request for a model it is not already holding '
+               + 'pays the build.' }
+  }
+  return { pinned: false, label: '-', title: 'No model assigned' }
+}
+
+/**
+ * The staged models on the readiness strip, worst first.
+ *
+ * A staged model on fewer machines than it needs is a request that will be
+ * refused, so it is the line an operator has to act on and belongs at the top.
+ */
+export function stagedLines(r) {
+  return [...(r?.staged ?? [])]
+    .sort((a, b) => (a.ready === b.ready ? a.modelId.localeCompare(b.modelId)
+                                         : (a.ready ? 1 : -1)))
+    .map((s) => ({
+      label: String(s.modelId).split('/').pop(),
+      modelId: s.modelId,
+      ready: s.ready,
+      note: s.ready
+        ? (s.machines > 1 ? `ready across ${s.machines} machines` : 'ready')
+        : `on ${s.held} of the ${s.machines} machines it needs`,
+    }))
+}
+
+/**
+ * What unpinning a group does, said before it is done.
+ *
+ * The reassurance matters as much as the warning. An operator reads "unpin" as
+ * "throw the setup away", and the expensive part - the weights - is exactly
+ * what stays.
+ */
+export function unpinConsequences(pool, staged) {
+  const held = staged ?? []
+  const out = [
+    { level: 'note',
+      text: `keeps every model already pushed to ${pool?.name ?? 'this group'}; `
+        + 'nothing is fetched again and nothing is deleted' },
+  ]
+  if (held.length === 0) {
+    out.push({ level: 'blocked',
+      text: 'nothing has been staged to this group yet, so it would have nothing '
+        + 'to serve - push a model to it first' })
+  } else {
+    out.push({ level: 'note',
+      text: `it will answer for any of ${held.length} staged model`
+        + `${held.length === 1 ? '' : 's'}` })
+  }
+  // The sharp edge, where the choice is made rather than where it is felt.
+  out.push({ level: 'cost',
+    text: 'the first request for a model it is not already holding pays the build '
+      + '- around a minute for a 32B across two machines - so this suits several '
+      + 'models used in turn rather than two callers wanting different ones at once' })
+  return out
 }
 
 /**

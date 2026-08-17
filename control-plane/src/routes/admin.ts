@@ -1037,9 +1037,50 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
    */
   r.put('/pools/:poolId/serve', async (req, res) => {
     const { poolId } = req.params as { poolId: string }
-    const b = req.body as { modelId?: string; machines?: number; confirm?: boolean }
+    const b = req.body as { modelId?: string | null; machines?: number; confirm?: boolean }
     const modelId = b.modelId
     const machines = Math.max(1, Number(b.machines ?? 1))
+
+    // Unpinning is the pin coming off and nothing else, so it is its own path.
+    //
+    // Explicitly null, not merely absent: "serve whatever you hold" and "you
+    // forgot to say what to serve" are different requests, and one of them is a
+    // mistake worth a 400.
+    //
+    // The weights stay, because they are what it will serve from - `pool_models`
+    // is the staging set, and clearing it here would turn a change of policy
+    // into ~18 GB per model to fetch again. Nothing is dropped, so pinning the
+    // group back to any of these costs nothing.
+    //
+    // No confirmation either: standing the group up is where its machines left
+    // harvesting, and this does not spend anything they had not already spent.
+    if ('modelId' in b && b.modelId === null) {
+      const { rows } = await db.query(
+        `SELECT name, tier FROM pools WHERE id = $1`, [poolId])
+      const group = rows[0] as { name: string; tier: string } | undefined
+      if (!group) {
+        res.status(404).json({ error: 'not_found', detail: 'no such group' }); return
+      }
+      if (group.tier !== 'cluster') {
+        res.status(409).json({
+          error: 'conflict',
+          detail: `${group.name} is a ${group.tier} group. Only a cluster group can serve `
+            + 'whatever it is staged with: a harvest machine can be taken back the moment '
+            + 'somebody touches a keyboard, and a gang cannot be preempted mid-request.',
+        })
+        return
+      }
+      await db.query(`UPDATE pools SET serving_model_id = NULL WHERE id = $1`, [poolId])
+      await audit(db, req.user!.id, 'pool.serve', poolId, { modelId: null })
+      const { rows: staged } = await db.query(
+        `SELECT model_id FROM pool_models WHERE pool_id = $1 ORDER BY model_id`, [poolId])
+      res.json({
+        group: group.name, modelId: null,
+        serves: (staged as { model_id: string }[]).map((s) => s.model_id),
+      })
+      return
+    }
+
     if (!modelId) {
       res.status(400).json({ error: 'bad_request', detail: 'modelId is required' })
       return
@@ -1148,6 +1189,18 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
       [poolId, pool.serving_model_id])
     const toldToHold = held.length > 0 ? pool.serving_model_id : null
 
+    // What a group that names no model can be asked for. The same table, read
+    // as the whole set rather than checked for one row: staging is what it
+    // serves from, not a step on the way to serving something else.
+    const { rows: stagedRows } = pool.serving_model_id === null
+      ? await db.query(
+          `SELECT m.id, m.machines FROM models m
+             JOIN pool_models pm ON pm.model_id = m.id
+            WHERE pm.pool_id = $1`, [poolId])
+      : { rows: [] as unknown[] }
+    const staged = (stagedRows as { id: string; machines: number | null }[])
+      .map((m) => ({ modelId: m.id, machines: Math.max(1, Number(m.machines ?? 1)) }))
+
     // The group's own machines, by the same membership rule everything else
     // uses, so this describes the group an operator is looking at rather than
     // the fleet.
@@ -1180,6 +1233,7 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
         model: pool.serving_model_id,
         machines,
         members,
+        staged,
       }),
     })
   })

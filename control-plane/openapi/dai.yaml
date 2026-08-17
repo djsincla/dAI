@@ -1932,6 +1932,12 @@ paths:
         Not a transaction. The order is chosen so half-states are inert - a
         width nobody serves is a number, weights nobody serves is a download -
         and it is idempotent, so running it again finishes it.
+
+
+        A null modelId unpins the group instead: it goes on holding everything
+        it was staged with and serves whichever of those a caller asks for,
+        loading at dispatch. Nothing is fetched or deleted - only the pin is
+        removed - so pinning it again to any staged model costs nothing.
       requestBody:
         required: true
         content:
@@ -1940,7 +1946,12 @@ paths:
               type: object
               required: [modelId]
               properties:
-                modelId: { type: string }
+                modelId:
+                  type: string
+                  nullable: true
+                  description: >
+                    The model to pin this group to, or null to serve whichever
+                    staged model is asked for.
                 machines:
                   type: integer
                   minimum: 1
@@ -1961,10 +1972,16 @@ paths:
                 type: object
                 properties:
                   group: { type: string }
-                  modelId: { type: string }
+                  modelId: { type: string, nullable: true }
                   machines: { type: integer }
                   perMachineGb: { type: number }
                   machinesInGroup: { type: integer }
+                  serves:
+                    type: array
+                    description: >
+                      What an unpinned group can now be asked for. Absent when
+                      the group is pinned to one model.
+                    items: { type: string }
         '400':
           description: No model named
           content:

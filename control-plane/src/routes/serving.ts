@@ -64,15 +64,26 @@ async function servableModels(db: Db, broker: Broker, groupId?: string | null) {
     //
     // Asked of this group rather than of the fleet: the group that declared the
     // split still lists it, because there it is true.
-    const splitHere = groupId
-      ? new Set((await db.query(
-          `SELECT serving_model_id FROM pools
-            WHERE id = $1 AND enabled AND serving_model_id IS NOT NULL`,
-          [groupId])).rows.map((r) => (r as { serving_model_id: string }).serving_model_id))
+    //
+    // A group that names no model declares its staged models instead, and this
+    // has to say so or the filter fails in the other direction: the set would
+    // be empty and every split model would vanish from the socket of the group
+    // that exists to run them. The two branches mirror `gangFor` deliberately -
+    // a socket that advertises what the router will refuse is the fault this
+    // whole filter was written for, and it is the same fault whichever way the
+    // disagreement runs.
+    const declared = groupId
+      ? await splitsOfferedBy(db, groupId)
       : null
+    const splitHere = declared && new Set([...declared.pinned, ...declared.staged])
+
     const models = new Map<string, {
       context: number; resident: boolean; live: boolean; machines: number
     }>()
+    // Which in-scope machines hold each model, kept beside the listing rather
+    // than in it. A staged split is only worth offering when enough of the
+    // group's machines actually have the weights; see below.
+    const holders = new Map<string, Set<string>>()
     for (const row of rows as any[]) {
       if (scope !== null && !scope.has(row.node_id as string)) continue
       // Recent heartbeat, not currently parked on the channel.
@@ -89,6 +100,10 @@ async function servableModels(db: Db, broker: Broker, groupId?: string | null) {
       const width = machines.get(row.name as string) ?? 1
       if (splitHere !== null && width > 1 && !splitHere.has(row.name as string)) continue
 
+      const held = holders.get(row.name as string) ?? new Set<string>()
+      held.add(row.node_id as string)
+      holders.set(row.name as string, held)
+
       const seen = models.get(row.name)
       models.set(row.name, {
         context: Math.max(seen?.context ?? 0, row.context ?? 0),
@@ -101,8 +116,57 @@ async function servableModels(db: Db, broker: Broker, groupId?: string | null) {
         machines: width,
       })
     }
+
+    // A staged split nobody finished staging is not offered.
+    //
+    // Only for the models a dynamic group chose from what it holds. Pushing
+    // weights is the operator's own act and nothing checks it finished, so a
+    // 2-machine model that reached one machine would be advertised and then
+    // refused at dispatch for want of a second rank - the caller picking by
+    // name, exactly as before.
+    //
+    // A group pinned to a model is left alone: it is asserting that this is
+    // what it serves, its readiness view says the weights are still arriving,
+    // and removing it from the catalogue mid-fetch would report an operator's
+    // decision as an absence.
+    if (declared) {
+      for (const [name, m] of models) {
+        if (m.machines > 1 && declared.staged.has(name) && !declared.pinned.has(name)
+            && (holders.get(name)?.size ?? 0) < m.machines) {
+          models.delete(name)
+        }
+      }
+    }
     return models
   }
+
+/**
+ * The split models a group may run: the one it was pinned to, or the ones it
+ * was staged with when it was pinned to none.
+ *
+ * Split so the caller can tell them apart - a pinned model is offered while its
+ * weights are still arriving, because the group is asserting it serves that and
+ * the readiness view says why it cannot yet. A staged one carries no such
+ * assertion and is only worth advertising once the machines can actually run it.
+ */
+async function splitsOfferedBy(
+  db: Db, groupId: string,
+): Promise<{ pinned: Set<string>; staged: Set<string> }> {
+  const { rows } = await db.query(
+    `SELECT p.serving_model_id AS pinned, pm.model_id AS staged
+       FROM pools p
+       LEFT JOIN pool_models pm
+         ON pm.pool_id = p.id AND p.serving_model_id IS NULL
+      WHERE p.id = $1 AND p.enabled AND p.tier = 'cluster'`,
+    [groupId])
+  const pinned = new Set<string>()
+  const staged = new Set<string>()
+  for (const r of rows as { pinned: string | null; staged: string | null }[]) {
+    if (r.pinned) pinned.add(r.pinned)
+    if (r.staged) staged.add(r.staged)
+  }
+  return { pinned, staged }
+}
 
 
 /**
@@ -142,15 +206,30 @@ async function gangFor(
   // The declaration is the group's serving model. There is no separate switch
   // to keep in step with it, and no way to declare a split for a model that is
   // not one.
+  //
+  // A group that names no model declares something different and just as
+  // deliberate: it serves whichever model an operator staged to it. That is
+  // still the operator deciding and not the request - `pool_models` is written
+  // by an admin route and pushing weights to a machine is the same act of
+  // spending the fleet - but the choice among what was staged is left to the
+  // caller. Staged, not merely cluster-tier: without the join a dynamic group
+  // would accept any model in the catalogue and fail at dispatch, with the
+  // machines discovering the weights were never there.
   const { rows: serving } = await db.query(
-    `SELECT id, name FROM pools
-      WHERE tier = 'cluster' AND enabled AND serving_model_id = $1`, [modelId])
+    `SELECT id, name FROM pools p
+      WHERE p.tier = 'cluster' AND p.enabled
+        AND (p.serving_model_id = $1
+             OR (p.serving_model_id IS NULL
+                 AND EXISTS (SELECT 1 FROM pool_models pm
+                              WHERE pm.pool_id = p.id AND pm.model_id = $1)))`,
+    [modelId])
   if (serving.length === 0) {
     return { refusal: {
       refused: 'not-offered',
       detail: `${modelId} runs across ${shape.machines} machines, and no cluster group `
-        + 'is serving it. A split runs where an operator has assigned it, because it '
-        + 'takes those machines out of harvesting for as long as it stands.',
+        + 'is serving it or has been staged it. A split runs where an operator has '
+        + 'assigned it, because it takes those machines out of harvesting for as long '
+        + 'as it stands.',
     } }
   }
   const offered = new Set(serving.map((p) => p.id as string))

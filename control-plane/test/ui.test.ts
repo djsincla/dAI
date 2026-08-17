@@ -6,6 +6,7 @@ import {
   groupAddress, isReadOnly, matchesOperation, operationsFrom, rankLine,
   readinessSummary, resolveRef, responseSize, servableChoices, serveConsequences,
   shouldKeepWatching, statusTone, surfaceOf,
+  servingLine, stagedLines, unpinConsequences,
 } from '../ui/view.js'
 import {
   TIERS, describeTier, inBothTiers, tierMachines, tiersAfter, tiersOf,
@@ -1247,5 +1248,96 @@ describe('the address to point an application at', () => {
   it('is nothing at all for a group without one', () => {
     // Rather than a plausible-looking address that reaches the wrong group.
     expect(groupAddress({ servingPort: null }, 'https://rotorua:8452/')).toBeNull()
+  })
+})
+
+/**
+ * A group that serves whichever model it is staged with, in the console.
+ *
+ * The console read `serving_model_id` as the whole answer, so a group with none
+ * rendered as a blank cell and a readiness strip saying "stood down" - both of
+ * which describe a group nobody had finished setting up, rather than one doing
+ * something deliberate.
+ */
+describe('a group with nothing pinned, on its card', () => {
+  it('says what it does instead of leaving a blank', () => {
+    const line = servingLine({ tier: 'cluster', servingModelId: null })
+    expect(line.pinned).toBe(false)
+    expect(line.label).toBe('whatever is staged')
+    // The cost belongs where the operator reads about the group, not in the
+    // latency of a request they have already sent.
+    expect(line.title).toContain('pays the build')
+  })
+
+  it('still names the model when there is one', () => {
+    const line = servingLine({ tier: 'cluster', servingModelId: 'org/Qwen-32B' })
+    expect(line).toMatchObject({ pinned: true, label: 'Qwen-32B' })
+  })
+
+  it('leaves a harvest group with nothing to say', () => {
+    // A harvest group cannot serve whatever it is staged with - its machines
+    // are preemptible - so this phrase must not appear on one.
+    expect(servingLine({ tier: 'harvest', servingModelId: null }).label).toBe('-')
+  })
+
+  it('tells a standing group with nothing staged from one stood down', () => {
+    // Both arrive as `idle` and they mean opposite things: one is a decision,
+    // the other is a thing to go and do.
+    expect(readinessSummary({ state: 'idle', standing: true, detail: 'x' }).label)
+      .toBe('nothing staged')
+    expect(readinessSummary({ state: 'idle', standing: false, detail: 'x' }).label)
+      .toBe('stood down')
+  })
+})
+
+describe('what an unpinned group can be asked for', () => {
+  const readiness = {
+    state: 'ready', standing: true, model: null, staged: [
+      { modelId: 'org/ready-b', machines: 2, held: 2, ready: true },
+      { modelId: 'org/half-there', machines: 2, held: 1, ready: false },
+      { modelId: 'org/ready-a', machines: 2, held: 2, ready: true },
+    ],
+  }
+
+  it('puts what cannot be served first', () => {
+    // The line somebody has to act on. Sorted below the ready ones it would be
+    // read last, which is the wrong way round for the only actionable item.
+    expect(stagedLines(readiness).map((s) => s.label))
+      .toEqual(['half-there', 'ready-a', 'ready-b'])
+  })
+
+  it('says how far short a half-staged model is', () => {
+    // "Not ready" leaves an operator to work out whether to wait or to go and
+    // push it. The count says which.
+    expect(stagedLines(readiness)[0]!.note).toBe('on 1 of the 2 machines it needs')
+  })
+
+  it('says nothing at all for a pinned group', () => {
+    expect(stagedLines({ state: 'ready', model: 'org/x', staged: [] })).toEqual([])
+  })
+})
+
+describe('what unpinning a group will do', () => {
+  const pool = { name: 'pool' }
+  const staged = [{ id: 'org/a' }, { id: 'org/b' }]
+
+  it('leads with what it keeps, because the fear is that it deletes', () => {
+    // Unpinning reads as throwing the setup away, and the expensive part - the
+    // weights - is exactly what stays.
+    const out = unpinConsequences(pool, staged)
+    expect(out[0]!.text).toContain('nothing is fetched again and nothing is deleted')
+  })
+
+  it('warns that the first request for a cold model pays the build', () => {
+    expect(unpinConsequences(pool, staged).some((c) => c.level === 'cost'
+      && /pays the build/.test(c.text))).toBe(true)
+  })
+
+  it('blocks when the group has been staged with nothing', () => {
+    // It would stand there serving nothing, and the reason would only surface
+    // as a refused request.
+    const out = unpinConsequences(pool, [])
+    expect(out.some((c) => c.level === 'blocked')).toBe(true)
+    expect(out.find((c) => c.level === 'blocked')!.text).toContain('push a model to it first')
   })
 })

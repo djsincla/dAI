@@ -271,6 +271,49 @@
   </div>
 
   <div class="entry">
+    <h4>A group that names no model is not a fourth tier</h4>
+    <p class="because">A tier encodes preemptibility, and this differs in neither</p>
+    <p>
+      Wanting the same machines to run several large models in turn looks like a
+      new kind of group - a "dynamic cluster", loading at user request. It is
+      not. It has the same preemptibility as a cluster group, the same gang
+      admission, the same one-group-per-tier rule and the same rank assignment,
+      and it differs only in whether an operator named the model ahead of the
+      request or left it to the caller. That is a column, not a tier.
+    </p>
+    <p class="evidence">
+      So a cluster group with <code>serving_model_id IS NULL</code> serves
+      whichever model it was staged with. The two columns already said the two
+      things: <code>pool_models</code> is what the machines hold,
+      <code>serving_model_id</code> is the one they run - or none, meaning the
+      caller chooses. A fourth tier would have multiplied every rule that
+      mentions tiers, and a machine would have needed to be in three at once.
+    </p>
+    <p class="evidence">
+      It serves only what an administrator staged, not the whole catalogue. The
+      promise is then <b>anything I hold, in about a minute</b> - measured at
+      ~40 s for two machines to build their shares of a 32B from disk - rather
+      than a caller waiting twenty minutes for 18 GB to arrive. The cost is that
+      nothing can be pre-warmed, and alternating between two models rebuilds
+      every time: it suits several models used in turn, not two callers wanting
+      different ones at once.
+    </p>
+    <p class="evidence">
+      Three things had to change and each was a place that read "no model" as
+      "nothing here". <code>effectiveServing</code> dropped such groups before
+      picking a winner, so the machine was never told it was claimed;
+      <code>warmShareIfAsked</code> released the split share on the next
+      heartbeat, twenty seconds after it was built to answer a request; and
+      <code>releaseIfIdle</code> unloaded only the whole-model runtime and never
+      the share, which was harmless only while the sole groups with an idle
+      window held no share. The agent's own protocol had already written the
+      rule down - <code>servingModel</code> documents that nil means nobody has
+      said, "which is not the same as serve nothing" - and the whole-model path
+      honoured it while the split path did not.
+    </p>
+  </div>
+
+  <div class="entry">
     <h4>Where a machine's groups disagree, the cluster group wins</h4>
     <p class="because">Refusing the pair made the order of operations decide the outcome</p>
     <p>

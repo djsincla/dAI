@@ -176,3 +176,86 @@ describe('how long to hold when nothing is being asked', () => {
     expect(DEFAULT_IDLE_UNLOAD_SECONDS).toBe(300)
   })
 })
+
+/**
+ * A cluster group that names no model.
+ *
+ * It serves whichever of the models staged to it a caller asks for. Same tier,
+ * because a tier encodes preemptibility and this one is preempted exactly as
+ * little as any other cluster group - it differs only in whether the model was
+ * named ahead of the request or left to the caller.
+ *
+ * Every one of these went wrong at the same line: `mine` dropped any group with
+ * no serving model before a winner was picked, so a dynamic group never reached
+ * the machine at all. The machine believed it belonged to nothing, which made it
+ * lazy, put it on the harvest window, and - worst - made it let go of the split
+ * share it had just built.
+ */
+describe('a cluster group that serves whatever it is staged with', () => {
+  const dynamic = group({ name: 'pool', tier: 'cluster', servingModelId: null })
+
+  it('reaches the machine at all', () => {
+    // The line everything else depends on. Dropped here, and the machine is
+    // told nothing claims it.
+    expect(effectiveServing(node, [dynamic]).groupId).toBe('g-pool')
+  })
+
+  it('names no model, which is not an instruction to serve nothing', () => {
+    expect(effectiveServing(node, [dynamic]).model).toBeNull()
+  })
+
+  it('still tells the machine it is claimed', () => {
+    // keepLoaded is the only thing a node ever learns about its membership. A
+    // dynamic group names no model and no standing split, so without this the
+    // agent cannot tell "nothing stands here any more" from "something may be
+    // asked for at any moment" - and it releases the share it just built.
+    expect(effectiveServing(node, [dynamic]).keepLoaded).toBe(true)
+  })
+
+  it('gets an idle window, which a pinned group does not', () => {
+    // The opposite case from a dedicated group. Whatever it loaded last would
+    // otherwise be pinned for as long as the group stands - chosen by whoever
+    // asked first, and never released.
+    expect(effectiveServing(node, [dynamic]).idleUnloadSeconds)
+      .toBe(DEFAULT_IDLE_UNLOAD_SECONDS)
+    expect(effectiveServing(node, [group({ name: 'pinned', tier: 'cluster',
+      servingModelId: '32B' })]).idleUnloadSeconds).toBeNull()
+  })
+
+  it('honours a window an operator set on it', () => {
+    expect(effectiveServing(node, [{ ...dynamic, idleUnloadSeconds: 900 }])
+      .idleUnloadSeconds).toBe(900)
+  })
+
+  it('warms nothing, because nothing has been chosen yet', () => {
+    // machines is what stops a machine warming a split by loading the whole
+    // model. There is no model, so there is nothing to get wrong.
+    expect(effectiveServing(node, [dynamic]).machines).toBe(1)
+  })
+
+  it('preempts a harvest group that did name a model', () => {
+    // The preemption rule is about the tier, not about who spoke first. A
+    // machine in a dynamic cluster group is not free to go on serving its
+    // harvest group's model: it is spoken for.
+    const harvest = group({ name: 'desks', tier: 'harvest', servingModelId: '30B' })
+    const out = effectiveServing(node, [harvest, dynamic])
+    expect(out.groupId).toBe('g-pool')
+    expect(out.model).toBeNull()
+  })
+
+  it('is dropped when it stands down, and the machine goes back to harvest', () => {
+    const harvest = group({ name: 'desks', tier: 'harvest', servingModelId: '30B' })
+    const out = effectiveServing(node, [harvest, { ...dynamic, enabled: false }])
+    expect(out.model).toBe('30B')
+    expect(out.keepLoaded).toBe(false)
+  })
+
+  it('still drops a harvest group that named nothing', () => {
+    // The filter was not removed, only narrowed. A harvest group with no model
+    // is genuinely nothing and must not claim the machine - otherwise every
+    // unconfigured group would take a workstation out of service.
+    const empty = group({ name: 'empty', tier: 'harvest', servingModelId: null })
+    expect(effectiveServing(node, [empty]).groupId).toBeNull()
+    expect(effectiveServing(node, [empty]).keepLoaded).toBe(false)
+  })
+})

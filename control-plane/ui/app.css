@@ -407,14 +407,20 @@ table.mini tbody tr:hover { background: transparent; cursor: default; }
 /* Which way the machines page arranges the fleet: by group, or by what each
    machine is offered for. Two views of one fleet rather than two halves, so it
    reads as a lens on the same page instead of navigation to another. */
-.axis { display: flex; gap: 4px; margin-left: auto; }
-.axis button {
-  padding: 5px 12px; font-size: 12px; border-radius: 6px;
-  background: transparent; border: 1px solid var(--line); color: var(--muted);
+/* What a machine may be claimed for, on the machine.
+   A granted tier is stated plainly and an ungranted one recedes: the row should
+   read as "this machine is offered for harvest" at a glance, with the other
+   still clickable rather than hidden, because adding one is the common act. */
+.tiers { display: inline-flex; gap: 4px; }
+.tier-chip {
+  padding: 2px 8px; font-size: 11px; border-radius: 4px; cursor: pointer;
+  border: 1px solid var(--line); background: transparent;
 }
-.axis button.on {
+.tier-chip.on {
   background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent);
 }
+.tier-chip.off { color: var(--muted); opacity: .5; }
+.tier-chip.off:hover { opacity: 1; }
 
 /* Imports in flight. Above the catalogue because a model only joins the
    catalogue once every file has landed, so this is the only place an import in

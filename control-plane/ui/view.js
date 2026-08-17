@@ -698,19 +698,71 @@ export function inBothTiers(node) {
 }
 
 /**
- * Machines arranged by tier.
+ * What clicking a tier on a machine does.
  *
- * A machine appears under every tier it is in, for the same reason it appears
- * under every group: a view that hid the second one would disagree with the
- * scheduler. Unlike groups there is no "in no tier" heading, because a machine
- * must be in at least one - being offered for nothing is not a state the fleet
- * can hold.
+ * Tiers used to be a panel a machine was dragged onto, which put them beside
+ * groups as though the two were alternative arrangements of one fleet. They are
+ * not: a machine's tier is what it may be *claimed for*, and a group is what
+ * claims it - `whyNotInPool` refuses a cluster group any machine not already
+ * offered for cluster. So this is a property of the machine, edited where
+ * machines are listed.
+ *
+ * Refused rather than silently ignored when it would leave a machine offered for
+ * nothing. Such a machine still runs, still heartbeats and never gets work,
+ * which looks exactly like a broken agent and sends somebody to read logs.
  */
-export function tierMachines(nodes) {
-  return TIERS.map((tier) => ({
-    tier,
-    nodes: nodes.filter((n) => tiersOf(n).includes(tier)),
-  }))
+export function tierToggle(node, tier) {
+  const has = tiersOf(node).includes(tier)
+  const next = tiersAfter(node, tier, has ? 'remove' : 'add')
+  if (!next) {
+    return { refused: `${node.hostname} has to be offered for something. A machine `
+      + 'offered for nothing still runs and still reports in, but never gets work.' }
+  }
+  return { action: has ? 'remove' : 'add', next }
+}
+
+/**
+ * What to ask before putting this machine in this group, or null to just do it.
+ *
+ * The same condition `whyNotInPool` applies, asked one step earlier. The server
+ * already refuses this with a 409; without asking here the console simply
+ * reported the refusal and stopped, and the operator had to go and grant the
+ * tier somewhere else and come back. The precondition is real - it should be a
+ * sentence at the moment it matters, not a separate screen.
+ *
+ * A console that disagreed with the scheduler would be worse than none, so the
+ * rule is asserted against `whyNotInPool` itself rather than described twice.
+ */
+export function needsTierFor(node, pool) {
+  if (pool?.tier !== 'cluster') return null
+  if (tiersOf(node).includes('cluster')) return null
+  return {
+    tier: 'cluster',
+    next: tiersAfter(node, 'cluster', 'add'),
+    question: `${node.hostname} is not offered for cluster work, and `
+      + `${pool.name} is a cluster group.\n\nOffer it for cluster as well? `
+      + `${describeTier('cluster')}.`,
+  }
+}
+
+/**
+ * Machines in a group that are also someone's workstation.
+ *
+ * Carried over from the tier panel, which is the only place this was said. A
+ * cluster group is never preempted, so a request can land on one of these while
+ * its owner is using it - which is a consequence of how the group was built and
+ * belongs on the group, not on a list of tiers.
+ */
+export function bothTiersNote(members) {
+  const shared = (members ?? []).filter(inBothTiers)
+  if (shared.length === 0) return null
+  return {
+    count: shared.length,
+    hostnames: shared.map((n) => n.hostname),
+    label: `${shared.length} also harvest`,
+    detail: 'These machines belong to people. An interactive request can land on '
+      + 'one while its owner is using it.',
+  }
 }
 
 /**

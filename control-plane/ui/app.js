@@ -17,7 +17,7 @@ import {
   bucketFor, certificateStanding, clampWindow, describeTier, describeWindow,
   effectiveModelFor, splitNote, suspensionNote,
   groupMachines, groupMismatches,
-  inBothTiers, tierMachines, tiersAfter,
+  TIERS, tiersOf, tierToggle, needsTierFor, bothTiersNote,
   groupMode, groupWarning, importProgress, isSynthetic, kindsFor,
   machinesThatCouldHold, matchesGroup, matchesQuery, nextSort, pauseAction, progressOf,
   rolloutState, servingFor, sortRows, upgradeOutcome, windowFromDrag,
@@ -264,6 +264,9 @@ function renderNodes(nodes, details) {
     // n.state included so the row redraws when it changes: without it the
     // button kept its old label after a successful pause.
     n.id, n.hostname, n.presenceState, n.state, n.userPaused,
+    // Or the row keeps its old chips after a tier change and the click appears
+    // to have done nothing - the same bug the pause button had.
+    tiersOf(n).join(','),
     // Serving state included, or a node that starts or stops answering never
     // redraws and keeps its old label indefinitely - the bug the pause button
     // had before its state joined this list.
@@ -296,6 +299,15 @@ function renderNodes(nodes, details) {
     tr.innerHTML = `
       <td><b>${escape(n.hostname)}</b></td>
       <td>${escape(n.chip ?? '')}</td>
+      <td><span class="tiers">${TIERS.map((t) => {
+        const on = tiersOf(n).includes(t)
+        return `<button class="tier-chip ${on ? 'on' : 'off'}"
+                        data-tier-node="${escape(n.id)}" data-tier="${escape(t)}"
+                        title="${escape(on
+                          ? `Offered for ${t}: ${describeTier(t)}. Click to stop.`
+                          : `Not offered for ${t}. Click to add it.`)}"
+                >${escape(t)}</button>`
+      }).join('')}</span></td>
       <td class="num">${fmt(n.metalWorkingSetGb)} GB</td>
       <td class="num">${d ? `${fmt(d.headroomGb)} GB` : '&mdash;'}</td>
       <td><span class="pill ${escape(n.presenceState ?? '')}">${escape(n.presenceState ?? 'unknown')}</span></td>
@@ -327,6 +339,30 @@ function renderNodes(nodes, details) {
   }
 
   bindTableControls('nodes', () => { lastNodeSignature = null; if (lastData) paint(lastData) })
+
+  // What a machine may be claimed for, edited on the machine.
+  //
+  // Granting cluster asks first: it is the one with a consequence nobody would
+  // otherwise discover, because a cluster machine is never preempted and a
+  // request can land on it while its owner is using it. Taking a tier away, or
+  // granting harvest, is reversible and unsurprising, so it just happens.
+  body.querySelectorAll('[data-tier-node]').forEach((btn) =>
+    btn.addEventListener('click', async (ev) => {
+      ev.stopPropagation()
+      const node = shown.find((n) => n.id === btn.dataset.tierNode)
+      if (!node) return
+      const out = tierToggle(node, btn.dataset.tier)
+      if (out.refused) { toast(out.refused, true); return }
+      if (out.action === 'add' && btn.dataset.tier === 'cluster'
+          && !confirm(`Offer ${node.hostname} for cluster work?\n\n`
+                      + `${describeTier('cluster')}.`)) return
+      try {
+        await api(`/nodes/${node.id}/tiers`,
+          { method: 'PUT', body: JSON.stringify({ tiers: out.next }) })
+        toast(`${node.hostname}: ${out.next.join(' and ')}`)
+        refresh()
+      } catch (err) { toast(err.message, true) }
+    }))
 
   body.querySelectorAll('[data-action]').forEach((btn) =>
     btn.addEventListener('click', async () => {
@@ -1061,29 +1097,21 @@ async function resumeOrAsk() {
  * loses half its machines without anybody touching them.
  */
 /**
- * Which way the fleet is arranged on this page.
+ * The fleet, arranged by the thing that claims a machine.
  *
- * Groups are what work is scheduled against. Tiers are what a machine is
- * offered for, and a machine can be in both of them, so they are two views of
- * one fleet rather than two halves of it. Kept in the URL so a link to "the
- * fleet by tier" is a link somebody can send.
+ * This page used to offer a choice - by groups, or by tiers - which presented
+ * the two as alternative arrangements of one fleet. They are not alternatives.
+ * A group is what work is scheduled against; a tier is what a machine may be
+ * claimed *for*, and `whyNotInPool` refuses a cluster group any machine not
+ * already offered for cluster. One is a precondition of the other, and a toggle
+ * put them side by side as peers.
+ *
+ * So groups are the cards, and a machine's tiers are a column on the machine -
+ * see `tierToggle` and the "Offered for" cell below.
  */
-function currentAxis() {
-  return new URLSearchParams(location.hash.split('?')[1] ?? '').get('by') === 'tiers'
-    ? 'tiers' : 'groups'
-}
-
 function renderGroups(nodes, pools, models) {
   const box = $('#groups')
   if (!box) return
-
-  for (const b of document.querySelectorAll('#axis button')) {
-    b.classList.toggle('on', b.dataset.axis === currentAxis())
-  }
-  const newGroup = $('#new-group')
-  if (newGroup) newGroup.hidden = currentAxis() === 'tiers'
-
-  if (currentAxis() === 'tiers') return renderTiers(box, nodes)
 
   const { groups, ungrouped } = groupMachines(nodes, pools, matchesGroup)
 
@@ -1115,6 +1143,13 @@ function renderGroups(nodes, pools, models) {
     // Every group, not just this one: a machine's model can be decided by a
     // cluster group this card is not about.
     const warning = groupWarning(groupMismatches(g.pool, g.nodes, models, pools))
+    // Machines in this group that are also somebody's workstation.
+    //
+    // The tier panel was the only place this was ever said, so removing it
+    // would have removed the fact - the failure this codebase keeps having.
+    // It reads better here anyway: a cluster group is never preempted, so the
+    // consequence is about *these* machines, not about a list of tiers.
+    const shared = g.pool.tier === 'cluster' ? bothTiersNote(g.nodes) : null
     const mode = g.mode === 'list' ? 'hand-picked list' : 'a rule machines match'
     // The socket is on the card because it is the address somebody points an
     // application at. A group whose port lives only in the database is one an
@@ -1175,9 +1210,13 @@ function renderGroups(nodes, pools, models) {
                    : line.title)}"
                  >serve a model</button>`
       : ''
+    const sharedMark = shared
+      ? `<span class="triangle warn" title="${escape(shared.detail)}">&#9650;</span>
+         <span class="hint warn">${escape(shared.label)}</span>`
+      : ''
     return card(g.pool.name, `${state}${g.pool.tier} tier, ${mode}${at}${serves}`,
                 g.nodes, g.pool.id,
-                warning, serve + socket + stand + remove, off, readiness)
+                warning, sharedMark + serve + socket + stand + remove, off, readiness)
   }).join('') + (ungrouped.length > 0
     ? card('In no group', 'not scheduled by any pool, and holding no assigned models',
       ungrouped, null, null)
@@ -1245,7 +1284,7 @@ function renderGroups(nodes, pools, models) {
       } catch (err) { btn.disabled = false; toast(err.message, true) }
     }))
 
-  bindGroupDragging(box, pools)
+  bindGroupDragging(box, pools, nodes)
 }
 
 /**
@@ -1260,92 +1299,6 @@ function renderGroups(nodes, pools, models) {
  * from groups, where a drag moves a machine, so the panels say so rather than
  * leaving somebody to discover it by dropping one.
  */
-function renderTiers(box, nodes) {
-  const byTier = tierMachines(nodes)
-
-  box.innerHTML = byTier.map(({ tier, nodes: members }) => `
-    <section class="panel group" data-tier="${escape(tier)}">
-      <div class="panel-head">
-        <h2>${escape(tier)}</h2>
-        ${tier === 'cluster' && members.some(inBothTiers)
-          ? `<span class="triangle warn" title="${escape(
-              'These machines belong to people. An interactive request can land on one '
-              + 'while its owner is using it.')}">&#9650;</span>
-             <span class="hint warn">${members.filter(inBothTiers).length} also harvest</span>`
-          : ''}
-        <span class="hint">${escape(describeTier(tier))}</span>
-      </div>
-      ${members.length === 0
-        ? '<p class="empty">Nothing offered for this. Drag a machine in to add it.</p>'
-        : `<div class="chips">${members.map((n) => `
-            <div class="machine-chip" draggable="true" data-node="${escape(n.id)}"
-                 data-from="${escape(tier)}">
-              <b>${escape(n.hostname)}</b>
-              <span>${escape(n.chip ?? '')} &middot; ${fmt(n.memoryGb ?? n.memory_gb)} GB${
-                inBothTiers(n) ? ' &middot; both' : ''}</span>
-              <button class="link remove" data-remove="${escape(n.id)}"
-                data-tier="${escape(tier)}"
-                title="Stop offering this machine for ${escape(tier)} work">&times;</button>
-            </div>`).join('')}</div>`}
-    </section>`).join('')
-    + `<p class="hint" style="grid-column:1/-1">Dragging a machine onto a tier adds it.
-       A machine can be offered for both, and keeps what it already had.</p>`
-
-  bindTierDragging(box, nodes)
-}
-
-function bindTierDragging(box, nodes) {
-  const nodeById = (id) => nodes.find((n) => n.id === id)
-
-  const apply = async (node, tier, action) => {
-    const next = tiersAfter(node, tier, action)
-    if (!next) {
-      // The refusal worth explaining. A machine offered for nothing still runs,
-      // still heartbeats and never gets work, which looks like a broken agent.
-      toast(action === 'remove'
-        ? `${node.hostname} has to be offered for something`
-        : `${node.hostname} is already there`)
-      return
-    }
-    await api(`/nodes/${node.id}/tiers`,
-      { method: 'PUT', body: JSON.stringify({ tiers: next }) })
-    toast(`${node.hostname}: ${next.join(' and ')}`)
-    refresh()
-  }
-
-  let dragging = null
-  for (const chip of box.querySelectorAll('.machine-chip')) {
-    chip.addEventListener('dragstart', (e) => {
-      dragging = chip.dataset.node
-      e.dataTransfer.effectAllowed = 'copy'
-      e.dataTransfer.setData('text/plain', chip.dataset.node)
-      chip.classList.add('lifting')
-    })
-    chip.addEventListener('dragend', () => {
-      chip.classList.remove('lifting')
-      dragging = null
-    })
-  }
-
-  for (const panel of box.querySelectorAll('section[data-tier]')) {
-    panel.addEventListener('dragover', (e) => { e.preventDefault(); panel.classList.add('over') })
-    panel.addEventListener('dragleave', () => panel.classList.remove('over'))
-    panel.addEventListener('drop', async (e) => {
-      e.preventDefault()
-      panel.classList.remove('over')
-      const node = nodeById(dragging ?? e.dataTransfer.getData('text/plain'))
-      if (node) await apply(node, panel.dataset.tier, 'add')
-    })
-  }
-
-  for (const button of box.querySelectorAll('[data-remove]')) {
-    button.addEventListener('click', async (e) => {
-      e.stopPropagation()
-      const node = nodeById(button.dataset.remove)
-      if (node) await apply(node, button.dataset.tier, 'remove')
-    })
-  }
-}
 
 /**
  * Fill in the readiness strip on every cluster group's card.
@@ -1424,7 +1377,7 @@ async function loadReadiness(pools) {
   if (watching) readinessTimer = setTimeout(() => loadReadiness(pools), 4000)
 }
 
-function bindGroupDragging(box, pools) {
+function bindGroupDragging(box, pools, nodes) {
   let dragging = null
 
   for (const chip of box.querySelectorAll('.machine-chip')) {
@@ -1456,7 +1409,7 @@ function bindGroupDragging(box, pools) {
       const { nodeId, from } = dragging
       const to = target.dataset.drop
       if (from === to) return
-      await moveMachine(nodeId, from, to, pools)
+      await moveMachine(nodeId, from, to, pools, nodes)
     })
   }
 
@@ -1479,13 +1432,28 @@ function bindGroupDragging(box, pools) {
  * rather than in neither: a machine in two groups is untidy, and a machine in
  * none silently stops being scheduled.
  */
-async function moveMachine(nodeId, from, to, pools) {
+async function moveMachine(nodeId, from, to, pools, nodes) {
+  // A machine's tier is a precondition for membership, not a sibling of it: a
+  // cluster group can only take a machine offered for cluster, and the server
+  // returns 409 saying so. This used to be where the console stopped - the
+  // operator went to a different view, granted the tier, came back and dragged
+  // again. Asking here is the whole point of there no longer being two views.
+  const node = (nodes ?? []).find((n) => n.id === nodeId)
+  const target = pools.find((p) => p.id === to)
+  const grant = node && target ? needsTierFor(node, target) : null
+  if (grant) {
+    if (!confirm(grant.question)) return
+    try {
+      await api(`/nodes/${nodeId}/tiers`,
+        { method: 'PUT', body: JSON.stringify({ tiers: grant.next }) })
+    } catch (err) { toast(err.message, true); return }
+  }
+
   try {
     await api(`/pools/${to}/nodes/${nodeId}`, { method: 'PUT', body: '{}' })
   } catch (err) {
     // The server refuses the first hand-picked machine in a rule-based group
     // and says what converting it would drop. Asking is the whole point.
-    const target = pools.find((p) => p.id === to)
     if (/currently matches/.test(err.message)) {
       if (!confirm(`${err.message}\n\nConvert "${target?.name ?? to}" into a list?`)) return
       try {
@@ -1754,11 +1722,16 @@ const tables = {
 const NODE_COLUMNS = {
   hostname: (n) => n.hostname,
   chip: (n) => n.chip,
+  tiers: (n) => tiersOf(n).join(','),
   working: (n) => n.metalWorkingSetGb,
   presence: (n) => n.presenceState,
   state: (n) => n.state,
 }
+// Searchable by tier, which the tier panel used to answer by existing. "cluster"
+// has to find the machines a cluster group could take, or removing that panel
+// removes the only way to ask.
 const NODE_FIELDS = ['hostname', 'chip', 'presenceState', 'state',
+  (n) => tiersOf(n).join(' '),
   (n) => (n.models ?? []).join(' ')]
 
 const MODEL_COLUMNS = {
@@ -1873,10 +1846,6 @@ const VIEWS = {
         aggressive for a particular machine.
       </p>
       ${searchBox('nodes', 'Search machines')}
-      <div class="axis" id="axis">
-        <button data-axis="groups" class="on">Groups</button>
-        <button data-axis="tiers">Tiers</button>
-      </div>
       <button id="new-group" class="primary">New group</button>
     </header>
     <div id="groups"></div>
@@ -1886,6 +1855,8 @@ const VIEWS = {
         <table id="nodes">
           <thead><tr>
             <th data-sort="hostname">Machine</th><th data-sort="chip">Chip</th>
+            <th data-sort="tiers"
+                title="What this machine may be claimed for. A cluster group can only take a machine offered for cluster.">Offered for</th>
             <th class="num" data-sort="working"
                 title="Metal caps itself near 81% of unified memory">Working set</th>
             <th class="num" title="What is takeable right now under policy">Headroom</th>
@@ -2320,10 +2291,13 @@ VIEWS.api = () => `
   </section>`
 
 const currentView = () => {
-  // The query is stripped before the name is read. The machines page carries
-  // `?by=tiers` so a link to the fleet-by-tier is something somebody can send,
-  // and without this that link resolved to no view at all and fell back to the
-  // overview.
+  // The query is stripped before the name is read, or a link with one resolves
+  // to no view at all and falls back to the overview.
+  //
+  // Still needed now that the machines page has no `?by=tiers` toggle: somebody
+  // has that link in a bookmark or a message, and it should land on Machines
+  // rather than somewhere else entirely. A removed feature should degrade to
+  // the page it was part of.
   const name = location.hash.replace(/^#\/?/, '').split('?')[0] || 'overview'
   return VIEWS[name] ? name : 'overview'
 }
@@ -2349,11 +2323,6 @@ function mount(name) {
   }
   if (name === 'machines') {
     $('#new-group').addEventListener('click', createGroup)
-    for (const b of document.querySelectorAll('#axis button')) {
-      b.addEventListener('click', () => {
-        location.hash = b.dataset.axis === 'tiers' ? '#/machines?by=tiers' : '#/machines'
-      })
-    }
   }
   if (name === 'overview') bindChartDrag()
   if (name === 'logs') bindLogControls()

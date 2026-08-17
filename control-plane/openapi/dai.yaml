@@ -577,6 +577,15 @@ paths:
                       How long to hold the model after the last request, once
                       nothing is being asked of it. Null for a dedicated group,
                       which holds its model for as long as it stands.
+                  promptCacheGb:
+                    type: number
+                    minimum: 0
+                    description: >
+                      How much prompt cache this machine may hold, in gigabytes,
+                      across all the conversations it is keeping warm. Always
+                      sent, because keeping a conversation warm is not a property
+                      of a tier. The node clamps it against its own memory and
+                      what its presence policy allows.
 
 
                       The presence policy already covers "somebody wants their
@@ -1892,6 +1901,60 @@ paths:
                   idleUnloadSeconds: { type: integer, nullable: true }
         '400':
           description: Not a whole number of seconds
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: No such group
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /admin/v1/pools/{poolId}/prompt-cache:
+    parameters:
+      - name: poolId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      tags: [admin]
+      summary: How much prompt cache this group's machines may hold
+      description: >
+        Bounds conversations kept warm, not weights. A machine used to hold
+        exactly one prefix, so two clients evicted each other every turn and both
+        paid a full prefill - 363s on a 19,243-token conversation - while the
+        cache still occupied the memory. Two callers were worse off than one.
+
+
+        Applies to every tier, unlike the idle window: keeping a conversation
+        warm is not a property of a tier. Null restores the fleet default.
+
+
+        The machine clamps this against its own memory and what its presence
+        policy allows, so this states what the group is for rather than what any
+        particular machine will do. Zero is allowed and means keep nothing warm.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                gb:
+                  type: number
+                  nullable: true
+                  minimum: 0
+      responses:
+        '200':
+          description: What the group will now allow
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  promptCacheGb: { type: number, nullable: true }
+        '400':
+          description: Not a number of gigabytes at or above zero
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

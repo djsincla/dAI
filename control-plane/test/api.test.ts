@@ -1071,6 +1071,110 @@ describe('how long a group keeps a model when nothing is asking', () => {
     expect(pools.find((p) => p.id === fx.poolId).idleUnloadSeconds).toBeNull()
   })
 
+  it('sets how much prompt cache a group allows, and shows it back', async () => {
+    // A machine held exactly one conversation's prefix, so two clients evicted
+    // each other every turn and both paid a full prefill.
+    const r = await fetch(`${base}/admin/v1/pools/${fx.poolId}/prompt-cache`, {
+      method: 'PUT', headers: asUser(fx.operatorToken),
+      body: JSON.stringify({ gb: 12 }),
+    })
+    expect(r.status).toBe(200)
+    const pools = await (await fetch(`${base}/admin/v1/pools`,
+      { headers: asUser(fx.operatorToken) })).json() as any[]
+    expect(pools.find((p) => p.id === fx.poolId).promptCacheGb).toBe(12)
+  })
+
+  it('accepts zero prompt cache, unlike a zero idle window', async () => {
+    // Zero here is a legitimate choice - keep nothing warm on a machine with no
+    // memory to spare. Zero seconds of idle window is refused, because it
+    // unloads after every request. Same shape, opposite answer, and the reason
+    // is what the number means rather than the number.
+    const r = await fetch(`${base}/admin/v1/pools/${fx.poolId}/prompt-cache`, {
+      method: 'PUT', headers: asUser(fx.operatorToken), body: JSON.stringify({ gb: 0 }),
+    })
+    expect(r.status).toBe(200)
+    expect((await r.json() as any).promptCacheGb).toBe(0)
+  })
+
+  it('null prompt cache restores the fleet default', async () => {
+    await fetch(`${base}/admin/v1/pools/${fx.poolId}/prompt-cache`, {
+      method: 'PUT', headers: asUser(fx.operatorToken), body: JSON.stringify({ gb: 12 }),
+    })
+    const r = await fetch(`${base}/admin/v1/pools/${fx.poolId}/prompt-cache`, {
+      method: 'PUT', headers: asUser(fx.operatorToken), body: JSON.stringify({ gb: null }),
+    })
+    expect(r.status).toBe(200)
+    expect((await r.json() as any).promptCacheGb).toBeNull()
+  })
+
+  it('refuses a negative prompt cache', async () => {
+    const r = await fetch(`${base}/admin/v1/pools/${fx.poolId}/prompt-cache`, {
+      method: 'PUT', headers: asUser(fx.operatorToken), body: JSON.stringify({ gb: -1 }),
+    })
+    expect(r.status).toBe(400)
+  })
+
+  it('tells a machine how much prompt cache it may hold', async () => {
+    // Sent to every machine, not only to the ones with an idle window: keeping a
+    // conversation warm is not a property of a tier.
+    await fetch(`${base}/admin/v1/pools/${fx.poolId}/prompt-cache`, {
+      method: 'PUT', headers: asUser(fx.operatorToken), body: JSON.stringify({ gb: 6 }),
+    })
+    await db.query(
+      `INSERT INTO models (id, size_bytes, machines, runtime, kind)
+       VALUES ('org/cache', 1, 1, 'mlx', 'generate') ON CONFLICT DO NOTHING`)
+    await db.query(
+      `UPDATE pools SET serving_model_id = 'org/cache' WHERE id = $1`, [fx.poolId])
+
+    const beat = await fetch(`${base}/agent/v1/heartbeat`, {
+      method: 'POST', headers: asNode(fx.fingerprint),
+      body: JSON.stringify({ presenceState: 'LOCKED' }),
+    })
+    expect((await beat.json() as any).promptCacheGb).toBe(6)
+  })
+
+  it('sends the fleet default when no group has said', async () => {
+    const beat = await fetch(`${base}/agent/v1/heartbeat`, {
+      method: 'POST', headers: asNode(fx.fingerprint),
+      body: JSON.stringify({ presenceState: 'LOCKED' }),
+    })
+    expect((await beat.json() as any).promptCacheGb).toBe(8)
+  })
+
+  /**
+   * A cluster group that names no model has to reach the machine.
+   *
+   * `effectiveServing` was fixed to keep unpinned cluster groups - they serve
+   * whichever staged model is asked for - but the heartbeat's own pools query
+   * filtered `serving_model_id IS NOT NULL` first, so the group was gone before
+   * the rule ran. Two filters for one rule, and the one further from the rule
+   * won: the machine was told nothing claimed it, and the agent released the
+   * split share it had just built.
+   */
+  it('reaches a machine claimed by a group that names no model', async () => {
+    const { rows } = await db.query(
+      `INSERT INTO pools (name, tier, schedule, preempt, serving_model_id, enabled,
+                          prompt_cache_gb)
+       VALUES ('unpinned','cluster','gang','never', NULL, true, 5) RETURNING id`)
+    expect(rows[0]).toBeDefined()
+    await db.query(
+      `UPDATE nodes SET tiers = ARRAY['harvest','cluster']::text[] WHERE id = $1`,
+      [fx.nodeId])
+
+    const beat = await fetch(`${base}/agent/v1/heartbeat`, {
+      method: 'POST', headers: asNode(fx.fingerprint),
+      body: JSON.stringify({ presenceState: 'LOCKED' }),
+    })
+    const body = await beat.json() as any
+    // The group's own figure, which can only arrive if the group survived the
+    // query at all.
+    expect(body.promptCacheGb).toBe(5)
+    // And the claim itself: keepLoaded is the only thing that tells a machine it
+    // is in a cluster group, and it is what stops the share being released.
+    expect(body.keepLoaded).toBe(true)
+    expect(body.servingModel ?? null).toBeNull()
+  })
+
   it('refuses a window that would release between the turns of a conversation', async () => {
     // Zero would unload after every request, which is the behaviour that cost
     // 37 seconds a request the last time a loop released too eagerly.

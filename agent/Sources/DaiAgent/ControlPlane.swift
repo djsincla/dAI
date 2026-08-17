@@ -791,6 +791,10 @@ public actor ControlPlane {
             // Absent means no window, which is what every machine did before
             // this existed: hold until presence says otherwise.
             idleUnloadSeconds: reply["idleUnloadSeconds"]?.intValue,
+            // Absent means the agent's own default rather than nothing. A
+            // machine told to keep no conversations warm pays a full prefill
+            // every turn, which is the behaviour this exists to prevent.
+            promptCacheGb: reply["promptCacheGb"]?.doubleValue,
             rank: reply["rank"]?.intValue, size: reply["size"]?.intValue)
     }
 
@@ -874,6 +878,19 @@ public actor ControlPlane {
         /// layers this machine owns; one without the other says nothing.
         public let size: Int?
 
+        /// How much prompt cache this machine may hold, in gigabytes, across
+        /// every conversation it is keeping warm.
+        ///
+        /// Nil from a control plane too old to say, which means the agent's own
+        /// default rather than nothing: a machine that held no conversations warm
+        /// would pay a full prefill on every turn, and this exists precisely to
+        /// stop that happening to the second caller.
+        ///
+        /// The group says what it is for; this machine clamps it against the
+        /// memory it actually has. That is the same bargain the presence policy
+        /// already strikes - the stricter of the two wins.
+        public let promptCacheGb: Double?
+
         /// The share to build ahead of a request, when there is one to build.
         public var standingSplit: (rank: Int, size: Int)? {
             guard let rank, let size, size > 1, rank >= 0, rank < size else { return nil }
@@ -883,12 +900,15 @@ public actor ControlPlane {
         public init(renewRequested: Bool = false, servingModel: String? = nil,
                     keepLoaded: Bool = false, machines: Int = 1,
                     idleUnloadSeconds: Int? = nil,
+                    promptCacheGb: Double? = nil,
                     rank: Int? = nil, size: Int? = nil) {
             self.renewRequested = renewRequested
             self.servingModel = servingModel
             self.keepLoaded = keepLoaded
             self.machines = max(1, machines)
             self.idleUnloadSeconds = idleUnloadSeconds.map { max(1, $0) }
+            // Negative is nonsense; zero is a choice, and means keep nothing warm.
+            self.promptCacheGb = promptCacheGb.map { max(0, $0) }
             self.rank = rank
             self.size = size
         }

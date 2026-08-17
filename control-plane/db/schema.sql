@@ -558,6 +558,20 @@ ALTER TABLE pools ADD COLUMN IF NOT EXISTS serving_model_id text;
 -- and that is the expensive half: releasing too eagerly once turned a 0.5s warm
 -- request into 37.5s. This is how long to keep a conversation warm.
 ALTER TABLE pools ADD COLUMN IF NOT EXISTS idle_unload_seconds int;
+
+-- How many gigabytes of prompt cache a group's machines may hold.
+--
+-- Per group for the same reason as the idle window, and null means the fleet
+-- default. The agent clamps it: the control plane knows what the group is for
+-- and the machine knows its own memory and what its presence policy allows, so
+-- the stricter of the two wins.
+--
+-- It bounds conversations kept warm, not weights. One prefix used to be all a
+-- machine could hold, so two clients evicted each other every turn and both paid
+-- a full prefill - 363s on a 19,243-token conversation - while the cache still
+-- occupied the memory. Numeric rather than int because a sensible value for a
+-- 48GB workstation is not a whole number of gigabytes.
+ALTER TABLE pools ADD COLUMN IF NOT EXISTS prompt_cache_gb numeric;
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'pools_serving_model_fk')

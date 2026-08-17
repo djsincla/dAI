@@ -488,10 +488,23 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
     // wins: it promises never to be preempted and is the only place a split can
     // run, and the harvest group promises the opposite. Only one of those
     // survives contact with a single machine.
+    // A cluster group that names no model has to survive this query.
+    //
+    // `effectiveServing` decides what a machine is told, and it deliberately
+    // keeps unpinned cluster groups - they serve whichever staged model is asked
+    // for, which is a decision an operator made. Filtering them out here meant
+    // that fix never reached the heartbeat: the group was gone before the rule
+    // ran, so the machine was told nothing claimed it, and the agent released
+    // the split share it had just built.
+    //
+    // Two filters for one rule, and the one further from the rule won. The
+    // condition is kept in step with `mine` in groupRules by saying the same
+    // thing: a model named, or a cluster group that has claimed the machine.
     const { rows: pools } = await db.query(
-      `SELECT id, name, tier, membership, serving_model_id, idle_unload_seconds
+      `SELECT id, name, tier, membership, serving_model_id, idle_unload_seconds,
+              prompt_cache_gb
          FROM pools
-        WHERE serving_model_id IS NOT NULL AND enabled`)
+        WHERE enabled AND (serving_model_id IS NOT NULL OR tier = 'cluster')`)
     // How wide each model was declared, so the node can be told whether what it
     // has been asked to hold runs across machines. One query rather than one
     // per pool: there are few models and this runs on every heartbeat.
@@ -503,6 +516,8 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
       ...p,
       servingModelId: p.serving_model_id as string,
       idleUnloadSeconds: p.idle_unload_seconds as number | null,
+      promptCacheGb: p.prompt_cache_gb === null || p.prompt_cache_gb === undefined
+        ? null : Number(p.prompt_cache_gb),
     })) as never, (id) => machinesFor.get(id) ?? 1)
 
     res.json({
@@ -538,6 +553,13 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
       // presence policy already covers "somebody wants their machine back",
       // and this covers "nobody wants anything", which nothing did.
       idleUnloadSeconds: serving.idleUnloadSeconds,
+      // How much prompt cache this machine may hold, in gigabytes.
+      //
+      // Sent to every machine rather than only to the ones with an idle window:
+      // keeping a conversation warm is not a property of a tier. The machine
+      // clamps it against its own memory, because this says what the group is
+      // for and the machine knows what it actually has.
+      promptCacheGb: serving.promptCacheGb,
       // Which share of a split this machine holds, before anything asks for it.
       //
       // Rank is decided per request at dispatch, which is too late for a machine

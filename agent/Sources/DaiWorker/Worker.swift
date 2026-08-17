@@ -614,6 +614,11 @@ public actor Worker {
             // never listens.
             if directives.renewRequested { renewRequested = true }
             await adoptServingModel(directives.servingModel)
+            // This loop owns the whole-model runtime, so it applies the budget to
+            // it. Two loops share one machine and each has to set what it holds,
+            // which is the same shape as reporting residency: the loop that
+            // cannot see the other's cache must not try to speak for it.
+            await gpu?.setPromptCacheBudget(gb: directives.promptCacheGb)
             await warmIfAsked(directives)
             // Cleared only once the report has actually landed. A dropped
             // heartbeat is common and the reason a node is not holding its

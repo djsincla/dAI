@@ -315,21 +315,63 @@ public actor ReverseChannel {
     /// The rank arrives from the heartbeat and the dispatch decides again. This
     /// is an optimisation and never a claim: a dispatch naming a different rank
     /// rebuilds, because the share was built for a fleet that no longer exists.
+    /// What the heartbeat is asking this machine to do about its split share.
+    ///
+    /// Pulled out of `warmShareIfAsked` because the two absent cases used to be
+    /// one guard and they mean opposite things - the shape `Worker.directive`
+    /// already has for the whole-model path, and for the same reason: it is the
+    /// decision, not the doing, that is worth being able to check.
+    enum ShareDirective: Equatable {
+        /// Nothing claims this machine. Let go of whatever is held.
+        case release
+        /// Claimed by a group that has named no model. Hold what was built.
+        case holdWhatIsHeld
+        /// Build this share before anything asks for it.
+        case warm(model: String, rank: Int, size: Int)
+    }
+
+    static func shareDirective(_ d: ControlPlane.Directives) -> ShareDirective {
+        // `keepLoaded` is the only thing that tells this machine it is in a
+        // cluster group at all. A node never learns which groups it is in - that
+        // keeps the shape of the fleet out of a credential on somebody's
+        // workstation - so the intent stands in for the membership. False means
+        // no group is claiming it: stood down, or handed back.
+        //
+        // releaseShare existed and nothing called it, which is the same shape as
+        // keepLoaded reaching the agent and being acted on by nothing: written,
+        // plausible, and doing nothing. The socket already tells callers the
+        // machines have been handed back, and that has to be true of the
+        // workstation as well as the scheduler.
+        guard d.keepLoaded else { return .release }
+
+        // Still claimed, but nothing is named. That is a group serving whichever
+        // staged model is asked for, and the share it built to answer the last
+        // request is exactly what it should still be holding.
+        //
+        // Releasing here is what the single guard used to do, and it would have
+        // undone the feature at the first heartbeat: built to answer a request,
+        // let go twenty seconds later, rebuilt for the next one. The protocol
+        // already says so - servingModel's own contract is that nil means nobody
+        // has said, which is not an instruction to unload - and the whole-model
+        // path honours it. This is the split path catching up.
+        guard let model = d.servingModel, let seat = d.standingSplit else {
+            return .holdWhatIsHeld
+        }
+        return .warm(model: model, rank: seat.rank, size: seat.size)
+    }
+
     private func warmShareIfAsked(_ directives: ControlPlane.Directives) async {
-        guard directives.keepLoaded,
-              let model = directives.servingModel,
-              let seat = directives.standingSplit
-        else {
-            // No split stands here any more - the group was stood down, or this
-            // machine was handed back. Let the share go.
-            //
-            // releaseShare existed and nothing called it, which is the same
-            // shape as keepLoaded reaching the agent and being acted on by
-            // nothing: written, plausible, and doing nothing. The socket already
-            // tells callers the machines have been handed back, and that has to
-            // be true of the workstation as well as the scheduler.
+        let model: String
+        let seat: (rank: Int, size: Int)
+        switch Self.shareDirective(directives) {
+        case .release:
             await releaseShare()
             return
+        case .holdWhatIsHeld:
+            return
+        case .warm(let m, let rank, let size):
+            model = m
+            seat = (rank, size)
         }
 
         let directory = MLXRuntime.modelDirectory.appendingPathComponent(model)
@@ -358,20 +400,44 @@ public actor ReverseChannel {
     /// Let go of the model when nothing has been asked of this machine for a
     /// while.
     ///
-    /// Nil window means never, which is what a dedicated group gets and what
-    /// every machine did before this existed.
+    /// Nil window means never, which is what a group pinned to a model gets and
+    /// what every machine did before this existed.
+    ///
+    /// Both the whole model and the split share, because a machine can be
+    /// holding either. This only ever unloaded `gpu`, which was harmless while
+    /// the sole groups with a window were harvest groups - they hold no share.
+    /// A group serving whichever staged model is asked for holds nothing else:
+    /// the share *is* the memory, so leaving it out would mean the first model
+    /// anyone asked for stayed resident for as long as the group stood, chosen
+    /// by whoever asked first and never released.
     private func releaseIfIdle() async {
         // Never while answering. Idleness is about nothing being asked, and
-        // something is being asked.
-        guard let gpu, await gpu.isLoaded else { return }
+        // something is being asked. Decided once, for both, by the rule that
+        // already counts requests in flight rather than trusting a timestamp
+        // that does not move until the current request ends.
         guard Worker.shouldReleaseWhenIdle(lastRequestEndedAt: lastRequestEndedAt,
                                            now: Date(), window: idleWindow,
                                            serving: serving)
         else { return }
-        let freed = await gpu.unload()
-        lastRequestEndedAt = nil
-        log(String(format: "idle for %.0fs; released %@ in %.1fs",
-                   idleWindow ?? 0, await gpu.name, freed))
+
+        var released = false
+        if let gpu, await gpu.isLoaded {
+            let freed = await gpu.unload()
+            log(String(format: "idle for %.0fs; released %@ in %.1fs",
+                       idleWindow ?? 0, await gpu.name, freed))
+            released = true
+        }
+        if let held = share, await held.isBuilt {
+            let plan = heldPlan
+            await releaseShare()
+            log(String(format: "idle for %.0fs; released this machine's share of %@",
+                       idleWindow ?? 0, plan?.modelId ?? "a split model"))
+            released = true
+        }
+        // Only once something was actually let go. Clearing it on every idle
+        // heartbeat would restart the clock against nothing and the window
+        // would never elapse.
+        if released { lastRequestEndedAt = nil }
     }
 
     /// Be one rank of a split model.
@@ -432,11 +498,11 @@ public actor ReverseChannel {
 
     private func runSplit(_ split: SplitDispatch,
                           dispatch: ControlPlane.Dispatch) async {
-        // A split is a request too. It does not release on idleness - a cluster
-        // group is sent no window - but the clock is kept for the same reason
-        // anyway: a machine that stops being part of a split becomes an
-        // ordinary one, and should not then be treated as having been idle for
-        // however long the split was running.
+        // A split is a request too, and the clock now decides something. A group
+        // pinned to a model is still sent no window and holds its share for as
+        // long as it stands; a group serving whichever staged model is asked for
+        // is sent one, and this is what stops it counting a long split as idle
+        // time and unloading the model it is in the middle of serving from.
         serving += 1
         defer { serving -= 1; lastRequestEndedAt = Date() }
 

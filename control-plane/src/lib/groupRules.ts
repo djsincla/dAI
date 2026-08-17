@@ -207,6 +207,14 @@ export function effectiveModel(node: NodeFacts, groups: Group[]): string | null 
  * those machines out of harvesting for as long as it stands, so the memory is
  * spoken for whether or not it holds anything.
  *
+ * **A cluster group that names no model is dynamic.** It serves whichever of
+ * the models staged to it a caller asks for, loading at dispatch. Same tier,
+ * because a tier encodes preemptibility and this one is preempted exactly as
+ * little as any other cluster group: it differs only in whether the model was
+ * named ahead of the request or left to the caller. It is warm in the sense
+ * that matters - it keeps what it built rather than rebuilding per request -
+ * but there is nothing to warm before the first one arrives.
+ *
  * The node is told the intent and not the tier. It never learns which groups it
  * belongs to - that is deliberate, so a credential on a workstation does not
  * carry the shape of the fleet - and "hold this loaded" is an instruction it can
@@ -232,15 +240,35 @@ export function effectiveServing(
   /** The group that decided all of it, so a caller can ask about its members. */
   groupId: string | null
 } {
+  // A cluster group that has named no model survives this filter, because it
+  // has still claimed the machine. "Serve whichever staged model is asked for"
+  // is a decision an operator made, and dropping it here would leave the
+  // machine believing it belongs to nothing: lazy, idle-released on the harvest
+  // schedule, and letting go of the split share it had just built. Everything
+  // else about a dynamic group follows from surviving this line.
+  //
+  // An unpinned harvest group is genuinely nothing and is still dropped.
   const mine = (poolsFor(node, active(groups)) as Group[])
-    .filter((g) => g.servingModelId !== null)
+    .filter((g) => g.servingModelId !== null || g.tier === 'cluster')
   // Cluster preempts harvest where a machine is in both. A split rank cannot be
   // preempted and harvest membership is the promise that a machine can be taken
   // away; only one of those survives contact with one machine.
   const winner = mine.find((g) => g.tier === 'cluster') ?? mine[0]
   const model = winner?.servingModelId ?? null
+
+  // Pinned to one model, rather than serving whatever it has been staged with.
+  // The distinction is not the tier: both are cluster groups, dedicated and
+  // never preempted, and they differ only in whether an operator named the
+  // model ahead of the request or left it to the caller.
+  const dedicated = winner?.tier === 'cluster' && winner.servingModelId !== null
+
   return {
     model,
+    // True for either kind of cluster group, which makes this the one thing
+    // that tells a machine it is in one. A dynamic group names no model and no
+    // standing split, so without this the agent could not tell "nothing stands
+    // here any more" from "something may be asked for at any moment" - and it
+    // would release a built share on the next heartbeat.
     keepLoaded: winner?.tier === 'cluster',
     // How many machines the model was declared to need.
     //
@@ -250,11 +278,16 @@ export function effectiveServing(
     // and the warm copy never used, because the split path builds its own
     // reduced model from the same weights.
     machines: model ? Math.max(1, machinesFor?.(model) ?? 1) : 1,
-    // Null for a cluster group, which is dedicated and loaded and has no idle
-    // window. Sending it one that is merely very long invites somebody to set
-    // it short, and a split that unloads between requests is a split that
-    // rebuilds its share every time.
-    idleUnloadSeconds: winner === undefined || winner.tier === 'cluster'
+    // Null for a group pinned to a model, which is dedicated and loaded and has
+    // no idle window. Sending it one that is merely very long invites somebody
+    // to set it short, and a split that unloads between requests is a split
+    // that rebuilds its share every time.
+    //
+    // An unpinned cluster group is the opposite case and needs one. It holds
+    // whatever it was last asked for, so without a window the first caller's
+    // model is pinned in memory for as long as the group stands - chosen by
+    // whoever asked first rather than by an operator, and never released.
+    idleUnloadSeconds: winner === undefined || dedicated
       ? null
       : winner.idleUnloadSeconds ?? DEFAULT_IDLE_UNLOAD_SECONDS,
     groupId: winner?.id ?? null,

@@ -1172,6 +1172,72 @@ describe('telling a group what to serve', () => {
     expect((await serve(fx.poolId, { machines: 2 })).status).toBe(400)
   })
 
+  /**
+   * Unpinning: the group goes on holding everything it was staged with and
+   * serves whichever of those a caller asks for.
+   *
+   * An absent modelId and a null one are different requests. One is somebody
+   * forgetting to say what to serve; the other is somebody saying, deliberately,
+   * that the caller chooses.
+   */
+  describe('serving whatever it is staged with', () => {
+    /** A standing cluster group already pinned to a staged model. */
+    const cluster = async (pinned: string | null = null) => {
+      const { rows } = await db.query(
+        `INSERT INTO pools (name, tier, schedule, preempt, serving_model_id, enabled)
+         VALUES ('unpin-me','cluster','gang','never', $1, true) RETURNING id`, [pinned])
+      const poolId = (rows[0] as { id: string }).id
+      if (pinned) {
+        await db.query(
+          `INSERT INTO pool_models (pool_id, model_id) VALUES ($1,$2)
+           ON CONFLICT DO NOTHING`, [poolId, pinned])
+      }
+      return poolId
+    }
+
+    it('takes the pin off and keeps every staged model', async () => {
+      // The reassurance that matters. Unpinning reads as throwing the setup
+      // away, and the expensive part - the weights - is exactly what stays.
+      await known()
+      const poolId = await cluster(model)
+
+      const r = await serve(poolId, { modelId: null })
+      expect(r.status).toBe(200)
+      expect((await r.json() as any).serves).toContain(model)
+
+      const { rows: pool } = await db.query(
+        `SELECT serving_model_id FROM pools WHERE id = $1`, [poolId])
+      expect(pool[0].serving_model_id).toBeNull()
+
+      // Still staged, so pinning it back costs nothing rather than ~18 GB.
+      const { rows: held } = await db.query(
+        `SELECT 1 FROM pool_models WHERE pool_id = $1 AND model_id = $2`, [poolId, model])
+      expect(held).toHaveLength(1)
+    })
+
+    it('is not the same request as forgetting to name one', async () => {
+      // The contract carries this through: an absent modelId is still a 400,
+      // and only an explicit null unpins.
+      const poolId = await cluster()
+      expect((await serve(poolId, {})).status).toBe(400)
+      expect((await serve(poolId, { modelId: null })).status).toBe(200)
+    })
+
+    it('refuses a harvest group, whose machines can be taken back', async () => {
+      // Not a policy about models but about preemptibility: a harvest machine
+      // is handed back the moment somebody touches a keyboard, and a gang
+      // cannot be preempted mid-request.
+      const r = await serve(fx.poolId, { modelId: null })
+      expect(r.status).toBe(409)
+      expect(JSON.stringify(await r.json())).toContain('cluster group')
+    })
+
+    it('404s for a group that does not exist', async () => {
+      expect((await serve('00000000-0000-0000-0000-000000000000',
+        { modelId: null })).status).toBe(404)
+    })
+  })
+
   it('refuses a width the machines cannot hold', async () => {
     // Asked here rather than at dispatch, where the answer arrives as a request
     // that hangs, weeks later, found by whoever happens to send one.

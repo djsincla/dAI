@@ -219,6 +219,71 @@ describe('serving over HTTP', () => {
     expect(body.error.message).toContain('out of harvesting')
   })
 
+  /**
+   * A group that names no model serves whichever one it was staged with.
+   *
+   * The operator still decides - `pool_models` is written by an admin route and
+   * pushing weights is the same act of spending the fleet - but the choice among
+   * what was staged is left to the caller. The refusal below is the assertion
+   * that matters: without the staging condition a dynamic group would accept any
+   * model in the catalogue and fail at dispatch, with the machines discovering
+   * the weights were never there.
+   */
+  const dynamicGroupHolding = async (modelId: string | null) => {
+    await db.query(
+      `INSERT INTO models (id, runtime, kind, size_bytes, machines)
+       VALUES ('org/wide','mlx','generate',1000,2) ON CONFLICT DO NOTHING`)
+    const { rows } = await db.query(
+      `INSERT INTO pools (name, tier, schedule, preempt, serving_model_id, enabled)
+       VALUES ('pool','cluster','gang','never', NULL, true) RETURNING id`)
+    const poolId = (rows[0] as { id: string }).id
+    if (modelId) {
+      await db.query(
+        `INSERT INTO models (id, runtime, kind, size_bytes, machines)
+         VALUES ($1,'mlx','generate',1000,2) ON CONFLICT DO NOTHING`, [modelId])
+      await db.query(
+        `INSERT INTO pool_models (pool_id, model_id) VALUES ($1,$2)
+         ON CONFLICT DO NOTHING`, [poolId, modelId])
+    }
+    await db.query(
+      `UPDATE nodes SET tiers = ARRAY['harvest','cluster']::text[] WHERE id = $1`,
+      [fx.nodeId])
+    return poolId
+  }
+
+  const askFor = async (model: string) => {
+    const node = attachNode(() => ({ text: 'x', promptTokens: 1, completionTokens: 1 }))
+    await new Promise((r) => setTimeout(r, 150))
+    const r = await fetch(`${base}/v1/chat/completions`, {
+      method: 'POST', headers: asUser(fx.operatorToken),
+      body: JSON.stringify({ model,
+                             messages: [{ role: 'user', content: 'hello' }], max_tokens: 8 }),
+    })
+    const body = await r.json() as any
+    node.stop()
+    return body
+  }
+
+  it('refuses a model an unpinned group was never staged', async () => {
+    // Staged, not merely cluster-tier. A dynamic group offers what an operator
+    // pushed to its machines and nothing else, or the caller is back to setting
+    // up a split by asking for one.
+    await dynamicGroupHolding(null)
+    const body = await askFor('org/wide')
+    expect(body.error.code).toBe('not-offered')
+    expect(body.error.message).toContain('has been staged')
+  })
+
+  it('accepts a model an unpinned group was staged, and stops refusing it', async () => {
+    // The group matched, so whatever happens next is about machines rather than
+    // about the model not being offered anywhere. Before this, a group with no
+    // serving model matched nothing and every request for a staged split was
+    // turned away with "no cluster group is serving it".
+    await dynamicGroupHolding('org/wide')
+    const body = await askFor('org/wide')
+    expect(body.error?.message ?? '').not.toContain('no cluster group is serving it')
+  })
+
   it('says which machine answered on the Anthropic surface too', async () => {
     // The provenance block was on /v1/chat/completions and not here, so a
     // caller using the Anthropic shape could not tell which machine had served

@@ -171,3 +171,133 @@ describe('told to hold it, or not', () => {
     expect(never.detail).toContain('not been told')
   })
 })
+
+/**
+ * A group that names no model.
+ *
+ * It used to be reported idle - "no model assigned" - which read as a group
+ * nobody had finished setting up. It now serves whichever staged model is asked
+ * for, and that is a different question with a different answer: not "are the
+ * shares built" but "what could be asked for, and would it be served".
+ *
+ * The difference that matters most is `loaded`. A dynamic group deliberately
+ * warms nothing, so a machine holding weights with nothing built is ready.
+ * Judged by the pinned rules it would report as perpetually loading, and an
+ * operator would wait for something that is never going to happen.
+ */
+describe('a group that serves whichever model it is staged with', () => {
+  const OTHER = 'mlx-community/Qwen3-30B-A3B-8bit'
+
+  const dynamicGroup = (members: RankFacts[],
+                        staged: { modelId: string; machines: number }[]) =>
+    splitReadiness({ enabled: true, model: null, machines: 1, members, staged })
+
+  const pair = (over: Partial<RankFacts> = {}) => [
+    machine('orca', { assigned: null, ...over }),
+    machine('rotorua', { assigned: null, pipelineAddress: '192.168.99.2', ...over }),
+  ]
+
+  it('is ready when the machines hold a staged model, built or not', () => {
+    // Nothing is pre-warmed, by definition: there is nothing to warm until a
+    // caller chooses. Holding weights and building nothing is the resting
+    // state here, not a stage on the way to somewhere.
+    const out = dynamicGroup(pair({ loaded: [] }), [{ modelId: MODEL, machines: 2 }])
+    expect(out.state).toBe('ready')
+    expect(out.ranks.every((r) => r.state === 'ready')).toBe(true)
+  })
+
+  it('says what it can be asked for, and what it cannot', () => {
+    // The actual information. A staged model on fewer machines than it needs is
+    // a request that will be refused, and this is where that gets said instead
+    // of being discovered at dispatch.
+    const members = [
+      machine('orca', { assigned: null, onDisk: [MODEL, OTHER] }),
+      machine('rotorua', { assigned: null, onDisk: [MODEL],
+                           pipelineAddress: '192.168.99.2' }),
+    ]
+    const out = dynamicGroup(members, [
+      { modelId: MODEL, machines: 2 }, { modelId: OTHER, machines: 2 },
+    ])
+    expect(out.staged).toEqual([
+      { modelId: MODEL, machines: 2, held: 2, ready: true },
+      { modelId: OTHER, machines: 2, held: 1, ready: false },
+    ])
+    expect(out.state).toBe('ready')
+    expect(out.detail).toContain('1 still arriving')
+  })
+
+  it('warns that the first request pays the build', () => {
+    // ~40 seconds on this fleet for both machines to build their shares of the
+    // 32B with the weights already on disk. It is the trade for not committing
+    // the machines, and it belongs where an operator reads about the group
+    // rather than in the latency of a request they have already sent.
+    const out = dynamicGroup(pair({ loaded: [] }), [{ modelId: MODEL, machines: 2 }])
+    expect(out.detail).toContain('pays the build')
+  })
+
+  it('is preparing while no staged model is on enough machines', () => {
+    // Resolves on its own - model sync is still working. Nobody has to act.
+    const out = dynamicGroup(
+      pair({ onDisk: [], loaded: [] }), [{ modelId: MODEL, machines: 2 }])
+    expect(out.state).toBe('preparing')
+  })
+
+  it('is idle when it has been staged with nothing', () => {
+    // Not blocked: the group is asserting nothing and nothing is broken. But it
+    // can serve nothing either, and the detail has to say what to do about it.
+    const out = dynamicGroup(pair(), [])
+    expect(out.state).toBe('idle')
+    expect(out.detail).toContain('nothing has been staged')
+  })
+
+  it('is blocked when a machine cannot be dialled for pipeline traffic', () => {
+    // The same question the router asks, and usually a cable.
+    const out = dynamicGroup(
+      pair({ pipelineAddress: null }), [{ modelId: MODEL, machines: 2 }])
+    expect(out.state).toBe('blocked')
+  })
+
+  it('needs no peer address when nothing staged is split', () => {
+    // A group of workstations each holding a whole model. Reporting it
+    // unreachable would describe a link it will never use.
+    const out = dynamicGroup(
+      pair({ pipelineAddress: null, onDisk: [OTHER], loaded: [] }),
+      [{ modelId: OTHER, machines: 1 }])
+    expect(out.state).toBe('ready')
+    expect(out.ranks.every((r) => r.rank === null)).toBe(true)
+  })
+
+  it('is blocked when it is too small for the widest thing staged to it', () => {
+    // Two machines staged with a three-machine model can never serve it, and
+    // no amount of waiting changes that.
+    const out = dynamicGroup(pair(), [{ modelId: MODEL, machines: 3 }])
+    expect(out.state).toBe('blocked')
+    expect(out.detail).toContain('needs 3 machines')
+  })
+
+  it('assigns ranks before anything has been asked for', () => {
+    // Ranks come from addresses, not from the model, so they can be settled
+    // while the group sits waiting - which is the state it is normally in.
+    const out = dynamicGroup(pair(), [{ modelId: MODEL, machines: 2 }])
+    expect(out.ranks.map((r) => r.rank)).toEqual([0, 1])
+    expect(out.ranks[0]!.role).toBe('output head')
+  })
+
+  it('is stood down rather than dynamic when it is not standing', () => {
+    const out = splitReadiness({ enabled: false, model: null, machines: 1,
+      members: pair(), staged: [{ modelId: MODEL, machines: 2 }] })
+    expect(out.state).toBe('idle')
+    expect(out.detail).toContain('stood down')
+  })
+
+  it('leaves a pinned group judged against its own model', () => {
+    // Staging is not consulted for a group that named a model. It asserts one
+    // thing and is measured against it.
+    const out = splitReadiness({ enabled: true, model: MODEL, machines: 2,
+      members: [machine('orca'), machine('rotorua', { pipelineAddress: '192.168.99.2' })],
+      staged: [{ modelId: OTHER, machines: 2 }] })
+    expect(out.state).toBe('ready')
+    expect(out.model).toBe(MODEL)
+    expect(out.staged).toEqual([])
+  })
+})

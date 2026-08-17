@@ -27,6 +27,7 @@ import {
   whyNotCallable,
   rankLine, readinessSummary, shouldKeepWatching,
   groupAddress, servableChoices, serveConsequences,
+  servingLine, stagedLines, unpinConsequences,
 } from './view.js'
 
 const $ = (sel) => document.querySelector(sel)
@@ -651,8 +652,14 @@ function showServe(poolId, models, pools, nodes) {
   // request is judged against.
   const members = (nodes ?? []).filter((n) => matchesGroup(n, pool))
 
+  // What has actually been pushed to this group. An unpinned group serves from
+  // exactly this set, so it is what the choice is really about.
+  const staged = (models ?? []).filter((m) => (m.assignedPools ?? []).includes(poolId))
+
   const say = (choice, machines) => serveConsequences(
     choice, machines, members.length, others).map((c) => `
+      <p class="consequence ${escape(c.level)}">${escape(c.text)}</p>`).join('')
+  const sayUnpinned = () => unpinConsequences(pool, staged).map((c) => `
       <p class="consequence ${escape(c.level)}">${escape(c.text)}</p>`).join('')
 
   drawer.open({
@@ -664,12 +671,14 @@ function showServe(poolId, models, pools, nodes) {
          group stands - a cluster group is dedicated, not harvested.</p>
       <label class="field">Model
         <select id="serve-model">
+          <option value="" ${pool?.servingModelId ? '' : 'selected'}
+            >Whatever is staged &middot; loads on request</option>
           ${choices.map((c) => `
             <option value="${escape(c.id)}" ${c.id === pool?.servingModelId ? 'selected' : ''}
               >${escape(c.label)} &middot; ${humanBytes(c.sizeBytes)}</option>`).join('')}
         </select>
       </label>
-      <label class="field">Across how many machines
+      <label class="field" id="serve-width">Across how many machines
         <input id="serve-machines" type="number" min="1" max="${Math.max(1, members.length)}"
                value="${escape(String(choices.find((c) => c.id === pool?.servingModelId)?.machines ?? 1))}">
       </label>
@@ -678,12 +687,20 @@ function showServe(poolId, models, pools, nodes) {
     mount(root) {
       const model = root.querySelector('#serve-model')
       const machines = root.querySelector('#serve-machines')
+      const width = root.querySelector('#serve-width')
       const says = root.querySelector('#serve-says')
       const go = root.querySelector('#serve-go')
 
       const update = () => {
-        const choice = choices.find((c) => c.id === model.value)
-        says.innerHTML = say(choice, Number(machines.value))
+        // No model chosen means no width to choose either: how wide each staged
+        // model runs is already declared on the model, and asking again here
+        // would offer a setting that applies to nothing.
+        const unpinned = model.value === ''
+        width.hidden = unpinned
+        go.textContent = unpinned ? 'Serve whatever is staged' : 'Serve it'
+        says.innerHTML = unpinned
+          ? sayUnpinned()
+          : say(choices.find((c) => c.id === model.value), Number(machines.value))
       }
       model.addEventListener('change', update)
       machines.addEventListener('input', update)
@@ -691,6 +708,20 @@ function showServe(poolId, models, pools, nodes) {
 
       go.addEventListener('click', async () => {
         go.disabled = true
+        if (model.value === '') {
+          try {
+            const out = await api(`/pools/${poolId}/serve`,
+              { method: 'PUT', body: { modelId: null } })
+            toast(`${pool?.name ?? 'the group'} now serves any of `
+              + `${(out.serves ?? []).length} staged models`)
+            drawer.close()
+            refresh()
+          } catch (err) {
+            toast(err.message, true)
+            go.disabled = false
+          }
+          return
+        }
         const body = { modelId: model.value, machines: Number(machines.value) }
         try {
           await api(`/pools/${poolId}/serve`, { method: 'PUT', body })
@@ -1113,9 +1144,17 @@ function renderGroups(nodes, pools, models) {
     // name does not say so.
     const model = models.find((m) => m.id === g.pool.servingModelId)
     const wide = model ? splitNote(model.machines) : ''
+    // A cluster group naming no model rendered as nothing at all here, which
+    // read as one nobody had finished setting up. It serves whichever staged
+    // model is asked for, and that is a thing it does.
+    //
+    // Plain text, because the subtitle is escaped wholesale by `card` - the
+    // longer explanation belongs in the readiness strip below, which has room
+    // for it and is where somebody looks for the state of the thing.
+    const line = servingLine(g.pool)
     const serves = g.pool.servingModelId
       ? `, serving ${g.pool.servingModelId.split('/').pop()}${wide ? ` across ${wide}` : ''}`
-      : ''
+      : (g.pool.tier === 'cluster' ? `, serving ${line.label}` : '')
     const state = off ? 'stood down, ' : ''
     // A cluster group gets a readiness strip. Standing one up means waiting for
     // weights to reach every machine and for each to build its share, and until
@@ -1131,7 +1170,9 @@ function renderGroups(nodes, pools, models) {
     // pushed - and giving it a machines field would say otherwise.
     const serve = g.pool.tier === 'cluster'
       ? `<button class="link" data-serve="${escape(g.pool.id)}"
-                 title="Choose what this group's machines run, and across how many of them"
+                 title="${escape(line.pinned
+                   ? 'Choose what this group\'s machines run, and across how many of them'
+                   : line.title)}"
                  >serve a model</button>`
       : ''
     return card(g.pool.name, `${state}${g.pool.tier} tier, ${mode}${at}${serves}`,
@@ -1348,10 +1389,21 @@ async function loadReadiness(pools) {
         <span class="hint">${escape(s.detail)}</span>
       </div>
       ${address && r.state === 'ready'
-        ? `<p class="ready-address">answer requests for
-             <code>${escape(r.model ?? '')}</code> at
-             <code>${escape(address)}</code></p>`
+        ? (r.model
+            ? `<p class="ready-address">answer requests for
+                 <code>${escape(r.model)}</code> at
+                 <code>${escape(address)}</code></p>`
+            // An unpinned group answers for several models, so naming one would
+            // be wrong and naming none would leave the address unexplained.
+            : `<p class="ready-address">answer requests at
+                 <code>${escape(address)}</code> for any staged model below</p>`)
         : ''}
+      ${stagedLines(r).length === 0 ? '' : `
+        <div class="staged">${stagedLines(r).map((s) => `
+          <div class="staged-line ${s.ready ? 'on' : 'off'}" title="${escape(s.modelId)}">
+            <b>${escape(s.label)}</b>
+            <span class="hint">${escape(s.note)}</span>
+          </div>`).join('')}</div>`}
       ${(r.ranks ?? []).length === 0 ? '' : `
         <div class="ranks">${r.ranks.map((raw) => {
           const line = rankLine(raw)

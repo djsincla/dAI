@@ -779,6 +779,19 @@ th.sortable.desc::after { content: ' \2193'; opacity: 1; color: var(--accent); }
 .mark.on  { opacity: .55; }
 .mark.off { border-color: rgba(176,42,42,.45); color: #b02a2a; font-weight: 600; }
 
+/* What an unpinned group can be asked for. A staged model on fewer machines
+   than it needs is a request that will be refused, so it reads as the thing to
+   act on and the ready ones stay quiet. */
+.staged { display: flex; flex-direction: column; gap: 3px; margin: 6px 0 2px; }
+.staged-line {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  font-size: 12.5px;
+}
+.staged-line b { font-weight: 600; }
+.staged-line .hint { margin-left: auto; font-size: 11px; }
+.staged-line.on b { opacity: .75; }
+.staged-line.off b { color: #b02a2a; }
+
 @media (prefers-color-scheme: dark) {
   .ready-pill.good { background: rgba(107,191,149,.16); color: #6bbf95; }
   .ready-pill.busy { background: rgba(224,146,92,.16);  color: #e0925c; }

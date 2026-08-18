@@ -583,9 +583,21 @@ public actor ReverseChannel {
                                             maxTokens: budget)
 
             let seconds = Date().timeIntervalSince(started)
-            log(String(format: "rank %d (layers %d..<%d) finished %d tokens in %.1fs",
-                       split.rank, done.layers.lowerBound, done.layers.upperBound,
-                       done.outcome.tokens, seconds))
+            // Split into reading the prompt and producing the answer, because
+            // one number cannot be acted on and these two can.
+            //
+            // An 11,819 token question took 110.5s and the line said only that.
+            // Whether that was the link, the prefill or the decode needed an
+            // experiment, and the runner had already measured all three and
+            // thrown them away at the log line.
+            let o = done.outcome
+            log(String(format:
+                "rank %d (layers %d..<%d) finished %d tokens in %.1fs "
+                + "(prompt %d tokens in %.1fs, %d reused; decode %d in %.1fs)",
+                split.rank, done.layers.lowerBound, done.layers.upperBound,
+                o.tokens, seconds,
+                o.promptTokens, o.promptSeconds, o.reusedTokens,
+                o.tokens, o.decodeSeconds))
             // Only the rank holding the head has text. The others report a
             // completion with none, which is what tells the control plane they
             // did not fail.

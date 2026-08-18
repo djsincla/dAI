@@ -476,3 +476,76 @@ private actor Counter {
     private(set) var count = 0
     func bump() { count += 1 }
 }
+
+/// What each machine says it is using, so two logs can be compared.
+///
+/// This exists because of an evening spent testing six hypotheses by hand. Two
+/// machines could not agree on a certificate, and all either of them said was
+/// that the other had closed the link - printed at the same instant, by both,
+/// each about the other. Neither said what it had itself decided to present or
+/// to trust, so the one-line difference between them could only be found by
+/// running openssl on both boxes.
+@Suite("what a machine says about its own credentials")
+struct CredentialSummaryTests {
+    /// A real certificate, so the fingerprint is over DER rather than over text.
+    /// Any self-signed certificate does; the value being tested is that two
+    /// copies of the same one agree and different ones do not.
+    static let certA = """
+        -----BEGIN CERTIFICATE-----
+        MIIBgTCCASegAwIBAgIUYtofYV+KKIiPpWQ61P42IAlh33UwCgYIKoZIzj0EAwIw
+        FjEUMBIGA1UEAwwLZEFJIG5vZGUgQ0EwHhcNMjYwODE4MDIxNzA0WhcNMzYwODE1
+        MDIxNzA0WjAWMRQwEgYDVQQDDAtkQUkgbm9kZSBDQTBZMBMGByqGSM49AgEGCCqG
+        SM49AwEHA0IABAIL4rDKn95xBa2u1ByC/h2xd2BVYLlv/BA7dnG+cNhjXqRDO3R+
+        A8OrkevrkoJVIAPm7TsWC+04q7TiXo6crjSjUzBRMB0GA1UdDgQWBBTSJ5BSFJx+
+        s7T6EgURLrcy72KTiDAfBgNVHSMEGDAWgBTSJ5BSFJx+s7T6EgURLrcy72KTiDAP
+        BgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0gAMEUCIQD+EU9toLE7mQ1yyT1+
+        dQPjQb8Wtd9hH0rsJykCQYVRAgIgCdIYQp2+HbXhkt5ILg4g7wUR6WpftUPTAIBZ
+        ELaqdfA=
+        -----END CERTIFICATE-----
+        """
+
+    @Test("says so rather than failing when a credential cannot be read")
+    func unreadable() {
+        // This runs on the path where a split is already going wrong. A machine
+        // that cannot parse its own certificate has told you something worth
+        // knowing, and crashing there would remove the only evidence.
+        #expect(PipelineChannel.fingerprint(pem: "") == "unreadable")
+        #expect(PipelineChannel.fingerprint(pem: "not a certificate") == "unreadable")
+        #expect(PipelineChannel.fingerprint(pem: "-----BEGIN CERTIFICATE-----\nzz\n"
+                                                 + "-----END CERTIFICATE-----") == "unreadable")
+    }
+
+    @Test("the same certificate gives the same answer on both machines")
+    func stable() {
+        // The entire point: rank 0 prints one of these and rank 1 prints
+        // another, and whoever reads both has to be able to compare them.
+        let once = PipelineChannel.fingerprint(pem: Self.certA)
+        let again = PipelineChannel.fingerprint(pem: Self.certA)
+        #expect(once == again)
+        if once != "unreadable" {
+            #expect(once.count == 12, "six bytes as hex, short enough to read in a log line")
+        }
+    }
+
+    @Test("whitespace in the file does not change the answer")
+    func derNotText() {
+        // Over the DER, not the PEM text, so two machines holding the same
+        // certificate agree whatever their files happen to carry. Comparing
+        // text would report a difference where there is none, which is worse
+        // than saying nothing.
+        let padded = "\n  " + Self.certA + "\n\n"
+        #expect(PipelineChannel.fingerprint(pem: padded)
+                == PipelineChannel.fingerprint(pem: Self.certA))
+    }
+}
+
+@Suite("the fingerprint test material is real")
+struct CredentialSummaryFixtureTests {
+    @Test("the fixture certificate actually parses")
+    func fixtureIsACertificate() {
+        // Without this the three tests above compare "unreadable" to itself and
+        // pass while proving nothing - which is the failure mode of every test
+        // built on a fixture nobody checked.
+        #expect(PipelineChannel.fingerprint(pem: CredentialSummaryTests.certA) != "unreadable")
+    }
+}

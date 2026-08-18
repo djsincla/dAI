@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import NIOCore
 import NIOPosix
@@ -95,9 +96,12 @@ public actor PipelineChannel {
     /// produces the token and therefore the one a scheduler addresses.
     public func listen(port: Int, identity: NodeIdentity, peerCAPEM: String,
                        timeout: TimeInterval = 60) async throws -> Int {
-        try await listen(port: port,
-                         tls: Self.serverContext(identity: identity, peerCAPEM: peerCAPEM),
-                         timeout: timeout)
+        log("pipeline: listening, "
+            + Self.credentialSummary(identity: identity, peerCAPEM: peerCAPEM))
+        return try await listen(port: port,
+                                tls: Self.serverContext(identity: identity,
+                                                        peerCAPEM: peerCAPEM),
+                                timeout: timeout)
     }
 
     /// Listen with a context somebody else built.
@@ -162,6 +166,8 @@ public actor PipelineChannel {
     /// Connect to the machine holding the later layers.
     public func connect(host: String, port: Int, identity: NodeIdentity,
                         peerCAPEM: String, serverName: String) async throws {
+        log("pipeline: dialling \(host):\(port), "
+            + Self.credentialSummary(identity: identity, peerCAPEM: peerCAPEM))
         try await connect(host: host, port: port,
                           tls: Self.clientContext(identity: identity, peerCAPEM: peerCAPEM),
                           serverName: serverName)
@@ -318,6 +324,47 @@ public actor PipelineChannel {
     private static func chain(_ identity: NodeIdentity) throws -> [NIOSSLCertificateSource] {
         try NIOSSLCertificate.fromPEMBytes(Array(identity.certificatePEM.utf8))
             .map { .certificate($0) }
+    }
+
+    /// What this machine is about to present, and what it will accept, in one
+    /// line each side can be compared against the other's.
+    ///
+    /// Two machines that cannot agree on a certificate print two lines here, and
+    /// whichever number differs is the answer. Without it the only evidence was
+    /// each machine reporting that the other had closed - which is what turned a
+    /// one-line difference into an evening.
+    ///
+    /// Fingerprints rather than the certificates themselves: enough to compare
+    /// across two logs, and nothing anybody has to be careful with.
+    static func credentialSummary(identity: NodeIdentity, peerCAPEM: String) -> String {
+        "presenting cert \(fingerprint(pem: identity.certificatePEM)),"
+            + " trusting node CA \(fingerprint(pem: peerCAPEM))"
+    }
+
+    /// Six bytes of the certificate's own SHA256, as hex.
+    ///
+    /// Over the DER rather than the PEM text, so two machines holding the same
+    /// certificate agree whatever whitespace their files happen to carry - the
+    /// whole value of this is that one log can be compared against another.
+    ///
+    /// Short on purpose. Nobody is verifying a certificate from a log line; they
+    /// are answering "is this the same one the other machine has", and six bytes
+    /// settles that while staying readable next to an address.
+    ///
+    /// "unreadable" rather than a crash or an empty string: a machine that
+    /// cannot parse its own credential has told you something worth knowing, and
+    /// this runs on the path where a split is already going wrong.
+    public static func fingerprint(pem: String) -> String {
+        // Trimmed first. The parser refuses a file with anything before the
+        // BEGIN line, and a stray blank line in a CA file is not a reason to
+        // report a credential as unreadable and send somebody hunting for a
+        // problem that is a text editor.
+        let text = pem.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let cert = (try? NIOSSLCertificate.fromPEMBytes(Array(text.utf8)))?.first,
+              let der = try? cert.toDERBytes()
+        else { return "unreadable" }
+        return SHA256.hash(data: Data(der)).prefix(6)
+            .map { String(format: "%02x", $0) }.joined()
     }
 
     private static func key(_ identity: NodeIdentity) -> NIOSSLPrivateKeySource {
@@ -534,7 +581,25 @@ final class HandshakeWatcher: ChannelInboundHandler, @unchecked Sendable {
     }
 
     func channelInactive(context: ChannelHandlerContext) {
-        log("pipeline: the peer closed the link")
+        // Before or after the handshake, because the two mean different things
+        // and this said neither.
+        //
+        // A link that dies before the handshake completes and raises no error
+        // here has not been refused by this machine - it has been refused by the
+        // other one, which read this machine's certificate and closed. Saying
+        // "the peer closed the link" was true and sent somebody to look at the
+        // machine that was working: both ends printed it at the same instant,
+        // each about the other, and neither said what it had itself decided.
+        //
+        // Six hypotheses were tested by hand for want of this sentence.
+        let peer = context.channel.remoteAddress.map(String.init(describing:)) ?? "the peer"
+        if completed {
+            log("pipeline: \(peer) closed the link after the handshake")
+        } else {
+            log("pipeline: \(peer) closed the link before the handshake completed"
+                + " - it did not accept this machine's certificate,"
+                + " or it presented one this machine's node CA does not sign")
+        }
         context.fireChannelInactive()
     }
 }

@@ -13,7 +13,7 @@
   <div class="kicker">Engineering &middot; testing</div>
   <h1>What is proven, how, and what a test cannot reach</h1>
   <p class="standfirst">
-    879 tests across two suites, a third that runs only under xcodebuild, and a
+    1,179 tests across two suites, a third that runs only under xcodebuild, and a
     set of claims that only real hardware can settle. This says which is which,
     because a suite that looks comprehensive and skips the hard parts is worse
     than one that admits its edges.
@@ -31,11 +31,11 @@
 
 <section id="running">
   <div class="sec-head"><h2>1</h2><h3>Running them</h3></div>
-  <div class="cmd"><span class="c"># control plane - 628 tests, ~3 min. Needs Postgres on 5433.</span>
+  <div class="cmd"><span class="c"># control plane - 817 tests, ~3 min. Needs Postgres on 5433.</span>
 <span class="p">$</span> cd control-plane &amp;&amp; npm test
 <span class="p">$</span> npx tsc --noEmit          <span class="c"># the suite does not typecheck; this does</span>
 
-<span class="c"># agent - 251 tests, ~50s</span>
+<span class="c"># agent - 362 tests, ~50s</span>
 <span class="p">$</span> cd agent &amp;&amp; swift test
 
 <span class="c"># the 15 that swift test skips, because SwiftPM cannot build MLX's shaders</span>
@@ -139,7 +139,9 @@
   <p>
     Some claims cannot be held in place by a test at all, and pretending
     otherwise is how they rot. These are verified by running them on the fleet and
-    reading the logs.
+    reading the logs. The procedures are written out below rather than
+    remembered, because every one of them was reconstructed from scratch at least
+    once.
   </p>
   <ul>
     <li><b>The Enclave key as a TLS server.</b> The key cannot be created in a
@@ -157,6 +159,86 @@
     <li><b>Presence and sleep.</b> What a Mac does when its owner walks away,
       which is not something a unit test has an opinion about.</li>
   </ul>
+  <h4>Before any of them: is the fleet in a state worth testing?</h4>
+  <pre><code>export DAI_BASE_URL=https://localhost:8452
+export DAI_CA_CERT="/Library/Application Support/dAI/server-ca.crt"
+export DAI_ADMIN_USER=admin DAI_ADMIN_PASSWORD=...
+
+python3 scripts/dai-split status     # ready / preparing / needs attention</code></pre>
+  <p>
+    <b>Wait for <code>ready</code>.</b> Every agent upgrade restarts both daemons
+    and the shares rebuild - about 40 s each for the 32B. A test run against a
+    <code>preparing</code> group measures the rebuild and reads as a fault.
+  </p>
+
+  <h4>A split answers</h4>
+  <pre><code>curl -sk https://localhost:8461/v1/chat/completions \
+  -H "authorization: Bearer $DAI_API_KEY" -H 'content-type: application/json' \
+  -d '{"model":"...Qwen2.5-Coder-32B-Instruct-4bit",
+       "messages":[{"role":"user","content":"In one sentence, what is a hash map?"}],
+       "max_tokens":40}'</code></pre>
+  <p>
+    The answer is the least of it. <code>dai.split</code> carries the layer
+    ranges each machine held, and those are the actual evidence: two hostnames
+    prove two machines were sent work, contiguous layer ranges prove neither held
+    the whole model. Expect <b>3-11 tokens/s</b> over Thunderbolt - a split is
+    latency-bound at one hidden state per token, and single-machine decode of
+    ~40 tokens/s is not the comparison.
+  </p>
+
+  <h4>The ordering that matters in the logs</h4>
+  <pre><code>pipeline: a peer connected from ...
+pipeline: handshake completed with ...      &lt;- must come BEFORE
+rank 0 (layers 32..&lt;64) finished N tokens</code></pre>
+  <p>
+    The listener used to hand its channel to <code>runSplit</code> when the TLS
+    handlers went in rather than when the handshake completed, so rank 0 woke
+    early and read a link still negotiating. It printed <code>rank 0 failed</code>
+    one second <i>before</i> <code>handshake completed</code>. If that inversion
+    ever reappears, this is the line that shows it.
+  </p>
+
+  <h4>Several conversations stay warm</h4>
+  <p>
+    Five requests, two conversations with no shared prefix, small
+    <code>max_tokens</code> so prefill dominates rather than decode:
+    <code>A1, A2, B1, <b>A3</b>, B2</code>. <b>A3 is the test</b> - with a
+    single-entry cache, B evicted A and returning to A paid a full prefill.
+    Measured on this fleet: cold <b>34.6 s</b>, A3 <b>0.8 s</b>.
+  </p>
+  <p>
+    Two traps. <b>A rank cannot serve two splits back to back</b> - it has to
+    re-park on the reverse channel first, and firing the next request immediately
+    returns <code>gang-short</code>, which is the scheduler being right rather
+    than a cache result; retry until the gang forms and time only the successful
+    attempt. And <b>the first request of a run may not be cold</b>, because the
+    cache survives client processes - use a genuinely unseen prompt for the cold
+    baseline.
+  </p>
+
+  <h4>How long a prompt a split will take</h4>
+  <p>
+    Prefill sends the whole prompt's hidden state as one frame:
+    <code>tokens x hidden x width</code>, which on the 32B at bfloat16 is 10,240
+    bytes per token. Against <code>TensorCodec.maxPayload</code> that is the
+    context ceiling of the <i>link</i>, and it is not the model's. It was 64 MB -
+    about 6,550 tokens - and a longer question tore the link down and reported a
+    transport fault.
+  </p>
+
+  <h4>Deploying an agent is not installing the package</h4>
+  <pre><code>POST /admin/v1/agent/builds   {"version":"X","path":"/path/to/binary"}
+PUT  /admin/v1/pools/{id}/agent {"channel":"managed","version":"X"}   # every pool</code></pre>
+  <p>
+    <code>com.dai.updater</code> reconciles the binary against what the control
+    plane names, on load and every 120 s. A plain <code>installer -pkg</code> is
+    reverted within a second - <code>updater.log</code> said
+    <code>upgrading to 0.7.0</code> one second after a 0.8.0 install. Repoint
+    <b>every</b> pool including stood-down ones, or re-enabling one drags the
+    fleet back. The path is the <b>binary</b>, extracted from the package
+    payload, and must be readable by <code>_daictl</code>.
+  </p>
+
   <div class="note">
     <b>The rule</b>
     <p>
@@ -241,7 +323,7 @@
 </section>
 
 <footer>
-  Current counts: 628 control plane, 251 agent, 15 under xcodebuild.
+  Current counts: 817 control plane, 362 agent, 15 under xcodebuild.
   See <a href="DECISIONS.html">decisions</a> for why the system is shaped this
   way and <a href="OPERATIONS.html">operations</a> for running it.
 </footer>

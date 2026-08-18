@@ -23,6 +23,7 @@ import { importModel, startImport } from '../lib/import.js'
 import { mayPauseNode, requireRole, userAuth } from '../lib/auth.js'
 import { POLICY, type PresenceState } from '../lib/policy.js'
 import type { Ca } from '../lib/ca.js'
+import { newEnrollmentToken } from '../lib/ca.js'
 import type { Broker } from '../lib/broker.js'
 
 /**
@@ -119,6 +120,98 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
       lastHeartbeat: n.last_heartbeat ? new Date(n.last_heartbeat).toISOString() : null,
       capabilityProfiles: n.capability_profiles,
     })))
+  })
+
+  /**
+   * Whether this operator may let machines into the fleet.
+   *
+   * Fleet-level rather than pool-scoped, the same check approval already makes:
+   * enrolling a node is what decides which pools it can ever join, and minting
+   * the token that lets one enrol is the same decision one step earlier.
+   */
+  async function mayAdmitMachines(userId: string): Promise<boolean> {
+    const { rows } = await db.query(
+      `SELECT 1 FROM role_bindings rb
+         JOIN group_members gm ON gm.group_id = rb.group_id
+        WHERE gm.user_id = $1 AND rb.role = 'admin' LIMIT 1`, [userId])
+    return rows.length > 0
+  }
+
+  /**
+   * Mint a join token.
+   *
+   * Starting a fleet was the one operation that was not api-first: `join_tokens`
+   * was read at enrolment and written by nothing, so the documented way to add
+   * the first machine to a new site was an INSERT typed into psql.
+   *
+   * Returned once and never again. The row keeps only what is needed to list and
+   * revoke it - a credential nobody can enumerate is a credential nobody can
+   * take away.
+   *
+   * A leaked token is a nuisance rather than a compromise: enrolment stores the
+   * CSR without signing it, and signing happens at approval, so the worst it
+   * buys is a pending row for a human to refuse.
+   */
+  r.post('/join-tokens', async (req, res) => {
+    if (!(await mayAdmitMachines(req.user!.id))) {
+      res.status(403).json({ error: 'forbidden', detail: 'admin role required' })
+      return
+    }
+    const b = req.body as { expiresInHours?: number | null; note?: string }
+    // A day by default. A token minted and forgotten is a live credential, and
+    // the default matters more than the knob because most will never set one.
+    const hours = b.expiresInHours ?? 24
+    if (!Number.isFinite(hours) || hours <= 0 || hours > 24 * 30) {
+      res.status(400).json({
+        error: 'bad_request',
+        detail: 'expiresInHours must be above zero and no more than 720 (30 days)',
+      })
+      return
+    }
+    const token = newEnrollmentToken()
+    await db.query(
+      `INSERT INTO join_tokens (token, expires_at) VALUES ($1, now() + ($2 || ' hours')::interval)`,
+      [token, String(hours)])
+    await audit(db, req.user!.id, 'join-token.mint', token.slice(0, 8),
+      { expiresInHours: hours, note: b.note ?? null })
+    res.status(201).json({ token, expiresInHours: hours })
+  })
+
+  /** Every join token, without the secret. */
+  r.get('/join-tokens', async (req, res) => {
+    if (!(await mayAdmitMachines(req.user!.id))) {
+      res.status(403).json({ error: 'forbidden', detail: 'admin role required' })
+      return
+    }
+    const { rows } = await db.query(
+      `SELECT token, expires_at, used_at FROM join_tokens ORDER BY expires_at DESC`)
+    res.json((rows as { token: string; expires_at: string; used_at: string | null }[])
+      .map((t) => ({
+        // Enough to recognise the one you just minted, and not enough to enrol
+        // with. Returning the whole token here would make a list endpoint a way
+        // of collecting credentials.
+        prefix: t.token.slice(0, 8),
+        expiresAt: t.expires_at ? new Date(t.expires_at).toISOString() : null,
+        usedAt: t.used_at ? new Date(t.used_at).toISOString() : null,
+        spent: t.used_at !== null,
+      })))
+  })
+
+  /** Revoke one, by the prefix the list shows. */
+  r.delete('/join-tokens/:prefix', async (req, res) => {
+    if (!(await mayAdmitMachines(req.user!.id))) {
+      res.status(403).json({ error: 'forbidden', detail: 'admin role required' })
+      return
+    }
+    const { prefix } = req.params as { prefix: string }
+    const { rowCount } = await db.query(
+      `DELETE FROM join_tokens WHERE left(token, 8) = $1`, [prefix.slice(0, 8)])
+    if (rowCount === 0) {
+      res.status(404).json({ error: 'not_found', detail: 'no join token with that prefix' })
+      return
+    }
+    await audit(db, req.user!.id, 'join-token.revoke', prefix.slice(0, 8), {})
+    res.status(204).end()
   })
 
   r.post('/nodes/:nodeId/approve', async (req, res) => {

@@ -50,15 +50,32 @@ export function agentRoutes(db: Db, broker: Broker, ca: Ca): Router {
       machineId?: string | null
     }
 
+    // Single use, which the schema has declared since it was written and
+    // nothing enforced: `used_at` existed and was never read or set, so a token
+    // was reusable until it expired.
+    //
+    // Spent is told apart from invalid on purpose. "This token has already been
+    // used" sends somebody to mint another; "no such token" sends them to check
+    // what they pasted, and answering the second when the first is true has them
+    // looking for a typo that is not there.
     const { rows: tok } = await db.query(
-      `SELECT token FROM join_tokens
-        WHERE token = $1 AND (expires_at IS NULL OR expires_at > now())`,
+      `SELECT token, used_at, (expires_at IS NOT NULL AND expires_at <= now()) AS expired
+         FROM join_tokens WHERE token = $1`,
       [b.joinToken],
     )
-    if (tok.length === 0) {
+    const found = tok[0] as { used_at: string | null; expired: boolean } | undefined
+    if (!found || found.expired) {
       res.status(401).json({ error: 'unauthorized', detail: 'invalid or expired join token' })
       return
     }
+    if (found.used_at !== null) {
+      res.status(401).json({
+        error: 'unauthorized',
+        detail: 'this join token has already been used; mint another',
+      })
+      return
+    }
+    await db.query(`UPDATE join_tokens SET used_at = now() WHERE token = $1`, [b.joinToken])
 
     // The CSR is stored, not signed. Signing happens at approval, so a leaked
     // join token is a nuisance rather than a fleet compromise.

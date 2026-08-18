@@ -3,7 +3,11 @@
 # Give this machine a current identity, and retire the rows it left behind.
 #
 #   sudo ./scripts/reenroll-node.sh --url https://127.0.0.1:8452 \
-#                                   --ca /path/to/srv-ca.crt
+#                                   --ca /path/to/srv-ca.crt \
+#                                   --token "$(dai-fleet token)"
+#
+# Join tokens are single use, so this needs a fresh one rather than the one
+# the machine first enrolled with. `dai-fleet token` is that one command.
 #
 # Why this exists rather than a paragraph in a runbook.
 #

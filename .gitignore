@@ -39,6 +39,11 @@ spike/e5_ane/results*/
 # Where a hand-started server writes; a running instance is a local thing.
 control-plane/control-plane.log
 control-plane/node_modules/
+# And at the root, where there is no package.json and nothing should install.
+# Running npx from the repository root rather than from control-plane/ leaves a
+# vitest cache behind in one, which then shows up as an untracked directory that
+# looks like a mistaken install.
+/node_modules/
 control-plane/dist/
 control-plane/certs/
 

@@ -159,3 +159,64 @@ struct TensorFrameTests {
         #expect(try decoder.push(TensorCodec.encode(original)) == [original])
     }
 }
+
+/// How long a prompt this link will carry.
+///
+/// The cap was 64 MB and its comment called that "far above any real hidden
+/// state". Prefill sends the whole prompt's hidden state as one frame, so on the
+/// 32B - hidden 5120, bfloat16 - it is 10,240 bytes per token, and 64 MB was a
+/// limit of about 6,550 tokens: a fifth of that model's context, and squarely
+/// inside the long-document work a split exists for.
+///
+/// A ~10,800 token question produced a 121 MB frame, was refused by the decoder,
+/// and surfaced as a torn-down link and a gang reporting a transport fault. A
+/// context limit nobody had chosen, arriving as a broken pipeline.
+@Suite("what length of prompt a split link accepts")
+struct HiddenStateCeilingTests {
+    /// The 32B this fleet runs: hidden 5120 at bfloat16.
+    static let bytesPerToken = 5120 * 2
+
+    @Test("carries a full context window of the model this fleet runs")
+    func coversFullContext() {
+        // 32,768 tokens is the 32B's context. A transport that cannot carry what
+        // the model can read is a limit on the product, not on the wire.
+        let fullContext = 32_768 * Self.bytesPerToken
+        #expect(TensorCodec.maxPayload >= fullContext,
+                "a split cannot serve prompts the model itself would accept")
+    }
+
+    @Test("the prompt that broke it now fits")
+    func theRealFailure() {
+        // 121,026,560 bytes, measured on this fleet.
+        #expect(121_026_560 <= TensorCodec.maxPayload)
+    }
+
+    @Test("still refuses a length no hidden state could have")
+    func stillBounded() {
+        // The cap is not decoration: it is what stops a corrupt or hostile
+        // length making this process allocate whatever number it read.
+        //
+        // Built by encoding a real frame and overwriting its length, rather than
+        // by hand-assembling a header - the first attempt guessed the offsets
+        // wrong, and a test that fails to reach the check it is testing passes
+        // for the wrong reason.
+        let real = TensorFrame(shape: [4], dtype: .bfloat16,
+                               bytes: Data(repeating: 0, count: 8))
+        var wire = TensorCodec.encode(real)
+        let lengthAt = wire.count - 8 - 4     // header ends with shape then length
+        wire.replaceSubrange(lengthAt ..< lengthAt + 4,
+                             with: [0xff, 0xff, 0xff, 0x7f])   // ~2 GB
+
+        var decoder = TensorFrameDecoder()
+        #expect(throws: (any Error).self) { _ = try decoder.push(wire) }
+    }
+
+    @Test("says how long a prompt it will take, not how many bytes it refused")
+    func errorIsActionable() {
+        // "payload of 121026560 bytes is out of range" is a prompt length
+        // wearing a disguise, and it sent somebody looking at the network.
+        let said = String(describing: TensorCodec.Failure.implausiblePayload(999_999_999))
+        #expect(said.contains("tokens"), "the reader's question is how long a prompt")
+        #expect(said.contains("limit"))
+    }
+}

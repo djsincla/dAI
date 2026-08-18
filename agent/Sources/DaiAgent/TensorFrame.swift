@@ -83,10 +83,35 @@ public enum TensorCodec {
     /// Refuses anything implausible rather than trusting a length off the wire.
     ///
     /// A corrupt or hostile header would otherwise have the receiver allocate
-    /// whatever number it read. These bounds are far above any real hidden state
-    /// and far below anything that would hurt.
+    /// whatever number it read.
     public static let maxRank = 8
-    public static let maxPayload = 64 * 1024 * 1024
+
+    /// The largest hidden state this link will carry, in bytes.
+    ///
+    /// This was 64 MB, described as "far above any real hidden state". That
+    /// stopped being true the first time somebody asked a split a long question:
+    /// prefill sends the whole prompt's hidden state as one frame, so the size
+    /// is `tokens x hidden x width`, and on the 32B - hidden 5120, bfloat16 -
+    /// that is **10,240 bytes per token**. 64 MB is therefore a limit of about
+    /// 6,550 tokens, which is a fifth of that model's context window and well
+    /// inside the long-document work a split exists to do.
+    ///
+    /// Nothing said so. The refusal arrived as "payload of 121026560 bytes is
+    /// out of range" from the frame decoder, the link was torn down, and the
+    /// gang reported a transport fault - so a context limit nobody had chosen
+    /// read as a broken pipeline.
+    ///
+    /// Derived rather than picked: 32,768 tokens - the 32B's full context - at
+    /// 10,240 bytes each is 335 MB, and 512 MB clears that with room for a wider
+    /// hidden dimension. It remains a bound on what a corrupt length can make
+    /// this process allocate, which is what it is for.
+    ///
+    /// The honest limit of this approach is that one frame must be held whole at
+    /// both ends. Chunking prefill across several frames would remove the
+    /// ceiling rather than move it, at the cost of a wire-format version and
+    /// reassembly on the receiver; worth doing if a model ever needs more than
+    /// this, and not worth doing before that.
+    public static let maxPayload = 512 * 1024 * 1024
 
     public enum Failure: Error, Equatable, CustomStringConvertible {
         case badMagic
@@ -102,7 +127,15 @@ public enum TensorCodec {
             case let .unsupportedVersion(v): return "tensor frame version \(v) is not supported"
             case let .unknownDType(d): return "unknown element type \(d)"
             case let .implausibleRank(r): return "rank \(r) is out of range"
-            case let .implausiblePayload(n): return "payload of \(n) bytes is out of range"
+            // Said in the terms somebody can act on. A hidden state is one
+            // slice per token, so "121026560 bytes" is a prompt length wearing a
+            // disguise - and the reader's next question is always how long a
+            // prompt this link will take.
+            case let .implausiblePayload(n):
+                return "a hidden state of \(n / (1024 * 1024)) MB is beyond this link's "
+                    + "\(TensorCodec.maxPayload / (1024 * 1024)) MB limit. On a 5120-wide "
+                    + "model at bfloat16 that is roughly "
+                    + "\(TensorCodec.maxPayload / 10_240) tokens of prompt"
             case let .inconsistent(expected, got):
                 return "shape needs \(expected) bytes, frame carries \(got)"
             }

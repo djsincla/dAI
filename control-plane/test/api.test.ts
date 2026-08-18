@@ -1380,3 +1380,91 @@ describe('readiness knows what the machines were told to hold', () => {
     expect(JSON.stringify(body)).toContain('not been told')
   })
 })
+
+/**
+ * Letting a machine in.
+ *
+ * Starting a fleet was the one operation that was not api-first: `join_tokens`
+ * was read at enrolment and written by nothing, so the documented way to add the
+ * first machine to a new site was an INSERT typed into psql.
+ */
+describe('join tokens', () => {
+  // Minting one is a fleet-level admin decision, the same check approval makes:
+  // letting a machine in is what decides which pools it can ever join.
+  beforeEach(async () => {
+    const g = await db.query(`INSERT INTO groups (name) VALUES ('admins') RETURNING id`)
+    await db.query(`INSERT INTO group_members VALUES ($1,$2)`, [g.rows[0].id, fx.operatorId])
+    await db.query(`INSERT INTO role_bindings VALUES ($1,$2,'admin')`, [g.rows[0].id, fx.poolId])
+  })
+
+  const mint = (body: object = {}) =>
+    fetch(`${base}/admin/v1/join-tokens`, {
+      method: 'POST', headers: asUser(fx.operatorToken),
+      body: JSON.stringify(body),
+    })
+
+  const enrol = (token: string, hostname = 'newcomer') =>
+    fetch(`${base}/agent/v1/enroll`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        joinToken: token, hostname, chip: 'Apple M4', memoryGb: 24,
+        metalWorkingSetGb: 18, osVersion: '26.0', csrPem: '-----BEGIN CERTIFICATE REQUEST-----',
+      }),
+    })
+
+  it('mints a token that a machine can enrol with', async () => {
+    const r = await mint()
+    expect(r.status).toBe(201)
+    const { token } = await r.json() as any
+    expect(typeof token).toBe('string')
+    expect((await enrol(token)).status).toBe(202)
+  })
+
+  it('is single use, and says so distinguishably', async () => {
+    // `used_at` has been in the schema since it was written and nothing read or
+    // set it, so a token was reusable until it expired. "Already used" and
+    // "no such token" send somebody to different places: one to mint another,
+    // one to check what they pasted.
+    const { token } = await (await mint()).json() as any
+    expect((await enrol(token, 'first')).status).toBe(202)
+
+    const second = await enrol(token, 'second')
+    expect(second.status).toBe(401)
+    expect((await second.json() as any).detail).toContain('already been used')
+  })
+
+  it('refuses one that has expired, and reads as invalid rather than spent', async () => {
+    const { token } = await (await mint()).json() as any
+    await db.query(`UPDATE join_tokens SET expires_at = now() - interval '1 hour'
+                     WHERE token = $1`, [token])
+    const r = await enrol(token)
+    expect(r.status).toBe(401)
+    expect((await r.json() as any).detail).toContain('expired')
+  })
+
+  it('never returns a usable token from the list', async () => {
+    // The assertion that matters: not that a field is named differently, but
+    // that the secret is absent from the body entirely.
+    const { token } = await (await mint()).json() as any
+    const listed = await fetch(`${base}/admin/v1/join-tokens`,
+      { headers: asUser(fx.operatorToken) })
+    const body = await listed.text()
+    expect(listed.status).toBe(200)
+    expect(body).not.toContain(token)
+    expect(body).toContain(token.slice(0, 8))
+  })
+
+  it('revoking one stops it working', async () => {
+    const { token } = await (await mint()).json() as any
+    const gone = await fetch(`${base}/admin/v1/join-tokens/${token.slice(0, 8)}`,
+      { method: 'DELETE', headers: asUser(fx.operatorToken) })
+    expect(gone.status).toBe(204)
+    expect((await enrol(token)).status).toBe(401)
+  })
+
+  it('refuses an expiry nobody meant', async () => {
+    expect((await mint({ expiresInHours: 0 })).status).toBe(400)
+    expect((await mint({ expiresInHours: -5 })).status).toBe(400)
+    expect((await mint({ expiresInHours: 10_000 })).status).toBe(400)
+  })
+})

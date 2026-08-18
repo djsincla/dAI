@@ -236,12 +236,23 @@ describe('enrollment and issuance over HTTP', () => {
     // entries for one machine and counts its capacity twice - which is exactly
     // what a fleet view must not do.
     const machineId = 'AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE'
+    // A token per enrolment, because they are single use now.
+    //
+    // This test used to re-enrol with the same one, which is what re-enrolment
+    // did in practice - `reenroll-node.sh --token` takes a token and reuses it.
+    // Enforcing what the schema had declared since it was written changed that,
+    // and the answer is that tooling mints rather than operators hoarding: it is
+    // one command, and a credential good for one machine forever was the thing
+    // worth fixing.
+    let minted = 0
     const enrollSame = async () => {
+      const token = `jt-reenrol-${minted++}`
+      await db.query(`INSERT INTO join_tokens (token) VALUES ($1)`, [token])
       const { csr, dir } = makeCsr('same-machine', 'ec')
       const r = await fetch(`${base}/agent/v1/enroll`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          joinToken: 'jt-test', hostname: 'rotorua', chip: 'Apple M4 Pro',
+          joinToken: token, hostname: 'rotorua', chip: 'Apple M4 Pro',
           memoryGb: 48, metalWorkingSetGb: 38, osVersion: '15.0',
           csrPem: csr, machineId,
         }),

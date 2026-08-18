@@ -1,0 +1,317 @@
+#!/usr/bin/env python3
+"""Let machines into a fleet, and keep them on the build you meant.
+
+    dai-fleet token [--hours N]        mint a join token
+    dai-fleet pending                  machines waiting to be let in
+    dai-fleet approve <hostname|id>    let one in
+    dai-fleet versions                 what each machine runs, against what it should
+    dai-fleet release <version> --binary <path>
+
+Every one of these was a curl call or an INSERT typed into psql, reconstructed
+from a runbook each time. Two of them had no interface at all.
+
+There is deliberately no `enrol` command. Enrolment happens in the daemon on the
+machine itself, because generating a Secure Enclave key needs a session whose
+keybag is unlocked and an SSH session does not have one. A CLI cannot do it and
+should not pretend to.
+
+**Credentials.** The same environment `dai-split` uses:
+
+    export DAI_BASE_URL=https://your-control-plane:8452
+    export DAI_CA_CERT=/path/to/srv-ca.crt      # the installer prints this
+    export DAI_ADMIN_USER=admin
+    export DAI_ADMIN_PASSWORD=...
+
+Standard library only, so this can be copied to any machine that can reach the
+control plane without installing anything.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import ssl
+import sys
+import time
+import urllib.error
+import urllib.request
+
+DEFAULT_BASE_URL = "https://localhost:8452"
+DEFAULT_CA_PATHS = [
+    "/var/db/dai-control/certs/srv-ca.crt",
+    os.path.expanduser("~/.dai/srv-ca.crt"),
+    "/Library/Application Support/dAI/server-ca.crt",
+]
+
+
+class Failed(RuntimeError):
+    """Something the operator has to read, rather than a stack trace."""
+
+
+class Admin:
+    def __init__(self) -> None:
+        self.base = (os.environ.get("DAI_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
+        ca = os.environ.get("DAI_CA_CERT") or next(
+            (p for p in DEFAULT_CA_PATHS if os.path.exists(p)), None)
+        if os.environ.get("DAI_INSECURE") == "1":
+            self._ssl = ssl._create_unverified_context()
+        else:
+            # cafile=None would fall back to the system roots, which cannot
+            # verify a certificate the control plane signed itself - and the
+            # failure would arrive much later as a TLS error saying nothing
+            # about the missing file.
+            if not ca:
+                raise Failed(
+                    "no CA certificate found.\n"
+                    "  Set DAI_CA_CERT to the control plane's srv-ca.crt - the\n"
+                    "  installer prints its path when it finishes.")
+            self._ssl = ssl.create_default_context(cafile=ca)
+        self._token: str | None = None
+
+    def _request(self, method: str, path: str, body=None, auth=True):
+        data = json.dumps(body).encode() if body is not None else None
+        headers = {"accept": "application/json"}
+        if data is not None:
+            headers["content-type"] = "application/json"
+        if auth:
+            headers["authorization"] = f"Bearer {self.token()}"
+        req = urllib.request.Request(f"{self.base}{path}", data=data,
+                                     headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=60, context=self._ssl) as r:
+                raw = r.read()
+                return r.status, (json.loads(raw) if raw else None)
+        except urllib.error.HTTPError as e:
+            raw = e.read()
+            try:
+                return e.code, json.loads(raw)
+            except json.JSONDecodeError:
+                return e.code, raw.decode(errors="replace")
+        except urllib.error.URLError as e:
+            raise Failed(f"cannot reach {self.base}: {e.reason}") from e
+
+    def token(self) -> str:
+        if self._token:
+            return self._token
+        user = os.environ.get("DAI_ADMIN_USER")
+        password = os.environ.get("DAI_ADMIN_PASSWORD")
+        if not user or not password:
+            raise Failed(
+                "admin operations need an operator account.\n"
+                "  export DAI_ADMIN_USER=... DAI_ADMIN_PASSWORD=...")
+        status, body = self._request(
+            "POST", "/admin/v1/auth/login", auth=False,
+            body={"username": user, "password": password})
+        if status != 200 or not isinstance(body, dict) or not body.get("token"):
+            raise Failed(f"could not sign in as {user}: {detail(body)}")
+        self._token = body["token"]
+        return self._token
+
+    def get(self, path):
+        status, body = self._request("GET", path)
+        if status != 200:
+            raise Failed(f"GET {path}: {detail(body)}")
+        return body
+
+    def put(self, path, body):
+        return self._request("PUT", path, body)
+
+    def post(self, path, body=None):
+        return self._request("POST", path, body if body is not None else {})
+
+    def delete(self, path):
+        return self._request("DELETE", path)
+
+
+def detail(body) -> str:
+    if isinstance(body, dict):
+        return str(body.get("detail") or body.get("error") or body)
+    return str(body)
+
+
+
+# ------------------------------------------------------------------ commands
+
+def cmd_token(admin: Admin, args) -> int:
+    """Mint a join token.
+
+    Shown once. The control plane keeps a prefix so it can be listed and
+    revoked, and nothing that would let anybody enrol with it.
+    """
+    status, body = admin.post("/admin/v1/join-tokens", {"expiresInHours": args.hours})
+    if status == 404:
+        raise Failed(
+            "this control plane has no join-token route, so it predates this tool.\n"
+            "  Upgrade it, or insert one by hand:\n"
+            "    INSERT INTO join_tokens (token, expires_at)\n"
+            "    VALUES ('...', now() + interval '24 hours')")
+    if status != 201:
+        raise Failed(f"could not mint a join token: {detail(body)}")
+
+    print(body["token"])
+    print()
+    print(f"Good for {args.hours} hours, and for one machine. Put it in that")
+    print("machine's /Library/Application Support/dAI/config.json as joinToken,")
+    print("with the control plane URL and srv-ca.crt beside it.")
+    return 0
+
+
+def cmd_tokens(admin: Admin, args) -> int:
+    status, rows = admin._request("GET", "/admin/v1/join-tokens")
+    if status == 404:
+        raise Failed(
+            "this control plane has no join-token route, so it predates this tool.\n"
+            "  Upgrade it, or read them with psql:\n"
+            "    select left(token,8), expires_at, used_at from join_tokens;")
+    if status != 200:
+        raise Failed(f"could not list join tokens: {detail(rows)}")
+    if not rows:
+        print("no join tokens")
+        return 0
+    for t in rows:
+        state = "spent" if t["spent"] else "unused"
+        print(f"  {t['prefix']}...  {state:<7} expires {t.get('expiresAt') or 'never'}")
+    return 0
+
+
+def cmd_revoke(admin: Admin, args) -> int:
+    status, body = admin.delete(f"/admin/v1/join-tokens/{args.prefix[:8]}")
+    if status == 404:
+        raise Failed(f"no join token starting {args.prefix[:8]}")
+    if status != 204:
+        raise Failed(f"could not revoke it: {detail(body)}")
+    print(f"{args.prefix[:8]} revoked")
+    return 0
+
+
+def cmd_pending(admin: Admin, args) -> int:
+    """Machines that have enrolled and are waiting for a human.
+
+    The guide told operators to find these with psql. The API has listed them
+    all along - `state <> 'superseded'` - which was stale prose rather than a
+    missing route.
+    """
+    waiting = [n for n in admin.get("/admin/v1/nodes") if n.get("state") == "pending"]
+    if not waiting:
+        print("nothing waiting to be let in")
+        return 0
+    for n in waiting:
+        print(f"  {n['hostname']:<14} {n.get('chip') or '':<16} {n['id']}")
+    print()
+    print("dai-fleet approve <hostname>   to let one in")
+    return 0
+
+
+def cmd_approve(admin: Admin, args) -> int:
+    nodes = admin.get("/admin/v1/nodes")
+    match = [n for n in nodes
+             if n["id"] == args.machine or n["hostname"] == args.machine]
+    if not match:
+        raise Failed(f"no machine called {args.machine}.\n"
+                     "  dai-fleet pending   to see what is waiting")
+    node = match[0]
+    if node.get("state") != "pending":
+        raise Failed(f"{node['hostname']} is {node.get('state')}, not pending; "
+                     "approval mints an identity and only a pending machine has none")
+
+    status, body = admin.post(f"/admin/v1/nodes/{node['id']}/approve", {})
+    if status not in (200, 201, 204):
+        raise Failed(f"could not approve {node['hostname']}: {detail(body)}")
+    print(f"{node['hostname']} is in.")
+    print()
+    print("It still needs weights before it can serve anything - about 18 GB for")
+    print("a 32B - so it will report healthy and do nothing for a while. That is")
+    print("the model sync working, not a fault.")
+    return 0
+
+
+def cmd_versions(admin: Admin, args) -> int:
+    for r in admin.get("/admin/v1/agent/rollout"):
+        mark = "ok" if r.get("upToDate") else "->"
+        print(f"  {mark} {r['hostname']:<14} running {r['running']:<9} "
+              f"wants {r.get('desired') or '(nobody has said)'}")
+    return 0
+
+
+def cmd_release(admin: Admin, args) -> int:
+    """Register a build and point every pool at it.
+
+    The step that is easy to miss and expensive to miss. `com.dai.updater`
+    reconciles the binary against what the control plane names, on load and every
+    120 s, so installing the package alone is reverted within a second - an
+    upgrade that looks like it worked and did not.
+
+    Every pool, including stood-down ones: a disabled group still naming an old
+    version drags the fleet back the moment somebody re-enables it.
+    """
+    status, body = admin.post("/admin/v1/agent/builds",
+                              {"version": args.version, "path": args.binary,
+                               "notes": args.notes or ""})
+    if status == 409:
+        print(f"  {args.version} was already registered; repointing anyway")
+    elif status != 201:
+        raise Failed(f"could not register {args.version}: {detail(body)}\n"
+                     "  The path is the agent *binary*, not the .pkg, and has to be\n"
+                     "  readable by the control plane's service account.")
+    else:
+        print(f"  registered {args.version}  sha256 {body['sha256'][:12]}...")
+
+    for pool in admin.get("/admin/v1/pools"):
+        status, body = admin.put(f"/admin/v1/pools/{pool['id']}/agent",
+                                 {"channel": "managed", "version": args.version})
+        if status != 204:
+            raise Failed(f"could not point {pool['name']} at {args.version}: {detail(body)}")
+        standing = "" if pool.get("enabled") else "  (stood down, pointed anyway)"
+        print(f"  {pool['name']} -> {args.version}{standing}")
+
+    print()
+    print("The updaters poll every 120s, so silence for two minutes is normal.")
+    print("dai-fleet versions   to watch them arrive.")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("token", help="mint a join token")
+    p.add_argument("--hours", type=float, default=24,
+                   help="how long it stays usable (default 24)")
+
+    sub.add_parser("tokens", help="join tokens that exist, without the secret")
+
+    p = sub.add_parser("revoke", help="revoke a join token by its prefix")
+    p.add_argument("prefix")
+
+    sub.add_parser("pending", help="machines waiting to be let in")
+
+    p = sub.add_parser("approve", help="let a machine in")
+    p.add_argument("machine", help="hostname or id")
+
+    sub.add_parser("versions", help="what each machine runs, against what it should")
+
+    p = sub.add_parser("release", help="register a build and point every pool at it")
+    p.add_argument("version")
+    p.add_argument("--binary", required=True,
+                   help="path to the agent binary, readable by the control plane")
+    p.add_argument("--notes", default="")
+
+    args = parser.parse_args()
+    try:
+        admin = Admin()
+        return {
+            "token": cmd_token, "tokens": cmd_tokens, "revoke": cmd_revoke,
+            "pending": cmd_pending, "approve": cmd_approve,
+            "versions": cmd_versions, "release": cmd_release,
+        }[args.command](admin, args)
+    except Failed as e:
+        print(f"\n{e}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

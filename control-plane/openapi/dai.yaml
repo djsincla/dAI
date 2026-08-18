@@ -1910,6 +1910,101 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /admin/v1/join-tokens:
+    post:
+      tags: [admin]
+      summary: Mint a join token
+      description: >
+        The credential a machine enrols with. Returned once and never again: the
+        row keeps only enough to list and revoke it.
+
+
+        Single use and time limited. A leaked token is a nuisance rather than a
+        compromise - enrolment stores the CSR without signing it, and signing
+        happens at approval - but it is still a way in, so it expires.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                expiresInHours:
+                  type: number
+                  minimum: 0
+                  maximum: 720
+                  default: 24
+                note: { type: string }
+      responses:
+        '201':
+          description: The token, shown once
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+                  expiresInHours: { type: number }
+        '400':
+          description: Not a usable expiry
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: Admin role required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    get:
+      tags: [admin]
+      summary: Every join token, without the secret
+      description: >
+        A prefix rather than the token. A credential nobody can enumerate is one
+        nobody can revoke, and a list endpoint that returned whole tokens would
+        be a way of collecting them.
+      responses:
+        '200':
+          description: What exists, and whether it has been spent
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    prefix: { type: string }
+                    expiresAt: { type: string, nullable: true }
+                    usedAt: { type: string, nullable: true }
+                    spent: { type: boolean }
+        '403':
+          description: Admin role required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /admin/v1/join-tokens/{prefix}:
+    parameters:
+      - name: prefix
+        in: path
+        required: true
+        schema: { type: string }
+    delete:
+      tags: [admin]
+      summary: Revoke a join token
+      responses:
+        '204':
+          description: Gone
+        '403':
+          description: Admin role required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: No token with that prefix
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
   /admin/v1/pools/{poolId}/prompt-cache:
     parameters:
       - name: poolId

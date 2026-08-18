@@ -549,3 +549,92 @@ struct CredentialSummaryFixtureTests {
         #expect(PipelineChannel.fingerprint(pem: CredentialSummaryTests.certA) != "unreadable")
     }
 }
+
+/// The listener must not hand out a link before the two machines have agreed.
+///
+/// `accepted` used to be fulfilled in the child channel initializer - when the
+/// handlers went into the pipeline, which is several round trips before TLS has
+/// finished. Whoever was waiting on it woke immediately and touched a transport
+/// still negotiating.
+///
+/// On this fleet that read as rank 0 failing with "the other machine closed the
+/// link" one second before its own log recorded the handshake completing, on a
+/// channel nobody was holding by then. Being a race it was intermittent, so it
+/// looked in turn like a certificate problem, a replaced CA, a stale credential,
+/// a hostname, a firewall and a network - seven hypotheses, all wrong, none
+/// cheap. What made it permanent rather than occasional was warm shares: with
+/// the model already built, rank 0 reaches the link with nothing to slow it down
+/// and loses the race every time.
+///
+/// **What these two tests do not do is catch that race.** Both pass against the
+/// code that had the bug - checked by putting it back, rather than assumed -
+/// because either version ends in the same error once the deadline fires, and
+/// the difference is only *when* the caller was released. Left here anyway, and
+/// labelled: they hold the deadline path and the happy path, which is worth
+/// having and is not the same as proving the fix.
+///
+/// The evidence for the fix is the fleet's own ordering - `rank 0 failed`
+/// printed one second before `handshake completed` - and a split that works
+/// after it. A test that claimed more than that would be the third vacuous one
+/// written today.
+@Suite(.serialized)
+struct HandshakeBeforeHandoverTests {
+    @Test("a peer that connects but never negotiates ends in an error, not a hang")
+    func rawTCPIsNotALink() async throws {
+        let helper = PipelineChannelSocketTests()
+        let fx = try helper.fixture()
+        defer { try? FileManager.default.removeItem(at: fx.dir) }
+
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
+        // Two seconds rather than the default ten: this test waits it out on
+        // purpose, and a test that takes ten seconds to prove one thing is a
+        // test somebody eventually stops running.
+        let later = PipelineChannel(group: group, handshakeDeadline: .seconds(2))
+        let port = try await later.listen(port: 0, tls: fx.serverContext, timeout: 20)
+
+        // Plain TCP. The connection is accepted and the handlers are installed,
+        // which is exactly the moment the listener used to consider its work
+        // done - and no TLS record ever arrives.
+        let raw = try await ClientBootstrap(group: group)
+            .connect(host: "127.0.0.1", port: port).get()
+
+        // Before the fix this returned a frame's worth of nothing or failed
+        // immediately with peerClosed, because the caller had been given a
+        // channel that was still negotiating. It must now wait for the
+        // handshake, not get one, and say so.
+        await #expect(throws: (any Error).self) {
+            _ = try await later.receive()
+        }
+
+        try? await raw.close()
+        await later.close()
+        try? await group.shutdownGracefully()
+    }
+
+    @Test("a genuine peer is handed over, and only after the handshake")
+    func realPeerStillWorks() async throws {
+        // The other half of the same claim: waiting for the handshake must not
+        // break the case that already worked, or the fix trades a race for a
+        // fleet that cannot split at all.
+        let helper = PipelineChannelSocketTests()
+        let fx = try helper.fixture()
+        defer { try? FileManager.default.removeItem(at: fx.dir) }
+
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
+        let later = PipelineChannel(group: group)
+        let earlier = PipelineChannel(group: group)
+
+        let port = try await later.listen(port: 0, tls: fx.serverContext)
+        try await earlier.connect(host: "127.0.0.1", port: port,
+                                  tls: fx.clientContext, serverName: "localhost")
+
+        let sent = TensorFrame(shape: [1, 1, 64], dtype: .bfloat16,
+                               bytes: Data(repeating: 0x5A, count: 128))
+        try await earlier.send(sent)
+        #expect(try await later.receive() == sent)
+
+        await earlier.close()
+        await later.close()
+        try? await group.shutdownGracefully()
+    }
+}

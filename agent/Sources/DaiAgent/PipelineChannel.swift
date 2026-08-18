@@ -125,12 +125,29 @@ public actor PipelineChannel {
                     log("pipeline: a peer connected from "
                         + "\(ch.remoteAddress.map(String.init(describing:)) ?? "an unknown address")")
                     let ssl = try NIOSSLServerHandler(context: tls)
+                    // Handed over when the handshake completes, not when the
+                    // handlers are installed.
+                    //
+                    // This promise is what `runSplit` waits on before it touches
+                    // the link, and installing a handler is several round trips
+                    // short of two machines having agreed to talk. Rank 0 woke
+                    // early, read a transport still negotiating, and reported
+                    // that the other machine had closed - while the handshake it
+                    // had not waited for completed a moment later, on a channel
+                    // nobody was holding any more.
+                    //
+                    // It was a race, so it was intermittent, so it read as
+                    // everything else: certificates, a CA, a network, a
+                    // firewall, a renewal. What made it permanent was warm
+                    // shares - with the model already built, rank 0 reaches the
+                    // link immediately and loses every time.
                     return ch.pipeline.addHandler(ssl).flatMap {
-                        ch.pipeline.addHandler(HandshakeWatcher(log: log, deadline: deadline))
+                        ch.pipeline.addHandler(HandshakeWatcher(
+                            log: log, deadline: deadline,
+                            onReady: { accepted.succeed($0) },
+                            onFailed: { accepted.fail($0) }))
                     }.flatMap {
                         ch.pipeline.addHandler(FrameHandler(inbox: inbox))
-                    }.map {
-                        accepted.succeed(ch)
                     }
                 } catch {
                     return ch.eventLoop.makeFailedFuture(error)
@@ -523,15 +540,27 @@ final class HandshakeWatcher: ChannelInboundHandler, @unchecked Sendable {
     private let deadline: TimeAmount
     private var timeout: Scheduled<Void>?
     private var completed = false
+    /// Told when the link becomes real, and when it turns out it will not.
+    ///
+    /// The listener used to hand its channel to the caller as soon as the
+    /// handlers were installed, which is several round trips before the two
+    /// machines have agreed to talk. Whoever was waiting then touched a
+    /// transport that was still negotiating.
+    private let onReady: (@Sendable (Channel) -> Void)?
+    private let onFailed: (@Sendable (Error) -> Void)?
 
     /// Ten seconds, which is generous for two machines on a cable and short
     /// enough to be worth reading. The link this runs over is measured in
     /// fractions of a millisecond; a handshake still unfinished after ten
     /// seconds is not slow, it is not happening.
     init(log: @escaping @Sendable (String) -> Void,
-         deadline: TimeAmount = .seconds(10)) {
+         deadline: TimeAmount = .seconds(10),
+         onReady: (@Sendable (Channel) -> Void)? = nil,
+         onFailed: (@Sendable (Error) -> Void)? = nil) {
         self.log = log
         self.deadline = deadline
+        self.onReady = onReady
+        self.onFailed = onFailed
     }
 
     /// A link that goes quiet mid-handshake has to end, not wait.
@@ -550,6 +579,7 @@ final class HandshakeWatcher: ChannelInboundHandler, @unchecked Sendable {
             let peer = channel.remoteAddress.map(String.init(describing:)) ?? "the peer"
             log("pipeline: no handshake with \(peer) after \(self.deadline.nanoseconds / 1_000_000_000)s;"
                 + " giving up on the link")
+            self.onFailed?(PipelineChannel.Failure.handshakeTimedOut)
             channel.pipeline.fireErrorCaught(PipelineChannel.Failure.handshakeTimedOut)
             channel.close(promise: nil)
         }
@@ -567,6 +597,11 @@ final class HandshakeWatcher: ChannelInboundHandler, @unchecked Sendable {
             timeout = nil
             log("pipeline: handshake completed with "
                 + "\(context.channel.remoteAddress.map(String.init(describing:)) ?? "the peer")")
+            // Only now is the channel worth giving to anybody. Handing it over
+            // when the handlers went in - which is what the listener used to do
+            // - is several round trips too early, and the caller's first read
+            // raced the negotiation.
+            onReady?(context.channel)
         }
         context.fireUserInboundEventTriggered(event)
     }
@@ -577,6 +612,10 @@ final class HandshakeWatcher: ChannelInboundHandler, @unchecked Sendable {
         // is not one the other will accept, and every other explanation for a
         // link that never carries a byte is rarer than that.
         log("pipeline: link failed: \(error)")
+        // Before the handshake there is nobody holding this channel yet, so the
+        // error has to reach whoever is waiting for one - otherwise they wait
+        // out the whole accept timeout for a link that has already been refused.
+        if !completed { onFailed?(error) }
         context.fireErrorCaught(error)
     }
 

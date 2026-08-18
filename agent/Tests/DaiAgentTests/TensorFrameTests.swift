@@ -162,61 +162,101 @@ struct TensorFrameTests {
 
 /// How long a prompt this link will carry.
 ///
-/// The cap was 64 MB and its comment called that "far above any real hidden
-/// state". Prefill sends the whole prompt's hidden state as one frame, so on the
-/// 32B - hidden 5120, bfloat16 - it is 10,240 bytes per token, and 64 MB was a
-/// limit of about 6,550 tokens: a fifth of that model's context, and squarely
-/// inside the long-document work a split exists for.
+/// Version 1 sent each tensor as one frame, so the frame cap was a context cap:
+/// prefill carries the whole prompt's hidden state, 10,240 bytes per token on
+/// the 32B, and 64 MB was about 6,550 tokens - a fifth of that model's context.
+/// A longer question produced a 121 MB frame, the decoder refused it, the link
+/// was torn down, and the gang reported a transport fault.
 ///
-/// A ~10,800 token question produced a 121 MB frame, was refused by the decoder,
-/// and surfaced as a torn-down link and a gang reporting a transport fault. A
-/// context limit nobody had chosen, arriving as a broken pipeline.
-@Suite("what length of prompt a split link accepts")
-struct HiddenStateCeilingTests {
-    /// The 32B this fleet runs: hidden 5120 at bfloat16.
-    static let bytesPerToken = 5120 * 2
+/// Chunking removes the ceiling rather than moving it. Each frame stays small,
+/// which is what bounds a single allocation from a length off the wire, and the
+/// tensor is reassembled up to a separate and much larger bound.
+@Suite("a hidden state larger than one frame")
+struct HiddenStateChunkingTests {
+    static let bytesPerToken = 5120 * 2      // hidden 5120, bfloat16
 
-    @Test("carries a full context window of the model this fleet runs")
+    @Test("a tensor several chunks long survives the round trip")
+    func multiChunkRoundTrip() throws {
+        // The capability itself. Three chunks and a remainder, with a byte
+        // pattern that would expose chunks reassembled in the wrong order.
+        let elements = (TensorCodec.chunkBytes * 3 + 1234) / 2
+        var bytes = Data(count: elements * 2)
+        for i in stride(from: 0, to: bytes.count, by: 997) { bytes[i] = UInt8(i % 251) }
+        let original = TensorFrame(shape: [1, elements], dtype: .bfloat16, bytes: bytes)
+
+        var decoder = TensorFrameDecoder()
+        let frames = try decoder.push(TensorCodec.encode(original))
+        #expect(frames.count == 1, "several chunks are one tensor, not several")
+        #expect(frames.first == original)
+    }
+
+    @Test("the frame that broke the fleet now goes through")
+    func theRealFailure() throws {
+        // 121,026,560 bytes, measured on this fleet - about 11,800 tokens.
+        let elements = 121_026_560 / 2
+        let original = TensorFrame(shape: [1, elements], dtype: .bfloat16,
+                                   bytes: Data(count: elements * 2))
+        var decoder = TensorFrameDecoder()
+        let frames = try decoder.push(TensorCodec.encode(original))
+        #expect(frames.count == 1)
+        #expect(frames.first?.bytes.count == 121_026_560)
+    }
+
+    @Test("reassembly reaches past any context window this fleet runs")
     func coversFullContext() {
         // 32,768 tokens is the 32B's context. A transport that cannot carry what
-        // the model can read is a limit on the product, not on the wire.
-        let fullContext = 32_768 * Self.bytesPerToken
-        #expect(TensorCodec.maxPayload >= fullContext,
-                "a split cannot serve prompts the model itself would accept")
+        // the model can read is a limit on the product rather than on the wire.
+        #expect(TensorCodec.maxTensorBytes >= 32_768 * Self.bytesPerToken)
     }
 
-    @Test("the prompt that broke it now fits")
-    func theRealFailure() {
-        // 121,026,560 bytes, measured on this fleet.
-        #expect(121_026_560 <= TensorCodec.maxPayload)
+    @Test("a single frame is still small, which is what bounds an allocation")
+    func framesStaySmall() {
+        // The point of chunking: the number protecting the receiver is no longer
+        // also the number limiting the prompt.
+        #expect(TensorCodec.maxPayload <= 16 * 1024 * 1024)
+        #expect(TensorCodec.chunkBytes <= TensorCodec.maxPayload)
     }
 
-    @Test("still refuses a length no hidden state could have")
-    func stillBounded() {
-        // The cap is not decoration: it is what stops a corrupt or hostile
-        // length making this process allocate whatever number it read.
-        //
-        // Built by encoding a real frame and overwriting its length, rather than
-        // by hand-assembling a header - the first attempt guessed the offsets
-        // wrong, and a test that fails to reach the check it is testing passes
-        // for the wrong reason.
-        let real = TensorFrame(shape: [4], dtype: .bfloat16,
-                               bytes: Data(repeating: 0, count: 8))
+    @Test("still refuses a chunk length no frame could have")
+    func stillBounded() throws {
+        // Built by corrupting a real frame rather than hand-assembling a header:
+        // an earlier version guessed the offsets wrong and passed without ever
+        // reaching the check it was testing.
+        let real = TensorFrame(shape: [4], dtype: .bfloat16, bytes: Data(count: 8))
         var wire = TensorCodec.encode(real)
-        let lengthAt = wire.count - 8 - 4     // header ends with shape then length
-        wire.replaceSubrange(lengthAt ..< lengthAt + 4,
-                             with: [0xff, 0xff, 0xff, 0x7f])   // ~2 GB
+        let lengthAt = 8 + 4 * real.shape.count      // magic..pad, then dims
+        wire.replaceSubrange(lengthAt ..< lengthAt + 4, with: [0xff, 0xff, 0xff, 0x7f])
 
         var decoder = TensorFrameDecoder()
         #expect(throws: (any Error).self) { _ = try decoder.push(wire) }
     }
 
-    @Test("says how long a prompt it will take, not how many bytes it refused")
+    @Test("refuses a chunk that arrives without the one before it")
+    func outOfOrder() throws {
+        // Reassembling a tensor from parts of two different ones would hand the
+        // model a hidden state that never existed, and it would answer from it.
+        let elements = TensorCodec.chunkBytes      // two chunks at bfloat16
+        let big = TensorFrame(shape: [1, elements], dtype: .bfloat16,
+                              bytes: Data(count: elements * 2))
+        let wire = TensorCodec.encode(big)
+
+        // magic..pad (8) + dims (4 per rank) + length (4) + part (4) + parts (4)
+        let headerSize = 8 + 4 * big.shape.count + 12
+        let secondChunkStart = headerSize + TensorCodec.chunkBytes
+        let secondChunk = Data(wire[secondChunkStart...])
+
+        // Part 1 with no part 0 before it. Silently accepting this is how a
+        // tensor gets assembled out of two conversations.
+        var decoder = TensorFrameDecoder()
+        #expect(throws: (any Error).self) { _ = try decoder.push(secondChunk) }
+    }
+
+    @Test("says the limit in tokens, where somebody meets it")
     func errorIsActionable() {
         // "payload of 121026560 bytes is out of range" is a prompt length
-        // wearing a disguise, and it sent somebody looking at the network.
-        let said = String(describing: TensorCodec.Failure.implausiblePayload(999_999_999))
-        #expect(said.contains("tokens"), "the reader's question is how long a prompt")
+        // wearing a disguise, and it sent somebody to look at the network.
+        let said = String(describing: TensorCodec.Failure.tensorTooLarge(2_000_000_000))
+        #expect(said.contains("tokens"))
         #expect(said.contains("limit"))
     }
 }

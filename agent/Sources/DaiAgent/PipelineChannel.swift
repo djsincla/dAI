@@ -225,6 +225,13 @@ public actor PipelineChannel {
         host: String, port: Int, identity: NodeIdentity, peerCAPEM: String,
         serverName: String, deadline: TimeInterval = 30,
     ) async throws {
+        // The dialling half of the pair that lets two logs be compared. The
+        // listener printed this and this one did not, because the split path
+        // dials through here rather than through `connect` - so during an
+        // evening spent on a link that would not form, only one machine ever
+        // said what it was presenting.
+        log("pipeline: dialling \(host):\(port), "
+            + Self.credentialSummary(identity: identity, peerCAPEM: peerCAPEM))
         try await connectWithRetry(
             host: host, port: port,
             tls: Self.clientContext(identity: identity, peerCAPEM: peerCAPEM),

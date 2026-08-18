@@ -218,12 +218,19 @@ rank 0 (layers 32..&lt;64) finished N tokens</code></pre>
 
   <h4>How long a prompt a split will take</h4>
   <p>
-    Prefill sends the whole prompt's hidden state as one frame:
+    Prefill carries the whole prompt's hidden state:
     <code>tokens x hidden x width</code>, which on the 32B at bfloat16 is 10,240
-    bytes per token. Against <code>TensorCodec.maxPayload</code> that is the
-    context ceiling of the <i>link</i>, and it is not the model's. It was 64 MB -
-    about 6,550 tokens - and a longer question tore the link down and reported a
-    transport fault.
+    bytes per token. It used to travel as a single frame, so
+    <code>TensorCodec.maxPayload</code> was a context ceiling on the <i>link</i>
+    rather than the model - 64 MB, about 6,550 tokens - and a longer question
+    tore the link down and reported a transport fault.
+  </p>
+  <p>
+    Tensors are now chunked, so a frame stays small (which is what bounds a
+    single allocation from a length off the wire) and the tensor is reassembled
+    up to <code>maxTensorBytes</code>, about 100,000 tokens. Worth re-testing
+    with a genuinely long document; the unit tests carry the 121 MB hidden state
+    that originally broke it.
   </p>
 
   <h4>Deploying an agent is not installing the package</h4>

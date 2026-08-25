@@ -46,8 +46,10 @@ and nothing else in these scripts has to change.
 from __future__ import annotations
 
 import math
+import os
 import re
 from collections import Counter
+from pathlib import Path
 
 import numpy as np
 
@@ -223,12 +225,51 @@ class LexicalBm25:
         return model
 
 
+def _hub_cache() -> Path:
+    """Where huggingface_hub keeps downloaded models, honouring its own settings."""
+    if "HF_HUB_CACHE" in os.environ:
+        return Path(os.environ["HF_HUB_CACHE"])
+    if "HF_HOME" in os.environ:
+        return Path(os.environ["HF_HOME"]) / "hub"
+    return Path.home() / ".cache" / "huggingface" / "hub"
+
+
+def _prefer_cached_model(model: str) -> None:
+    """Stop the hub being contacted for a model already sitting on this disk.
+
+    The weights are ~87 MB and cached after the first run, but huggingface_hub
+    revalidates the revision against the network on every subsequent run. On
+    this corpus that measured 6.6s per query against 3.5s offline, so roughly
+    half the wall clock of a retrieval was spent asking whether a file that had
+    not changed had changed. It also emits the HF_TOKEN rate limit warning,
+    which is what an unauthenticated request looks like from the outside.
+
+    Only set when the model is already cached, so a first run can still
+    download it, and only via setdefault, so an explicit setting by the caller
+    wins. Must run before sentence_transformers is imported: huggingface_hub
+    reads this variable once, at import.
+
+    Note what is deliberately NOT set here. HF_HUB_DISABLE_PROGRESS_BARS does
+    not silence the "Loading weights" bar and, measured 3 runs to 3, brings the
+    rate limit warning back. That bar is a bare tqdm() in transformers
+    (core_model_loading.py) with no disable argument, so no environment
+    variable reaches it. It reports 103 tensors read from local disk in under
+    10ms. Redirect stderr if it bothers you; it is not worth a monkeypatch.
+    """
+    if "HF_HUB_OFFLINE" in os.environ:
+        return
+    snapshots = _hub_cache() / f"models--{model.replace('/', '--')}" / "snapshots"
+    if snapshots.is_dir() and any(p.is_dir() for p in snapshots.iterdir()):
+        os.environ["HF_HUB_OFFLINE"] = "1"
+
+
 class SentenceTransformer:
     """Dense semantic vectors, if the dependency is installed."""
 
     name = "sentence-transformers"
 
     def __init__(self, model: str = "sentence-transformers/all-MiniLM-L6-v2"):
+        _prefer_cached_model(model)
         from sentence_transformers import SentenceTransformer as ST
         self.model_name = model
         self._model = ST(model)

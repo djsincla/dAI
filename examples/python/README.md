@@ -19,6 +19,9 @@ rag_store.py        the vector store: one SQLite file
 rag_embed.py        text to vectors, and why it happens locally
 rag_ask.py          ask a question, answer with citations
 rag_ask_split.py    the same question, answered by two machines at once
+
+kubectl_fetch.py    build a corpus from kubectl's help and the published docs
+kubectl_ask.py      ask kubectl a question, answered on the fleet
 ```
 
 ## Before anything
@@ -147,6 +150,60 @@ are not the ones a person would have looked up, no model will rescue the answer:
 ```bash
 python3 rag_ask.py --retrieve-only --show-sources "how do I appeal a denial of services?"
 ```
+
+## A second corpus: kubectl
+
+The same pipeline over something with no legal weight and a different failure
+mode. Statute punishes invention with a citation that does not exist; a manual
+punishes it with a flag that fails at the terminal.
+
+```
+python3 kubectl_fetch.py        # ~100 requests, cached; a couple of minutes once
+python3 rag_index.py --corpus corpus/kubectl.jsonl --index corpus/kubectl.db
+python3 kubectl_ask.py "how do I roll back a deployment to the previous revision?"
+```
+
+`rag_index.py` is reused unchanged. The store's load-bearing fields are the
+citation, the URL and the text, and a command maps onto them as readily as a
+section of the Welfare and Institutions Code does.
+
+### Two sources, deliberately not merged
+
+**`kubectl <cmd> --help`, from the binary on the machine that built the corpus.**
+Authoritative for the version whose flags will actually work.
+
+**kubernetes.io/docs/reference/kubectl/generated/**, the published reference.
+Carries the prose and examples the terminal help trims, and gives an answer
+somewhere to point that is not this laptop.
+
+Every entry says which it came from, because "the flag is `--foo`" is a
+different claim from your binary than from a page describing another release.
+The prompt asks the model to say which it used.
+
+The command tree is walked from kubectl itself rather than hardcoded, so a
+plugin or a new subcommand in a later release is picked up without editing
+anything. `--local-only` skips the network entirely, which matters if the point
+is that nothing leaves the building.
+
+### What it looks like when it works
+
+```
+$ python3 kubectl_ask.py "how do I take a node out of service for maintenance?"
+...
+To take a node out of service for maintenance, use the `kubectl drain` command.
+...
+> **Warning**: Using `--force` can cause disruption if the pods are critical.
+
+  routed to  rotorua (ACTIVE)
+  node time  6.44s
+  tokens     1986 in, 80 out
+```
+
+The warning is not decoration: the prompt asks for destructive commands to be
+named as destructive, because `delete`, `drain` and `taint` all do exactly what
+they say and a reader pasting from an answer deserves to be told.
+
+This suggests commands; it does not run them.
 
 ### On pointing a language model at law
 

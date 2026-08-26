@@ -151,6 +151,16 @@ def main() -> int:
                         help="show what was retrieved and stop")
     parser.add_argument("--show-sources", action="store_true",
                         help="print the retrieved text, not just the citations")
+    parser.add_argument("--hybrid", action="store_true",
+                        help="fuse semantic retrieval with literal word matching. "
+                             "Worth it for exact strings the model does not know: "
+                             "a design decision id like VCF-VSAN-ESA-RCMD-CFG-0, "
+                             "an error code, a flag. Measured no better than "
+                             "semantic alone on ordinary prose questions, and "
+                             "worse if the lexical half is weighted too heavily")
+    parser.add_argument("--lexical-weight", type=float, default=0.25,
+                        help="how much say the literal matcher gets when fusing "
+                             "(default 0.25; 0.5 and above measured worse here)")
     args = parser.parse_args()
 
     question = " ".join(args.question).strip()
@@ -173,7 +183,15 @@ def main() -> int:
     model = rag_embed.restore(store.get_meta("backend", "bm25"), state)
 
     query = model.encode_query([question])[0]
-    chunks = store.search(query, k=args.k, per_section=args.per_section)
+    if args.hybrid:
+        # Built from text already in the index, so this costs a fraction of a
+        # second and never re-embeds anything.
+        store.ensure_lexical()
+        chunks = store.search_hybrid(query, question, k=args.k,
+                                     per_section=args.per_section,
+                                     lexical_weight=args.lexical_weight)
+    else:
+        chunks = store.search(query, k=args.k, per_section=args.per_section)
     store.close()
 
     if not chunks:
@@ -181,10 +199,12 @@ def main() -> int:
         return 1
 
     print(f"question  {question}")
-    print(f"retrieved {len(chunks)} of {args.k} requested, by {model.name}\n")
+    how = f"{model.name} + literal words" if args.hybrid else model.name
+    print(f"retrieved {len(chunks)} of {args.k} requested, by {how}\n")
     for chunk in chunks:
         part = f" part {chunk['part'] + 1}/{chunk['parts']}" if chunk["parts"] > 1 else ""
-        print(f"  {chunk['score']:.3f}  {chunk['citation']}{part}")
+        found = f"  [{chunk['found_by']}]" if "found_by" in chunk else ""
+        print(f"  {chunk['score']:.3f}  {chunk['citation']}{part}{found}")
         print(f"         {chunk['chapter_name']}")
         print(f"         page {page_of(chunk)}")
         if args.show_sources:

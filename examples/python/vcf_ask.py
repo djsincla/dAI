@@ -30,8 +30,8 @@ hours into a maintenance window.
 Build the index first:
 
     python3 vcf_fetch.py
-    python3 rag_index.py --backend st --corpus corpus/vcf91.jsonl \\
-                         --index corpus/vcf91.db
+    python3 rag_index.py --backend st --max-chars 600 --overlap 100 \\
+                         --corpus corpus/vcf91.jsonl --index corpus/vcf91.db
 
 This summarises documentation. It does not know your environment, your licence
 entitlements, or your Bill of Materials, and it cannot see whether the sentence
@@ -144,7 +144,8 @@ def main() -> int:
     if not os.path.exists(args.index):
         print(f"No index at {args.index}.\n"
               "  python3 vcf_fetch.py\n"
-              "  python3 rag_index.py --backend st --corpus corpus/vcf91.jsonl \\\n"
+              "  python3 rag_index.py --backend st --max-chars 600 --overlap 100 \\\n"
+              "                       --corpus corpus/vcf91.jsonl \\\n"
               "                       --index corpus/vcf91.db")
         return 1
 

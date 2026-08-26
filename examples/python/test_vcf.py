@@ -110,6 +110,24 @@ class TestPageAttribution:
         assert all("\f" not in p["text"] for p in parts)
 
 
+class TestLexicalTerms:
+    """What the literal matcher is given, which is not the whole question."""
+
+    def test_question_words_are_dropped(self):
+        from rag_store import lexical_terms
+        assert lexical_terms("what is SDDC Manager?") == ["sddc", "manager"]
+
+    def test_an_identifier_survives_intact(self):
+        from rag_store import lexical_terms
+        assert "vcf-vsan-esa-rcmd-cfg-0" in lexical_terms("VCF-VSAN-ESA-RCMD-CFG-0")
+
+    def test_a_question_of_nothing_but_stopwords_matches_nothing(self):
+        # Better than matching everything, which is what an unfiltered OR of
+        # these terms would do.
+        from rag_store import lexical_terms
+        assert lexical_terms("what is it for?") == []
+
+
 class TestContentsParsing:
     def test_depth_comes_from_indentation_clusters(self):
         # Observed clusters in this document: 0, 3, 8-11, 13-18. The buckets sit
@@ -256,6 +274,78 @@ class TestRetrieval:
         # protects the improvement.
         found = [c["citation"] for c in search("what is the upgrade sequence to VCF 9.1?", k=8)]
         assert any("Upgrad" in c for c in found), found
+
+    def test_hybrid_recovers_an_exact_identifier_dense_misses(self):
+        """The case hybrid retrieval exists for, and the only one it wins here.
+
+        A design decision id is a rare exact string. The embedding model has no
+        useful notion of where "VCF-VSAN-ESA-RCMD-CFG-0" belongs in its space,
+        so dense retrieval returns whatever design blueprint is nearest and
+        misses the vSAN material entirely. A literal matcher finds it in one
+        lookup, which is exactly the failure mode the two halves have in
+        opposite directions.
+        """
+        import rag_embed
+        from rag_store import Store
+
+        store = Store(INDEX)
+        model = rag_embed.restore(store.get_meta("backend"),
+                                  store.get_meta("backend_state"))
+        store.ensure_lexical()
+        q = "VCF-VSAN-ESA-RCMD-CFG-0"
+        qv = model.encode_query([q])[0]
+        dense = [c["citation"] for c in store.search(qv, k=6)]
+        hybrid = [c["citation"] for c in store.search_hybrid(qv, q, k=6)]
+        store.close()
+
+        assert not any("vsan" in c.lower() for c in dense), dense
+        assert any("vsan" in c.lower() for c in hybrid), hybrid
+
+    def test_hybrid_does_not_cost_a_prose_question(self, search):
+        """The regression that a heavier lexical weight causes.
+
+        At lexical_weight 0.5 and above this question loses "Requirements for
+        vSAN", which dense retrieval finds on its own: the literal matcher hits
+        hundreds of sections containing these very ordinary words and displaces
+        the right one. The default weight of 0.25 is what keeps both this and
+        the identifier case above, and this test is what stops the weight being
+        raised without noticing the cost.
+        """
+        import rag_embed
+        from rag_store import Store
+
+        store = Store(INDEX)
+        model = rag_embed.restore(store.get_meta("backend"),
+                                  store.get_meta("backend_state"))
+        store.ensure_lexical()
+        q = "what are the requirements for vSAN ESA?"
+        qv = model.encode_query([q])[0]
+        hybrid = [c["citation"] for c in store.search_hybrid(qv, q, k=6)]
+        heavy = [c["citation"] for c in
+                 store.search_hybrid(qv, q, k=6, lexical_weight=1.0)]
+        store.close()
+
+        assert any("Requirements for vSAN" in c for c in hybrid), hybrid
+        # Stated as an observation rather than a requirement: if a future model
+        # makes this pass at full weight, the default is worth revisiting.
+        assert not any("Requirements for vSAN" in c for c in heavy), heavy
+
+    def test_the_lexical_index_is_actually_populated(self):
+        """The bug that made hybrid retrieval silently identical to dense.
+
+        On an external content FTS5 index, COUNT(*) reads the content table, so
+        an index that has never been built still answers with the full row
+        count. Guarding the rebuild on that meant it never ran, every literal
+        search returned nothing, and fusion quietly degraded to dense retrieval
+        with extra steps and no error anywhere.
+        """
+        from rag_store import Store
+
+        store = Store(INDEX)
+        store.ensure_lexical()
+        hits = store.search_lexical("workload domain", k=5)
+        store.close()
+        assert len(hits) > 0
 
     def test_the_vocabulary_gap_is_closed(self, search):
         # The section is called "Expand a VCF Domain" and the question says

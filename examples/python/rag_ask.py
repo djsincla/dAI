@@ -115,8 +115,18 @@ def main() -> int:
             print(f"         {body[:400]}{'...' if len(body) > 400 else ''}\n")
 
     if args.retrieve_only:
-        print("\n--retrieve-only: this ran entirely on this machine. No request was"
-              " made to the gateway and no model was involved.")
+        # "No model was involved" was the wording here, and it was wrong on a
+        # semantic index: embedding the question loads all-MiniLM-L6-v2, which
+        # is 22.7M parameters and about 2.7s of the 3s this takes. The bar that
+        # says "Loading weights" is that, not the fleet. What is skipped is the
+        # LLM, and on a bm25 index no weights load at all.
+        local = "no language model was involved"
+        if getattr(model, "name", "") != "bm25":
+            local = (f"the only model involved was the local embedding model"
+                     f" ({getattr(model, 'model_name', model.name)}), which is"
+                     " what prints 'Loading weights'")
+        print(f"\n--retrieve-only: this ran entirely on this machine. No request"
+              f" was made to the gateway and {local}.")
         return 0
 
     # ---- generate, on the fleet ------------------------------------------

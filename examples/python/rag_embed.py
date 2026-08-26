@@ -295,7 +295,94 @@ class SentenceTransformer:
         return cls(state["model"])
 
 
-def build(backend: str) -> LexicalBm25 | SentenceTransformer:
+class MlxEmbeddings:
+    """Dense vectors on Metal through MLX, with room for a whole section.
+
+    The same framework the fleet already serves on, which is most of the reason
+    it is here. The other reason is measured: the sentence-transformers path
+    spends about five seconds importing torch, importing sentence_transformers
+    and initialising MPS before it embeds anything, and a retrieval only needs
+    about 0.75s of actual work. Loading this takes 0.39s. Nothing about the
+    arithmetic changed; the startup did.
+
+    **8192 tokens rather than 256, which removes chunking from this corpus.**
+    all-MiniLM-L6-v2 reads 256 word pieces and silently drops the rest, so a
+    corpus had to be cut into pieces small enough to survive that, and a
+    citation then pointed at a piece rather than at a section. The longest
+    section of the VCF documentation is about 5,000 tokens, so every section
+    fits whole and every citation names the section it actually came from.
+
+    Note the asymmetry. Nomic's models are trained with a prefix that says what
+    the text is for, and a query embedded as a document lands in a measurably
+    different place. That is why encode and encode_query differ here by more
+    than which side of the comparison they are on, and it is the one detail
+    that quietly ruins retrieval if it is dropped.
+    """
+
+    name = "mlx"
+
+    QUERY = "search_query: "
+    DOCUMENT = "search_document: "
+
+    def __init__(self, model: str = "mlx-community/nomicai-modernbert-embed-base-bf16",
+                 max_length: int = 8192, batch: int = 32):
+        from mlx_embeddings import load
+        self.model_name = model
+        self.max_length = max_length
+        self.batch = batch
+        self._model, self._tokenizer = load(model)
+
+    def fit(self, texts: list[str]) -> "MlxEmbeddings":
+        return self  # nothing to learn from the corpus
+
+    def _embed(self, texts: list[str]) -> np.ndarray:
+        import mlx.core as mx
+        from mlx_embeddings import generate
+
+        if not texts:
+            return np.zeros((0, 768), dtype=np.float32)
+
+        # Batches are padded to their longest member, so mixing a 500 token
+        # section with a 5,000 token one makes the short one cost what the long
+        # one costs. Sorting by length first puts similar lengths together and
+        # the padding mostly disappears. The original order is restored before
+        # returning, because the caller is pairing these with rows in a table
+        # and a permuted result would attach every vector to the wrong text
+        # without failing.
+        order = sorted(range(len(texts)), key=lambda i: len(texts[i]))
+        vectors = [None] * len(texts)
+        for start in range(0, len(order), self.batch):
+            window = order[start:start + self.batch]
+            embedded = generate(self._model, self._tokenizer,
+                                [texts[i] for i in window],
+                                max_length=self.max_length).text_embeds
+            mx.eval(embedded)
+            embedded = np.array(embedded, dtype=np.float32)
+            for row, i in enumerate(window):
+                vectors[i] = embedded[row]
+
+        stacked = np.vstack(vectors)
+        # Normalised here rather than trusted, because the store scores with a
+        # dot product and an unnormalised vector turns that into something that
+        # is not cosine and quietly favours longer passages.
+        norms = np.linalg.norm(stacked, axis=1, keepdims=True)
+        return stacked / np.maximum(norms, 1e-12)
+
+    def encode(self, texts: list[str]) -> np.ndarray:
+        return self._embed([self.DOCUMENT + t for t in texts])
+
+    def encode_query(self, texts: list[str]) -> np.ndarray:
+        return self._embed([self.QUERY + t for t in texts])
+
+    def state(self) -> dict:
+        return {"model": self.model_name, "max_length": self.max_length}
+
+    @classmethod
+    def restore(cls, state: dict) -> "MlxEmbeddings":
+        return cls(state["model"], state.get("max_length", 8192))
+
+
+def build(backend: str) -> LexicalBm25 | SentenceTransformer | MlxEmbeddings:
     if backend in ("bm25", "lexical", "hashed"):
         return LexicalBm25()
     if backend in ("st", "sentence-transformers"):
@@ -307,6 +394,14 @@ def build(backend: str) -> LexicalBm25 | SentenceTransformer:
                 "  pip install sentence-transformers\n"
                 "  or use the default backend, which needs only numpy:\n"
                 "    python3 rag_index.py --backend bm25") from error
+    if backend in ("mlx", "mlx-embeddings", "nomic"):
+        try:
+            return MlxEmbeddings()
+        except ImportError as error:
+            raise SystemExit(
+                "mlx-embeddings is not installed.\n"
+                "  pip install mlx mlx-embeddings\n"
+                "  Apple silicon only. On anything else use --backend st.") from error
     raise SystemExit(f"unknown backend: {backend}")
 
 
@@ -315,4 +410,6 @@ def restore(name: str, state: dict):
         return LexicalBm25.restore(state)
     if name == SentenceTransformer.name:
         return SentenceTransformer.restore(state)
+    if name == MlxEmbeddings.name:
+        return MlxEmbeddings.restore(state)
     raise SystemExit(f"the index was built with an unknown backend: {name}")

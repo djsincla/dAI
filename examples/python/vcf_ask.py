@@ -18,8 +18,23 @@ That changes what the example demonstrates.
 Retrieval is semantic, not lexical, and for this corpus that is a requirement
 rather than a preference. bm25 stores one dense row per chunk across the whole
 vocabulary: at 985 chunks that is 23 MB and at 18,304 chunks it is gigabytes.
-The index is built with --backend st for that reason, and the same reason means
-you cannot fall back to bm25 here without rechunking coarsely first.
+
+The backend is MLX running nomic's ModernBERT embedder, and the reason is its
+context rather than its speed. It reads 8192 tokens against all-MiniLM's 256,
+and the longest section of this document is about 5,000, so **sections are
+indexed whole and chunking disappears**. A citation then names the section the
+text is actually in, rather than a fragment of it. Measured against the same
+corpus chunked for all-MiniLM, this found the expected section for 6 of 6 test
+questions where chunked MiniLM found 4, in a 38 MB index rather than 188 MB.
+
+**It is not faster from the command line**, and that is worth stating plainly
+because the opposite is easy to assume. The model loads in 0.23s against 3.0s,
+and a warm query takes 0.04s against 0.24s, but a cold run of this script
+measures 3.58s either way: importing Python, numpy and the framework dominates
+both, and no embedding model changes that. The load and query figures matter to
+a long lived process embedding a corpus, not to one question from a shell. If
+the 3.5s is what bothers you, the fix is a process that stays warm, not a
+different model.
 
 Every retrieved passage carries the page it came from, so an answer can be
 checked against the PDF rather than believed. That matters more here than in
@@ -30,7 +45,8 @@ hours into a maintenance window.
 Build the index first:
 
     python3 vcf_fetch.py
-    python3 rag_index.py --backend st --max-chars 600 --overlap 100 \\
+    pip install mlx mlx-embeddings
+    python3 rag_index.py --backend mlx --max-chars 20000 --overlap 0 \\
                          --corpus corpus/vcf91.jsonl --index corpus/vcf91.db
 
 This summarises documentation. It does not know your environment, your licence
@@ -144,7 +160,7 @@ def main() -> int:
     if not os.path.exists(args.index):
         print(f"No index at {args.index}.\n"
               "  python3 vcf_fetch.py\n"
-              "  python3 rag_index.py --backend st --max-chars 600 --overlap 100 \\\n"
+              "  python3 rag_index.py --backend mlx --max-chars 20000 --overlap 0 \\\n"
               "                       --corpus corpus/vcf91.jsonl \\\n"
               "                       --index corpus/vcf91.db")
         return 1

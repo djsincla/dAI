@@ -278,13 +278,16 @@ def main() -> None:
     print(f"contents  {len(entries):,} entries, {len(records):,} with prose under them")
     print(f"corpus    {chars:,} chars -> {args.out}")
     print()
-    print("Next, and note the backend:")
-    print("  python3 rag_index.py --backend st --max-chars 600 --overlap 100 \\")
+    print("Next, and note the backend and the chunk size:")
+    print("  python3 rag_index.py --backend mlx --max-chars 20000 --overlap 0 \\")
     print(f"                       --corpus {args.out} \\")
     print("                       --index corpus/vcf91.db")
     print()
-    print("  bm25 stores one dense row per chunk across the whole vocabulary,")
-    print("  which is fine for a thousand chunks and is gigabytes for this one.")
+    print("  --backend mlx reads 8192 tokens, and the longest section here is")
+    print("  about 5,000, so every section is indexed whole and no citation")
+    print("  points at a fragment. --backend st reads 256 and needs chunking.")
+    print("  bm25 cannot index this corpus at all: it stores one dense row per")
+    print("  chunk across the whole vocabulary, which runs to gigabytes here.")
 
 
 def shutil_which(name: str) -> str | None:

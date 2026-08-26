@@ -16,7 +16,7 @@ the index, and skip rather than fail when they are absent, because a fresh
 clone has neither:
 
     python3.11 vcf_fetch.py
-    python3.11 rag_index.py --backend st --max-chars 600 --overlap 100 \\
+    python3.11 rag_index.py --backend mlx --max-chars 20000 --overlap 0 \\
                             --corpus corpus/vcf91.jsonl --index corpus/vcf91.db
 """
 
@@ -31,18 +31,21 @@ import vcf_fetch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORPUS = os.path.join(HERE, "corpus", "vcf91.jsonl")
-INDEX = os.path.join(HERE, "corpus", "vcf91.db")
 
-# The model the index is built with reads 256 word pieces and silently drops
-# the rest. Measured with the real tokeniser rather than a characters per token
-# rule of thumb, because this corpus is full of URLs, version strings and
-# identifiers, which tokenise far worse than prose.
-MODEL_TOKEN_BUDGET = 256
+# Overridable so the same suite can be pointed at an index built with a
+# different backend, which is the only way to tell whether changing the
+# embedding model helped or merely moved the failures around:
+#
+#   VCF_INDEX=corpus/vcf91-mlx.db python3.11 -m pytest test_vcf.py -v
+INDEX = os.environ.get("VCF_INDEX") or os.path.join(HERE, "corpus", "vcf91.db")
 
 # Some overflow is tolerated. Chunks overlap, so text past the limit still
 # reaches the index through the neighbouring chunk; what is lost is that one
-# vector's account of its own tail. At 600 characters this measured 5.8%, and
-# at 1,400 it was 15.4% with a worst case of 632 tokens unread.
+# vector's account of its own tail. Under all-MiniLM's 256 tokens this measured
+# 15.4% at 1,400 characters and 5.8% at 600. Under the 8192 token MLX backend
+# with whole sections it is 0%, which is the point of the larger context and
+# the reason the tolerance is kept rather than tightened to zero: the number
+# describes the model in use, not this corpus.
 MAX_OVERFLOWING = 0.10
 
 needs_corpus = pytest.mark.skipif(
@@ -186,6 +189,13 @@ class TestRetrieval:
         store.close()
 
     def test_most_chunks_fit_what_the_model_reads(self):
+        """The budget comes from the model the index records, not a constant.
+
+        Hardcoding 256 would pass an all-MiniLM index and fail an 8192 token
+        one for a reason that is not a defect. What is being asserted is the
+        relationship - chunks fit the model that will read them - and that
+        holds whichever model built the index.
+        """
         # The silent truncation, measured across the index rather than at one
         # question. A chunk over the budget is embedded from its opening tokens
         # and scored as though that were the whole of it. Nothing reports it:
@@ -195,14 +205,30 @@ class TestRetrieval:
 
         import rag_embed
 
-        tokenizer = rag_embed.SentenceTransformer()._model.tokenizer
+        from rag_store import Store
+
+        store = Store(INDEX)
+        backend = store.get_meta("backend", "bm25")
+        state = store.get_meta("backend_state", {})
+        store.close()
+        if backend == "bm25":
+            pytest.skip("bm25 reads whole chunks; there is no budget to exceed")
+
+        model = rag_embed.restore(backend, state)
+        if backend == rag_embed.MlxEmbeddings.name:
+            tokenizer = model._tokenizer._tokenizer
+            budget = state.get("max_length", 8192)
+        else:
+            tokenizer = model._model.tokenizer
+            budget = model._model.max_seq_length
+
         rows = [r[0] for r in sqlite3.connect(INDEX).execute("select text from chunks")]
         random.seed(7)
         sample = random.sample(rows, min(500, len(rows)))
         over = sum(1 for t in sample
-                   if len(tokenizer.encode(t, add_special_tokens=True)) > MODEL_TOKEN_BUDGET)
+                   if len(tokenizer.encode(t)) > budget)
         assert over / len(sample) < MAX_OVERFLOWING, (
-            f"{over}/{len(sample)} chunks exceed {MODEL_TOKEN_BUDGET} tokens; "
+            f"{over}/{len(sample)} chunks exceed {budget} tokens for {backend}; "
             "rebuild the index with a smaller --max-chars")
 
     @pytest.mark.parametrize("question,expected", [
@@ -221,21 +247,22 @@ class TestRetrieval:
             assert "#page=" in chunk["url"]
             assert 1 <= int(chunk["url"].split("#page=")[1]) <= 8894
 
-    def test_a_version_number_pulls_the_release_notes(self, search):
-        # The other documented weakness, and the more surprising one. This PDF
-        # carries release notes for 9.1 and for every 9.1.0.x patch, so a
-        # question containing "VCF 9.1" scores against pages that are mostly
-        # version strings. The upgrade guide does not appear until k=12, while
-        # the same question without the version number retrieves it first.
-        # Ask about the operation, not the release.
+    def test_a_version_number_no_longer_pulls_only_release_notes(self, search):
+        # This used to assert the failure. Under all-MiniLM a question
+        # containing "VCF 9.1" scored against pages that are mostly version
+        # strings, and the upgrade material did not appear until k=12. Whole
+        # sections embedded by nomic carry enough surrounding context that the
+        # version token stops dominating, so the assertion is inverted and now
+        # protects the improvement.
         found = [c["citation"] for c in search("what is the upgrade sequence to VCF 9.1?", k=8)]
-        assert not any("Upgrade Sequence" in c for c in found)
-        assert any(c.startswith("9.1.0.") or "Release Notes" in c for c in found)
+        assert any("Upgrad" in c for c in found), found
 
-    def test_the_known_vocabulary_gap_is_still_the_gap(self, search):
-        # Documented rather than fixed: the section is called "Expand a VCF
-        # Domain" and the embedding model does not bridge it from "add a host".
-        # If this ever fails, the retrieval got better and the docs should say
-        # so instead of warning about it.
+    def test_the_vocabulary_gap_is_closed(self, search):
+        # The section is called "Expand a VCF Domain" and the question says
+        # "add a host". all-MiniLM never bridged that; nomic over whole
+        # sections does, because the section body says what expanding a domain
+        # involves even though its title does not. This was written as an
+        # assertion that the gap persisted, and inverting it is the clearest
+        # record that changing the embedding model is what closed it.
         found = [c["citation"] for c in search("how do I add a host to a workload domain?")]
-        assert not any("Expand a VCF Domain" in c for c in found)
+        assert any("Expand a VCF Domain" in c for c in found), found

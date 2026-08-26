@@ -45,9 +45,27 @@ async function servableModels(db: Db, broker: Broker, groupId?: string | null) {
     // across machines is a different proposition from one that does not - it
     // needs a group set up for it and it takes those machines out of harvesting
     // - and a name alone does not tell anybody that.
-    const { rows: shapes } = await db.query(`SELECT id, machines FROM models`)
+    const { rows: shapes } = await db.query(`SELECT id, machines, kind FROM models`)
     const machines = new Map((shapes as { id: string; machines: number }[])
       .map((m) => [m.id, Math.max(1, Number(m.machines ?? 1))]))
+
+    // Embedding models are staged and resident like any other, and there is no
+    // endpoint that reaches them: `POST /v1/embeddings` returns 404, for the
+    // reasons in docs/EMBEDDINGS.md. Listing one invites exactly the request
+    // that cannot be answered, and a caller has no way to tell it apart from a
+    // model they can use. Either the endpoint exists or the model is not in the
+    // catalogue.
+    //
+    // Keyed on models.kind rather than on a zero context window. Context is
+    // COALESCEd from what nodes report, so zero means "no context reported",
+    // which an embedding model and a generation model whose node has not
+    // reported one both satisfy. Typing off that field would hide a working
+    // chat model the first time a node was slow to report, which is a worse
+    // failure than the one being fixed.
+    //
+    // Delete this filter when /v1/embeddings lands; see docs/EMBEDDINGS_PLAN.md.
+    const unreachable = new Set((shapes as { id: string; kind: string }[])
+      .filter((m) => m.kind === 'embed').map((m) => m.id))
 
     const scope = groupId ? await membersOf(db, groupId) : null
 
@@ -86,6 +104,7 @@ async function servableModels(db: Db, broker: Broker, groupId?: string | null) {
     const holders = new Map<string, Set<string>>()
     for (const row of rows as any[]) {
       if (scope !== null && !scope.has(row.node_id as string)) continue
+      if (unreachable.has(row.name as string)) continue
       // Recent heartbeat, not currently parked on the channel.
       //
       // These are different facts and conflating them broke the listing in the
@@ -1023,11 +1042,16 @@ export function compatRoutes(db: Db, broker: Broker): Router {
       data: [...models].map(([id, m]) => ({
         id,
         object: 'model',
-        // A model with no context window is not a chat model. Typing everything
-        // as llm made an embedding model look like something a client could
-        // send a conversation to, and anything routing off that field would
-        // pick it.
-        type: m.context > 0 ? 'llm' : 'embeddings',
+        // Everything reachable on this surface is a chat model, because
+        // servableModels now excludes the kinds no endpoint serves.
+        //
+        // This read `m.context > 0 ? 'llm' : 'embeddings'`, which typed off a
+        // context window that is COALESCEd to zero when a node has not reported
+        // one. That is true of an embedding model and also of a chat model on a
+        // node that was slow to report, so the field announced the wrong kind in
+        // the direction that matters: a usable model described as something a
+        // client cannot send a conversation to.
+        type: 'llm',
         publisher: 'dai',
         max_context_length: m.context || null,
         loaded_context_length: m.context || null,

@@ -77,9 +77,30 @@ In dependency order. The route is the last and smallest item.
 Step 5 is an afternoon. Steps 1 to 3 are the work, and until they are done the
 endpoint should keep returning 404.
 
-## The smaller bug next door
+## The smaller bug next door, now fixed
 
-`/v1/models` and `/api/v0/models` list `ane:embed` as an available model of type
-`embeddings`, which invites exactly the request that 404s. Whatever happens to
-the rest of this, a model with no endpoint to reach it should not appear in a
-catalogue as though it had one.
+`/v1/models` and `/api/v0/models` listed `ane:embed` as an available model of
+type `embeddings`, which invited exactly the request that 404s. A caller cannot
+tell an advertised model from a servable one and picks by name, so the listing
+promised something no endpoint could deliver.
+
+`servableModels` now drops models whose `models.kind` is `embed`. Keyed on the
+repository's own column rather than on a zero context window: context is
+COALESCEd from what nodes report, so zero also describes a chat model on a node
+that has not reported one yet, and filtering on it would have hidden working
+models intermittently.
+
+The same reasoning fixed a second case of it. The LM Studio surface typed models
+as `context > 0 ? 'llm' : 'embeddings'`, so a usable chat model was announced as
+something a client cannot send a conversation to, for as long as its window took
+to arrive. Everything listed is now `llm`, which is true because the kinds no
+endpoint serves are no longer listed.
+
+Models the repository has never seen are still listed. They are unknown, not
+unreachable, and a fleet staging weights outside the repository would otherwise
+have an empty catalogue.
+
+Both behaviours are asserted in `test/serving.test.ts`, and both assertions were
+checked against the unfixed code rather than merely written. They assert an
+absence that is only correct while `/v1/embeddings` does not exist, and the
+tests say so: delete them when it lands. See `EMBEDDINGS_PLAN.md`.

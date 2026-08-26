@@ -590,4 +590,70 @@ describe('serving over HTTP', () => {
     stop = true
     await Promise.race([held, new Promise((r) => setTimeout(r, 1500))])
   })
+
+  /**
+   * A model nothing can reach should not be advertised as though it could be.
+   *
+   * `POST /v1/embeddings` returns 404, for the reasons in docs/EMBEDDINGS.md,
+   * while an embedding model is staged and resident like any other and so
+   * appeared in both catalogues. A caller cannot tell an advertised model from
+   * a servable one and picks by name, so the listing invited exactly the
+   * request that cannot be answered.
+   *
+   * Delete these when /v1/embeddings lands; they assert an absence that is only
+   * correct while the endpoint does not exist.
+   */
+  const residentBoth = () =>
+    fetch(`${base}/agent/v1/heartbeat`, {
+      method: 'POST', headers: asNode(fx.fingerprint),
+      body: JSON.stringify({
+        presenceState: 'LOCKED',
+        residentModels: { 'org/chat': 4, 'org/embed': 1 },
+      }),
+    })
+
+  const stageKinds = () => db.query(
+    `INSERT INTO models (id, runtime, kind, size_bytes)
+     VALUES ('org/chat','mlx','generate',1), ('org/embed','coreml','embed',1)
+     ON CONFLICT DO NOTHING`)
+
+  it('does not advertise an embedding model while nothing serves one', async () => {
+    await stageKinds()
+    await residentBoth()
+
+    const r = await fetch(`${base}/v1/models`, { headers: asUser(fx.operatorToken) })
+    const ids = (await r.json()).data.map((m: any) => m.id)
+    expect(ids).toContain('org/chat')
+    expect(ids).not.toContain('org/embed')
+  })
+
+  it('hides it from the LM Studio surface too, and types the rest honestly', async () => {
+    await stageKinds()
+    await residentBoth()
+
+    const r = await fetch(`${base}/api/v0/models`, { headers: asUser(fx.operatorToken) })
+    const models = (await r.json()).data as any[]
+    expect(models.map((m) => m.id)).not.toContain('org/embed')
+
+    // No node has reported a context window here. This field read
+    // `context > 0 ? 'llm' : 'embeddings'`, so a usable chat model was
+    // announced as something a client cannot send a conversation to whenever
+    // the window had not arrived yet.
+    const chat = models.find((m) => m.id === 'org/chat')
+    expect(chat).toBeDefined()
+    expect(chat.type).toBe('llm')
+  })
+
+  it('still lists a model the repository has never heard of', async () => {
+    // The filter is keyed on models.kind, and a node can hold weights that were
+    // never imported. Those are unknown, not unreachable, and dropping them
+    // would empty the catalogue on any fleet that stages outside the
+    // repository.
+    await fetch(`${base}/agent/v1/heartbeat`, {
+      method: 'POST', headers: asNode(fx.fingerprint),
+      body: JSON.stringify({ presenceState: 'LOCKED', residentModels: { 'org/unknown': 4 } }),
+    })
+    const r = await fetch(`${base}/v1/models`, { headers: asUser(fx.operatorToken) })
+    expect((await r.json()).data.map((m: any) => m.id)).toContain('org/unknown')
+  })
 })

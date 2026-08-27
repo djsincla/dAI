@@ -192,13 +192,34 @@ makes things better on its own.
     agent/Sources/DaiWorker/Worker.swift    dispatch embed to it
     agent/Tests/DaiAgentTests/EmbedRuntimeTests.swift   new               DONE
 
-Progress: the agent half of phase 1 is in, 375 agent tests passing. The runtime
-loads, refuses what it should refuse, and applies prefixes by family. What it
-has not done yet is produce a vector on this hardware: that needs the model
-staged where the agent looks, which is DAI_MODEL_DIR rather than the Python
-cache, and it is the first thing the next slice should do, because agreement
-with the known good implementation is the only check that catches a correct
-looking wrong answer.
+Progress: the agent half of phase 1 is in, 380 agent tests passing, plus a
+`dai-agent verify-embed` command that checks agreement with the Python client.
+
+Two findings from building it changed the model choice, and they are worth
+recording because both were invisible until something was actually run.
+
+**The two implementations support almost disjoint architectures.** Swift
+MLXEmbedders registers bert, roberta, xlm-roberta, distilbert, nomic_bert and
+qwen3. Python mlx-embeddings 0.1.0 has bert, modernbert and qwen3. So the
+ModernBERT model the VCF index was built with cannot be loaded by the agent at
+all, and nomic-embed-text-v1.5, which the agent can load, has no MLX conversion
+and declares only 2,048 trained positions. `qwen3` is the only architecture both
+sides support that also has room for a whole section, at 32,768. Both sides now
+use `mlx-community/Qwen3-Embedding-0.6B-8bit`.
+
+**MLX cannot run under `swift test`.** SwiftPM's command line cannot compile the
+Metal shaders, which packaging/build-pkg.sh already says: it uses xcodebuild and
+ships mlx-swift_Cmlx.bundle. A plain checkout fails with "Failed to load the
+default metallib" before reaching any of this code, and the built debug binary
+fails the same way. So the agreement check is a command rather than a test,
+following verify-ane, and the guarded tests beside it skip everywhere SwiftPM
+builds. A skip there is not evidence of anything; the command's verdict is.
+
+Still unverified: the vectors themselves. `verify-embed` has never returned a
+verdict on this hardware, because running it needs an xcodebuild-produced binary
+with staged weights. That is the next thing to do and it gates everything after
+it, since a correct looking wrong vector is the failure this whole plan is
+arranged around.
 
 ## Verification
 

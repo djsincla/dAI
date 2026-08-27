@@ -283,6 +283,30 @@ public actor Worker {
         }
         for (id, why) in outcome.failed { log("model \(id) failed: \(why)") }
 
+        // The reason a pass did nothing, which ModelSync records deliberately
+        // and this dropped on the floor.
+        //
+        // Chasing a model that would not transfer meant reading a log that said
+        // only "heartbeat: ACTIVE" for twenty minutes. A skipped pass and a pass
+        // with nothing to do produce identical silence, and the difference is
+        // the whole question: one needs somebody to step away from the machine
+        // and the other needs somebody to look at why the assignment is not
+        // arriving. ModelSync's own comment says this must be reported rather
+        // than silent; it was, and then it was discarded here.
+        if let skipped = outcome.skipped {
+            log("model sync did nothing: \(skipped)")
+        }
+
+        // What a pass actually saw, when it saw nothing to do. Logged only in
+        // that case, so an ordinary fleet stays quiet: a node holding what it
+        // was assigned says so once per pass and nothing else.
+        if outcome.fetched.isEmpty && outcome.failed.isEmpty
+            && outcome.repaired.isEmpty && outcome.skipped == nil {
+            log("model sync: holding \(outcome.alreadyHeld.count) assigned "
+                + "model\(outcome.alreadyHeld.count == 1 ? "" : "s")"
+                + (outcome.alreadyHeld.isEmpty ? " (nothing is assigned to this node)" : ""))
+        }
+
         // Kept for the next heartbeat rather than only written to the log. A
         // node that cannot fetch what it was assigned is invisible otherwise:
         // the fleet view shows a count of machines still wanting the model and

@@ -65,6 +65,13 @@ easy one quietly cancel the valuable one.**
 kind under normal presence gating. This unblocks every client, closes the
 api-first gap, and produces vectors that are actually vectors.
 
+**A thing the route taught, worth recording before the dispatch slice.** The
+OpenAPI validator runs ahead of every handler, so a path absent from
+`openapi/dai.yaml` is answered 404 before any code in the route is reached. The
+first run of the route's tests failed that way and one of them passed for the
+wrong reason: a test expecting 404 for an unknown model passed while the route
+did not exist at all. The spec is not documentation here, it is the router.
+
 **Phase 2, ANE.** Steps 1 to 3 of `EMBEDDINGS.md`, unchanged, as an additional
 runtime for the same dispatch kind. The route, the registry and the tests from
 phase 1 all still apply, so phase 2 becomes a runtime swap behind a stable
@@ -181,11 +188,11 @@ makes things better on its own.
 
 ## Files
 
-    control-plane/src/routes/serving.ts     the route, beside completions
+    control-plane/src/routes/serving.ts     the route, beside completions   DONE
+    control-plane/openapi/dai.yaml          the schema                      DONE
     control-plane/src/lib/candidates.ts     embed as an interactive dispatch kind
     control-plane/src/lib/policy.ts         embed permitted for mlx runtime, presence gated
     control-plane/src/lib/import.ts         runtime by staged artifact, not by kind
-    control-plane/openapi/dai.yaml          the schema, including input_type
     control-plane/test/api.test.ts          route behaviour and every refusal
     agent/Package.swift                     the MLXEmbedders product      DONE
     agent/Sources/DaiWorker/EmbedRuntime.swift      new                   DONE

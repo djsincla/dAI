@@ -644,6 +644,86 @@ describe('serving over HTTP', () => {
     expect(chat.type).toBe('llm')
   })
 
+  /**
+   * POST /v1/embeddings, and mostly what it refuses.
+   *
+   * Each of these prevents a vector that looks correct and is not. A caller
+   * cannot tell a good embedding from a bad one: both are the right length, in
+   * the right range, and compare cleanly by cosine, so a wrong one is not
+   * discovered at the keyboard but weeks later as poor retrieval blamed on the
+   * model. Refusing loudly is the whole design.
+   */
+  const stageEmbedModel = () => db.query(
+    `INSERT INTO models (id, runtime, kind, size_bytes)
+     VALUES ('org/embed','mlx','embed',1), ('org/chat','mlx','generate',1)
+     ON CONFLICT DO NOTHING`)
+
+  const embed = (body: unknown) =>
+    fetch(`${base}/v1/embeddings`, {
+      method: 'POST', headers: asUser(fx.operatorToken), body: JSON.stringify(body),
+    })
+
+  it('refuses a model that is not an embedding model', async () => {
+    await stageEmbedModel()
+    const r = await embed({ model: 'org/chat', input: 'hello' })
+    expect(r.status).toBe(400)
+    const e = (await r.json()).error
+    // The message has to say what to do instead, because the caller's next move
+    // is either a different endpoint or a different model and nothing in the
+    // request says which.
+    expect(e.message).toMatch(/generate model/)
+    expect(e.message).toMatch(/chat\/completions/)
+  })
+
+  it('refuses a model the catalogue does not have', async () => {
+    const r = await embed({ model: 'org/nothing', input: 'hello' })
+    expect(r.status).toBe(404)
+  })
+
+  it('refuses an empty string rather than indexing a fixed point', async () => {
+    await stageEmbedModel()
+    const r = await embed({ model: 'org/embed', input: ['fine', '   '] })
+    expect(r.status).toBe(400)
+    expect((await r.json()).error.message).toMatch(/empty string/)
+  })
+
+  it('refuses an empty batch rather than answering with nothing', async () => {
+    await stageEmbedModel()
+    const r = await embed({ model: 'org/embed', input: [] })
+    expect(r.status).toBe(400)
+  })
+
+  it('refuses a batch too large to lose to a preemption', async () => {
+    await stageEmbedModel()
+    const r = await embed({ model: 'org/embed', input: Array(300).fill('x') })
+    expect(r.status).toBe(400)
+    expect((await r.json()).error.message).toMatch(/256/)
+  })
+
+  it('refuses an encoding format it does not produce', async () => {
+    await stageEmbedModel()
+    const r = await embed({ model: 'org/embed', input: 'x', encoding_format: 'base64' })
+    expect(r.status).toBe(400)
+  })
+
+  it('refuses an input_type that is neither query nor document', async () => {
+    // Not a typo check. A model trained with role prefixes puts a query and a
+    // passage in measurably different places, so a third value would have to be
+    // silently mapped to one of them and the caller would never know which.
+    await stageEmbedModel()
+    const r = await embed({ model: 'org/embed', input: 'x', input_type: 'passage' })
+    expect(r.status).toBe(400)
+  })
+
+  it('refuses with 503, not 500, when no machine can take it', async () => {
+    // No node is connected in this test, which is the ordinary daytime answer
+    // rather than a fault. A 500 tells a client to retry a broken server.
+    await stageEmbedModel()
+    const r = await embed({ model: 'org/embed', input: 'x' })
+    expect(r.status).toBe(503)
+    expect((await r.json()).error.type).toBe('overloaded_error')
+  })
+
   it('still lists a model the repository has never heard of', async () => {
     // The filter is keyed on models.kind, and a node can hold weights that were
     // never imported. Those are unknown, not unreachable, and dropping them

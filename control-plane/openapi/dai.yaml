@@ -1025,6 +1025,112 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/OpenAIError' }
 
+  /v1/embeddings:
+    post:
+      tags: [serving]
+      summary: Embed text, OpenAI-compatible
+      description: |
+        Returns one vector per input, normalised to unit length so a caller
+        scoring with a dot product gets cosine.
+
+        **Refuses rather than approximates.** A caller cannot tell a good
+        embedding from a bad one by looking: both are the right length, in the
+        right range, and compare cleanly by cosine. A wrong one is not
+        discovered at the keyboard but weeks later, as poor retrieval blamed on
+        the model. So a request that cannot be answered exactly is refused,
+        including an input longer than the model reads, which is never silently
+        truncated.
+
+        `input_type` is an extension to the OpenAI shape. Several embedding
+        model families are trained with a prefix declaring whether text is a
+        query or a passage, and the same words embedded as the wrong one land
+        measurably elsewhere. OpenAI's schema has nowhere to record this, so a
+        plain OpenAI client sends nothing and gets `document`, which is right
+        for the common case of embedding a corpus. Vectors made with different
+        values are not comparable, and the response says which was used.
+
+        Presence gating follows the device rather than the task. A model whose
+        runtime is MLX runs on the GPU and is gated exactly as generation is; a
+        Core ML model runs on the Neural Engine and may run while a machine's
+        owner is using it. See docs/EMBEDDINGS_PLAN.md.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, input]
+              properties:
+                model: { type: string }
+                input:
+                  description: One string, or an array of at most 256 of them.
+                  oneOf:
+                    - type: string
+                    - type: array
+                      items: { type: string }
+                      minItems: 1
+                      maxItems: 256
+                input_type:
+                  type: string
+                  enum: [query, document]
+                  default: document
+                encoding_format:
+                  type: string
+                  enum: [float]
+      responses:
+        '200':
+          description: One vector per input, in the order given
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object: { type: string }
+                  model: { type: string }
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        object: { type: string }
+                        index: { type: integer }
+                        embedding:
+                          type: array
+                          items: { type: number }
+                  usage: { type: object, additionalProperties: true }
+                  dai:
+                    type: object
+                    description: Which machine answered, and how the text was treated.
+                    additionalProperties: true
+        '400':
+          description: |
+            Malformed, or a request that could only be answered approximately:
+            a model that is not an embedding model, an empty string, a batch
+            over the limit, or an unknown input_type.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OpenAIError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such model in the catalogue
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OpenAIError' }
+        '502':
+          description: |
+            The node returned a different number of vectors than there were
+            inputs. Counted rather than trusted, because pairing them off by
+            position would attach every vector after the gap to the wrong text.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OpenAIError' }
+        '503':
+          description: No node can take this request right now
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OpenAIError' }
+
   /admin/v1/nodes:
     get:
       tags: [admin]

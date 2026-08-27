@@ -14,7 +14,8 @@ import type { GroupListeners } from '../lib/groupSockets.js'
 import { existsSync } from 'node:fs'
 import { Router } from 'express'
 import { type Db, tx } from '../lib/db.js'
-import { nodeMatchesPool, poolMode, poolsFor, checkPoolName } from '../lib/pools.js'
+import { nodeMatchesPool, poolMode, poolsFor, checkPoolName,
+         type PoolSpec } from '../lib/pools.js'
 import { bucketFor, clampWindow } from '../lib/window.js'
 import { asHtml, asText, readLogs } from '../lib/logs.js'
 import { registerAgentBuild } from '../lib/agentBuilds.js'
@@ -1973,6 +1974,61 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
    * when they are able, which means the declaration outlives the moment it
    * was made.
    */
+  /**
+   * What a group offers its machines, and what those machines actually hold.
+   *
+   * There was no way to ask this, and an afternoon went into a model that would
+   * not transfer for want of it. Three views of the question existed and none
+   * answered it: the agent log is silent when a sync pass has nothing to do,
+   * the fleet view reports what a node says it holds rather than what it was
+   * told to hold, and this endpoint did not exist.
+   *
+   * Reported per node rather than as a list of models, because "assigned" and
+   * "held" are different facts and the gap between them is the only thing
+   * anybody is ever looking for.
+   */
+  r.get('/pools/:poolId/models', async (req, res) => {
+    const { poolId } = req.params as { poolId: string }
+    if (!(await requireRole(db, req.user!.id, poolId, 'viewer'))) {
+      res.status(403).json({ error: 'forbidden', detail: 'access to this pool required' })
+      return
+    }
+    const { rows: pools } = await db.query(
+      `SELECT id, name, tier, membership, enabled FROM pools WHERE id = $1`, [poolId])
+    const pool = pools[0] as PoolSpec & { name: string } | undefined
+    if (!pool) {
+      res.status(404).json({ error: 'not_found', detail: 'no such pool' })
+      return
+    }
+
+    const { rows: models } = await db.query(
+      `SELECT m.id, m.kind, m.runtime, m.size_bytes
+         FROM models m JOIN pool_models pm ON pm.model_id = m.id
+        WHERE pm.pool_id = $1 ORDER BY m.id`, [poolId])
+
+    // Which machines this group actually reaches, evaluated rather than joined:
+    // membership is a rule as often as it is a list.
+    const { rows: nodes } = await db.query(
+      `SELECT id, hostname, tier, tiers, chip, memory_gb, resident_models
+         FROM nodes WHERE state = 'active'`)
+    const members = (nodes as any[]).filter((n) => nodeMatchesPool(n as never, pool as never))
+
+    res.json({
+      pool: { id: pool.id, name: pool.name, tier: pool.tier, enabled: pool.enabled },
+      // A stood-down group offers nothing, whatever its rows say, and saying so
+      // here saves the reader working out why nothing arrived.
+      offering: pool.enabled === false ? [] : models.map((m: any) => m.id),
+      models: models.map((m: any) => ({
+        id: m.id, kind: m.kind, runtime: m.runtime, sizeBytes: Number(m.size_bytes),
+        heldBy: members.filter((n) => (n.resident_models ?? {})[m.id] !== undefined)
+          .map((n) => n.hostname),
+        missingFrom: members.filter((n) => (n.resident_models ?? {})[m.id] === undefined)
+          .map((n) => n.hostname),
+      })),
+      members: members.map((n) => n.hostname),
+    })
+  })
+
   r.put('/pools/:poolId/models/:modelId', async (req, res) => {
     const { poolId, modelId } = req.params as { poolId: string; modelId: string }
     if (!(await requireRole(db, req.user!.id, poolId, 'operator'))) {

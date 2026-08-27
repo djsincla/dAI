@@ -155,12 +155,25 @@ case "assigned":
         let ca = try String(contentsOf: dir.appendingPathComponent("ca.crt"), encoding: .utf8)
         let cp = try ControlPlane(base: URL(string: args[2])!, identity: identity,
                                   serverCAPEM: ca)
-        let models = try await cp.assignedModels()
+        // Shut down on both paths, and before anything can exit. AsyncHTTPClient
+        // traps in deinit if it was never shut down, so a throw from the call
+        // below crashed the process while unwinding and took the error message
+        // with it: the trap fired before the catch could say what went wrong.
+        // A defer cannot do this because shutdown is async.
+        var models: [ControlPlane.AssignedModel] = []
+        do {
+            models = try await cp.assignedModels()
+            await cp.shutdown()
+        } catch {
+            await cp.shutdown()
+            throw error
+        }
+
+        print("models: \(MLXRuntime.modelDirectory.path)")
         if models.isEmpty {
             print("nothing is assigned to this node")
             print("  Either no enabled group names a model for it, or this node")
             print("  matches no enabled group. Both look identical from here.")
-            exit(0)
         }
         for m in models {
             let dir = MLXRuntime.modelDirectory.appendingPathComponent(m.id)
@@ -173,6 +186,21 @@ case "assigned":
                          Double(bytes) / 1_073_741_824))
         }
     } catch {
+        // The enclave key belongs to the daemon's account and never leaves the
+        // enclave, so only the daemon can sign with it. sudo does not help and
+        // neither does sudo -u _dai: a service account's keybag is not unlocked
+        // in a sudo session. Both were tried while chasing a model that would
+        // not transfer, and the raw CryptoTokenKit code says none of this.
+        if "\(error)".contains("unable to sign digest") {
+            print("this machine's key can only be used by the running daemon.")
+            print("  The certificate is readable but the private key lives in the")
+            print("  Secure Enclave under \(ProcessInfo.processInfo.environment["USER"] ?? "the daemon's account"),")
+            print("  and a sudo session has no unlocked keybag to use it.")
+            print()
+            print("  Ask the control plane instead, which needs no node identity:")
+            print("    GET /admin/v1/pools/<poolId>/models")
+            exit(1)
+        }
         print("could not ask: \(error)")
         exit(1)
     }

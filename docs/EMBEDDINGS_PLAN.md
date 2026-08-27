@@ -192,6 +192,17 @@ That last point deserves a field. OpenAI's schema has nowhere to put it, so
 `input_type: "query" | "document"` is a documented extension, defaulting to
 `document`, and ignored by models that declare no prefixes.
 
+### What is left
+
+The catalogue filter from `280a0e64` stays until the fleet is running a build
+that can answer an embed dispatch. Removing it sooner would advertise embedding
+models to callers whose requests every current agent refuses, which is the bug
+that filter was added to fix, arriving from the other direction.
+
+So the order is: release, confirm the agents took it, run `verify-embed` on a
+node against staged weights, then remove the filter and let the models appear.
+Only after that is the endpoint honest.
+
 ### The catalogue bug, first and separately
 
 `EMBEDDINGS.md` closes on it and it should be fixed before any of the above:
@@ -206,7 +217,7 @@ makes things better on its own.
     control-plane/openapi/dai.yaml          the schema                      DONE
     control-plane/src/lib/candidates.ts     embed as an interactive dispatch kind
     control-plane/src/lib/policy.ts         embed permitted for mlx runtime, presence gated
-    control-plane/src/lib/import.ts         runtime by staged artifact, not by kind
+    control-plane/src/lib/import.ts         runtime by staged artifact      DONE
     control-plane/test/api.test.ts          route behaviour and every refusal
     agent/Package.swift                     the MLXEmbedders product      DONE
     agent/Sources/DaiWorker/EmbedRuntime.swift      new                   DONE

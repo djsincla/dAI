@@ -2,7 +2,7 @@ import { Router, type Request } from 'express'
 import type { Db } from '../lib/db.js'
 import type { Broker } from '../lib/broker.js'
 import { userAuth } from '../lib/auth.js'
-import { POLICY, type PresenceState } from '../lib/policy.js'
+import { POLICY, type PresenceState, type WorkKind } from '../lib/policy.js'
 import { candidatesFor, isRefusal, selectGang, selectNode,
          type Candidate, type Refusal } from '../lib/router.js'
 import { shapeOf } from '../lib/shape.js'
@@ -29,6 +29,14 @@ import { assignRanks } from '../lib/splitRanks.js'
  * catalogue that answered for the fleet would advertise models the next request
  * on the same port could not be given.
  */
+/// How many inputs one embeddings request may carry.
+///
+/// The request is dispatched to one machine as a single unit, so a preemption
+/// discards all of it and the caller retries all of it. A large batch turns a
+/// yield, which is meant to cost seconds, into re-embedding a corpus. 256 is
+/// comfortably more than a page of text and comfortably less than that.
+const EMBED_BATCH_MAX = 256
+
 async function servableModels(db: Db, broker: Broker, groupId?: string | null) {
     const { rows } = await db.query(
       `SELECT id AS node_id, name,
@@ -1018,6 +1026,152 @@ export function servingRoutes(db: Db, broker: Broker): Router {
         maxTokensApplied: maxTokens,
         cappedByPolicy: maxTokens < requested,
         ...(split ? { split } : {}),
+      },
+    })
+  })
+
+  /**
+   * Embeddings, OpenAI shaped.
+   *
+   * Every refusal below exists because the alternative is a vector that looks
+   * correct and is not. A caller cannot tell a good embedding from a bad one by
+   * inspecting it: both are the right length, in the right range, and compare
+   * cleanly by cosine. The failure surfaces weeks later as poor retrieval,
+   * blamed on the model. So this endpoint refuses loudly rather than answering
+   * approximately, which is the same argument docs/EMBEDDINGS.md makes for
+   * having returned 404 until the vectors were real.
+   *
+   * `input_type` is an extension to the OpenAI shape and is not decoration.
+   * Nomic and E5 models are trained with a prefix declaring whether text is a
+   * query or a passage, and the same words embedded as the wrong one land
+   * measurably elsewhere. OpenAI's schema has nowhere to put it, so a plain
+   * OpenAI client will not send it and gets `document`, which is right for the
+   * common case of embedding a corpus.
+   */
+  r.post('/embeddings', async (req, res) => {
+    const body = req.body as {
+      model?: string
+      input?: unknown
+      input_type?: string
+      encoding_format?: string
+    }
+
+    const fail = (status: number, type: string, message: string, extra = {}) =>
+      res.status(status).json({ error: { type, message, ...extra } })
+
+    if (!body.model) return void fail(400, 'invalid_request_error', 'model is required')
+
+    // The kind is checked before anything else. Sending a conversation to an
+    // embedding model, or a passage to a chat model, produces something in both
+    // directions, and neither is what was asked for.
+    const { rows: known } = await db.query(
+      `SELECT id, kind, runtime FROM models WHERE id = $1`, [body.model])
+    const model = known[0] as { id: string; kind: string; runtime: string } | undefined
+    if (!model) {
+      return void fail(404, 'not_found_error',
+        `no model called "${body.model}" is in the catalogue`)
+    }
+    if (model.kind !== 'embed') {
+      return void fail(400, 'invalid_request_error',
+        `"${body.model}" is a ${model.kind} model. Embedding one would return a `
+        + 'vector of the right shape that means nothing. Use /v1/chat/completions '
+        + 'for generation, or name an embedding model.')
+    }
+
+    const input = Array.isArray(body.input) ? body.input : [body.input]
+    if (input.length === 0 || input.some((i) => typeof i !== 'string')) {
+      return void fail(400, 'invalid_request_error',
+        'input must be a string or a non-empty array of strings')
+    }
+    if (input.some((i) => (i as string).trim() === '')) {
+      // An empty string embeds to whatever the model does with nothing, which
+      // is a real vector at a fixed point in the space. It would then be
+      // "similar" to every other empty input and to nothing else, which is a
+      // silent corruption of an index rather than an error.
+      return void fail(400, 'invalid_request_error',
+        'input contains an empty string, which embeds to a fixed point that is '
+        + 'not about anything. Drop it rather than indexing it.')
+    }
+    // The next three are also expressed in openapi/dai.yaml, and the validator
+    // runs before this handler, so in normal operation it answers first. They
+    // are kept because the schema and the handler can drift, and of the two the
+    // handler is the one that knows what the number means.
+    if (input.length > EMBED_BATCH_MAX) {
+      return void fail(400, 'invalid_request_error',
+        `${input.length} inputs exceeds the limit of ${EMBED_BATCH_MAX}. Send `
+        + 'them in batches: the request is dispatched to one machine as a unit '
+        + 'and a preemption discards the whole of it.')
+    }
+    if (body.encoding_format && body.encoding_format !== 'float') {
+      return void fail(400, 'invalid_request_error',
+        `encoding_format "${body.encoding_format}" is not supported; only float`)
+    }
+    const inputType = body.input_type ?? 'document'
+    if (inputType !== 'document' && inputType !== 'query') {
+      return void fail(400, 'invalid_request_error',
+        'input_type must be "query" or "document"')
+    }
+
+    // **Which device this runs on decides which machines may take it.**
+    //
+    // `permittedKinds` allows 'embed' in every presence state, including
+    // ACTIVE, because embed meant Core ML on the Neural Engine and the ANE is
+    // not what somebody's desktop contends for. An MLX embedding model runs on
+    // the GPU and contends exactly as generation does, so it is gated exactly
+    // as generation is. Sending it as 'embed' would put GPU work on a machine
+    // whose owner is using it, which is the one failure this project cannot
+    // afford socially.
+    //
+    // When the Core ML path lands, a model with runtime 'coreml' passes 'embed'
+    // here and regains presence independence, which is the whole point of that
+    // work. See docs/EMBEDDINGS_PLAN.md.
+    const presenceKind: WorkKind = model.runtime === 'coreml' ? 'embed' : 'generate'
+
+    const candidates = await candidatesFor(db, broker.inFlightCounts, groupOf(req))
+    const connected = candidates.filter((c) => broker.isConnected(c.id))
+    const choice = selectNode(connected, presenceKind, body.model)
+    if (isRefusal(choice)) {
+      return void fail(503, 'overloaded_error', choice.detail,
+                       { dai: { code: choice.refused } })
+    }
+
+    const cancel = new AbortController()
+    res.on('close', () => { if (!res.writableEnded) cancel.abort() })
+
+    const out = await broker.dispatch(choice.id, 'embed', body.model, {
+      operation: 'embed',
+      input,
+      inputType,
+    }, cancel.signal)
+
+    if (cancel.signal.aborted) return
+    if (!out.ok) return void fail(503, 'api_error', out.error)
+
+    const vectors = (out.body as { embeddings?: number[][] })?.embeddings
+    if (!Array.isArray(vectors) || vectors.length !== input.length) {
+      // Counted rather than trusted. A node returning fewer vectors than inputs
+      // would otherwise pair them off by position and attach every vector after
+      // the gap to the wrong text, with nothing to see in the response.
+      return void fail(502, 'api_error',
+        `the node returned ${Array.isArray(vectors) ? vectors.length : 0} vectors `
+        + `for ${input.length} inputs`)
+    }
+
+    res.json({
+      object: 'list',
+      model: body.model,
+      data: vectors.map((embedding, index) => ({
+        object: 'embedding', index, embedding,
+      })),
+      usage: { prompt_tokens: 0, total_tokens: 0 },
+      dai: {
+        node: choice.hostname,
+        presenceState: choice.presence_state,
+        // Stated rather than left to be inferred, because a caller mixing
+        // vectors made with different prefixes gets a quietly worse index and
+        // no way to find out afterwards which is which.
+        inputType,
+        normalized: true,
       },
     })
   })

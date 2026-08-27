@@ -155,3 +155,38 @@ export async function membersOf(
     .filter((n) => poolsFor(n, pools as PoolSpec[]).length > 0)
     .map((n) => n.id!))
 }
+
+/**
+ * A group's name, checked.
+ *
+ * Names were accepted unvalidated, and one of the first groups anybody made was
+ * called "Cluster" while being a harvest-tier group: preemptible, presence
+ * gated, scheduled as independent units. Everything about it was the opposite
+ * of what its name claimed, and reading a pool listing meant knowing to ignore
+ * the name and look at the tier column.
+ *
+ * That is not a cosmetic problem. Tier decides whether work is preempted when
+ * somebody sits down at the machine, and an operator standing up "Cluster"
+ * expecting a dedicated box gets a harvest group instead.
+ *
+ * So a tier name is refused outright rather than warned about. There is no
+ * situation where naming a group after a tier it may not be is clearer than
+ * naming it after what it does.
+ */
+export const TIER_NAMES = ['harvest', 'cluster']
+
+export function checkPoolName(raw: unknown): { name: string } | { error: string } {
+  if (typeof raw !== 'string') return { error: 'name is required' }
+  const name = raw.trim()
+  if (name.length === 0) return { error: 'name cannot be empty' }
+  if (name.length > 64) return { error: 'name cannot be longer than 64 characters' }
+  if (TIER_NAMES.includes(name.toLowerCase())) {
+    return {
+      error: `"${name}" is a tier, not a group. A group named after a tier `
+        + 'claims a scheduling policy it may not have: tier decides whether work '
+        + 'is preempted when somebody sits down at the machine, and the two can '
+        + 'disagree. Name it after what it does.',
+    }
+  }
+  return { name }
+}

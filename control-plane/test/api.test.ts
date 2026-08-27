@@ -1468,3 +1468,51 @@ describe('join tokens', () => {
     expect((await mint({ expiresInHours: 10_000 })).status).toBe(400)
   })
 })
+
+describe('renaming a group', () => {
+  // The seed binds only the operator role. Renaming is an admin action, for
+  // the same reason standing a group down is: it changes what the group is,
+  // not what it is currently doing.
+  beforeEach(async () => {
+    await db.query(`UPDATE role_bindings SET role = 'admin' WHERE pool_id = $1`,
+                   [fx.poolId])
+  })
+
+  const rename = (poolId: string, name: unknown, token: string) =>
+    fetch(`${base}/admin/v1/pools/${poolId}/name`, {
+      method: 'PUT', headers: asUser(token), body: JSON.stringify({ name }),
+    })
+
+  it('renames it', async () => {
+    const r = await rename(fx.poolId, 'studio-macs', fx.operatorToken)
+    expect(r.status).toBe(200)
+    expect((await r.json()).name).toBe('studio-macs')
+    const pools = await (await fetch(`${base}/admin/v1/pools`,
+      { headers: asUser(fx.operatorToken) })).json()
+    expect(pools.map((p: { name: string }) => p.name)).toContain('studio-macs')
+  })
+
+  it('refuses a tier name, and says why', async () => {
+    // The reason this endpoint exists. A group called "Cluster" that is harvest
+    // tier claims a scheduling policy it does not have, and an operator reading
+    // the listing has to know to ignore the name.
+    const r = await rename(fx.poolId, 'Cluster', fx.operatorToken)
+    expect(r.status).toBe(400)
+    expect((await r.json()).detail).toMatch(/tier/)
+  })
+
+  it('refuses an empty name', async () => {
+    expect((await rename(fx.poolId, '   ', fx.operatorToken)).status).toBe(400)
+  })
+
+  it('refuses a caller without admin on the group', async () => {
+    const r = await rename(fx.poolId, 'someone-elses', fx.strangerToken)
+    expect([401, 403]).toContain(r.status)
+  })
+
+  it('is a 404 for a group that does not exist', async () => {
+    const r = await rename('00000000-0000-0000-0000-000000000000',
+                           'nowhere', fx.operatorToken)
+    expect([403, 404]).toContain(r.status)
+  })
+})

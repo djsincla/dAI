@@ -1131,6 +1131,62 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/OpenAIError' }
 
+  /admin/v1/pools/{poolId}/name:
+    put:
+      tags: [admin]
+      summary: Rename a group
+      description: |
+        A tier name is refused. Groups were named freely, and one of the first
+        was called "Cluster" while being harvest tier: preemptible, presence
+        gated, scheduled as independent units, which is the opposite of what the
+        name claims. Tier decides whether work is preempted when somebody sits
+        down at the machine, so an operator standing up a group called "Cluster"
+        expecting a dedicated box gets the other thing.
+      parameters:
+        - in: path
+          name: poolId
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 64 }
+      responses:
+        '200':
+          description: The renamed group
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, format: uuid }
+                  name: { type: string }
+        '400':
+          description: Empty, too long, or a tier name
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
+                  detail: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such group
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
+                  detail: { type: string }
+
   /admin/v1/nodes:
     get:
       tags: [admin]

@@ -14,7 +14,7 @@ import type { GroupListeners } from '../lib/groupSockets.js'
 import { existsSync } from 'node:fs'
 import { Router } from 'express'
 import { type Db, tx } from '../lib/db.js'
-import { nodeMatchesPool, poolMode, poolsFor } from '../lib/pools.js'
+import { nodeMatchesPool, poolMode, poolsFor, checkPoolName } from '../lib/pools.js'
 import { bucketFor, clampWindow } from '../lib/window.js'
 import { asHtml, asText, readLogs } from '../lib/logs.js'
 import { registerAgentBuild } from '../lib/agentBuilds.js'
@@ -749,6 +749,11 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
    */
   r.post('/pools', async (req, res) => {
     const b = req.body as { name: string; tier?: 'harvest' | 'cluster' }
+    const checked = checkPoolName(b.name)
+    if ('error' in checked) {
+      res.status(400).json({ error: 'bad_request', detail: checked.error })
+      return
+    }
     try {
       // The socket, allocated here rather than at first use. A group that
       // exists but cannot be addressed is a group somebody has to be told
@@ -778,7 +783,7 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
       const { rows } = await db.query(
         `INSERT INTO pools (name, tier, schedule, preempt, serving_port)
          VALUES ($1, $2, $3, $4, $5) RETURNING id, name, tier, serving_port`,
-        [b.name, b.tier ?? 'harvest',
+        [checked.name, b.tier ?? 'harvest',
          b.tier === 'cluster' ? 'gang' : 'independent-units',
          b.tier === 'cluster' ? 'never' : 'on-user-activity', port],
       )
@@ -906,6 +911,37 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
    * stand the cluster group down for the evening, not to dismantle it and
    * rebuild it from memory tomorrow.
    */
+  /**
+   * Rename a group.
+   *
+   * Beside the other single-field endpoints rather than a general PATCH, for
+   * the same reason they are: each one can say what it refuses and why, and a
+   * general update would have to guess which fields the caller meant to change.
+   *
+   * The name is checked against the tier names. See checkPoolName.
+   */
+  r.put('/pools/:poolId/name', async (req, res) => {
+    const { poolId } = req.params as { poolId: string }
+    const checked = checkPoolName((req.body as { name?: unknown })?.name)
+    if ('error' in checked) {
+      res.status(400).json({ error: 'bad_request', detail: checked.error })
+      return
+    }
+    if (!(await requireRole(db, req.user!.id, poolId, 'admin'))) {
+      res.status(403).json({ error: 'forbidden', detail: 'admin role required on this pool' })
+      return
+    }
+    const { rows } = await db.query(
+      `UPDATE pools SET name = $2 WHERE id = $1 RETURNING id, name`, [poolId, checked.name])
+    const pool = rows[0] as { id: string; name: string } | undefined
+    if (!pool) {
+      res.status(404).json({ error: 'not_found', detail: 'no such pool' })
+      return
+    }
+    await audit(db, req.user!.id, 'pool.rename', poolId, { name: checked.name })
+    res.json({ id: pool.id, name: pool.name })
+  })
+
   r.put('/pools/:poolId/enabled', async (req, res) => {
     const { poolId } = req.params as { poolId: string }
     const wanted = (req.body as { enabled?: boolean })?.enabled

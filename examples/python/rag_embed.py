@@ -321,11 +321,16 @@ class MlxEmbeddings:
 
     name = "mlx"
 
-    QUERY = "search_query: "
-    DOCUMENT = "search_document: "
+    # Qwen3-Embedding takes no prefix. Nomic and E5 models do, and the pair
+    # below is kept because switching model families is a one line change and
+    # dropping the prefix for a model that wants one degrades retrieval with no
+    # visible symptom. Empty strings mean "this model was not trained with a
+    # role prefix", which is a statement rather than an omission.
+    QUERY = ""
+    DOCUMENT = ""
 
-    def __init__(self, model: str = "mlx-community/nomicai-modernbert-embed-base-bf16",
-                 max_length: int = 8192, batch: int = 32):
+    def __init__(self, model: str = "mlx-community/Qwen3-Embedding-0.6B-8bit",
+                 max_length: int = 32768, batch: int = 16):
         from mlx_embeddings import load
         self.model_name = model
         self.max_length = max_length

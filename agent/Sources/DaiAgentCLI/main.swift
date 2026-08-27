@@ -137,6 +137,92 @@ case "verify-ane":
         print(String(format: "  ceiling         %.1f items/s", 1 / (b.fill + b.predict)))
     }
 
+case "verify-embed":
+    // The agreement check, as a command rather than a unit test, for the same
+    // reason verify-ane is one: MLX needs the Metal shader library, SwiftPM's
+    // command line cannot compile it (see packaging/build-pkg.sh), so anything
+    // touching MLX cannot run under `swift test` on any machine. This ships in
+    // the package and runs on a node against weights that are actually staged.
+    //
+    // What it checks is agreement with examples/python/rag_embed.py, because
+    // that is the only thing that catches the failures this code can have. A
+    // wrong pooling, an unnormalised vector, a missing prefix or padding
+    // averaged into the mean all produce a vector of the right shape, in the
+    // right range, comparable by cosine, and wrong. Nothing raises.
+    guard args.count > 3 else {
+        print("""
+usage: dai-agent verify-embed <model-id> <fixture.json>
+
+  <fixture.json> is produced by the Python client, which built the index this
+  has to stay compatible with:
+
+      agent/Tests/DaiAgentTests/Fixtures/embedding-vectors.json
+""")
+        exit(2)
+    }
+    do {
+        struct Fixture: Decodable {
+            struct Item: Decodable {
+                let text: String
+                let intent: String
+                let vector: [Float]
+            }
+            let model: String
+            let items: [Item]
+        }
+        let fixture = try JSONDecoder().decode(
+            Fixture.self, from: Data(contentsOf: URL(fileURLWithPath: args[3])))
+        if fixture.model != args[2] {
+            print("REFUSED: the fixture is for \(fixture.model), not \(args[2]).")
+            print("  Vectors from two different models are not comparable, and")
+            print("  comparing them would report a failure that is not one.")
+            exit(2)
+        }
+
+        let runtime = EmbedRuntime(modelId: args[2])
+        let seconds = try await runtime.load()
+        print(String(format: "loaded %@ in %.2fs", args[2], seconds))
+
+        var worst = Float(1)
+        for item in fixture.items {
+            let intent: EmbedRuntime.Intent = item.intent == "query" ? .query : .document
+            let mine = try await runtime.embed([item.text], intent: intent)[0]
+            guard mine.count == item.vector.count else {
+                print("REFUSED: \(mine.count) dimensions against the fixture's \(item.vector.count)")
+                exit(1)
+            }
+            let agreement = zip(mine, item.vector).reduce(Float(0)) { $0 + $1.0 * $1.1 }
+            worst = min(worst, agreement)
+            print(String(format: "  %-9s %.4f  %@", (item.intent as NSString).utf8String!,
+                         agreement, String(item.text.prefix(44))))
+        }
+
+        // Ranking, separately, because two implementations can agree on vectors
+        // that order the corpus wrongly if they share a mistake.
+        let q = try await runtime.embed(["how do I decommission a workload domain?"],
+                                        intent: .query)[0]
+        let docs = try await runtime.embed(["Delete a Workload Domain",
+                                            "Requirements for Enabling vSAN",
+                                            "search and rescue of a lost hiker"],
+                                           intent: .document)
+        let scores = docs.map { d in zip(q, d).reduce(Float(0)) { $0 + $1.0 * $1.1 } }
+        print(String(format: "ranking: %.3f > %.3f > %.3f", scores[0], scores[1], scores[2]))
+        let ordered = scores[0] > scores[1] && scores[1] > scores[2]
+
+        if worst > 0.99 && ordered {
+            print(String(format: "VERDICT: agrees with the Python client (worst %.4f). "
+                                 + "An index built there can be queried here.", worst))
+        } else {
+            print(String(format: "VERDICT: DISAGREES (worst %.4f, ordered %@). "
+                                 + "Do not serve embeddings from this build: the vectors "
+                                 + "are plausible and wrong.", worst, ordered ? "yes" : "no"))
+            exit(1)
+        }
+    } catch {
+        print("REFUSED: \(error)")
+        exit(1)
+    }
+
 case "enroll":
     // usage: dai-agent enroll <control-plane-url> <join-token> [server-ca.pem] [waitSeconds]
     guard args.count > 3 else {

@@ -25,6 +25,11 @@ public actor EmbedRuntime {
 
     /// Longest input this model can read, in tokens.
     ///
+    /// Defaults to Qwen3-Embedding's 32,768. A caller staging a different model
+    /// must set this: the number is a property of the weights, and a default
+    /// that is too generous turns the refusal below into silent truncation
+    /// inside the model, which is the one outcome this is here to prevent.
+    ///
     /// Not a truncation limit. Over-length input is refused, because embedding
     /// the first 8,192 tokens of a longer passage returns a vector of the right
     /// shape, in the right range, cosine comparable, and wrong. The caller
@@ -36,7 +41,7 @@ public actor EmbedRuntime {
 
     private let prefixes: Prefixes
 
-    public init(modelId: String, maxTokens: Int = 8192,
+    public init(modelId: String, maxTokens: Int = 32768,
                 prefixes: Prefixes? = nil) {
         self.modelId = modelId
         self.maxTokens = maxTokens

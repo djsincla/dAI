@@ -40,12 +40,14 @@ public actor EmbedRuntime {
     public let maxTokens: Int
 
     private let prefixes: Prefixes
+    private let pooled: Pooled
 
     public init(modelId: String, maxTokens: Int = 32768,
-                prefixes: Prefixes? = nil) {
+                prefixes: Prefixes? = nil, pooled: Pooled? = nil) {
         self.modelId = modelId
         self.maxTokens = maxTokens
         self.prefixes = prefixes ?? Prefixes.forModel(modelId)
+        self.pooled = pooled ?? Pooled.forModel(modelId)
     }
 
     public var name: String { modelId }
@@ -110,6 +112,39 @@ public actor EmbedRuntime {
         case document
     }
 
+    // -------------------------------------------------------------- pooling
+
+    /// How a sequence of token vectors becomes one vector for the passage.
+    ///
+    /// **Chosen here rather than read from the model, for the same reason as
+    /// the prefixes, and found the same way.** MLXEmbedders reads
+    /// `1_Pooling/config.json` and falls back to `Strategy.none` when it is
+    /// absent. The mlx-community conversion of Qwen3-Embedding ships no
+    /// `1_Pooling` directory, so the library pooled nothing and handed back the
+    /// raw hidden states: `verify-embed` reported "6 dimensions against the
+    /// fixture's 1024", six being the token count of the input.
+    ///
+    /// That failure was loud only because the shapes disagreed. Had the fixture
+    /// been absent it would have produced one vector per token and something
+    /// downstream would have silently taken the first, which is a defensible
+    /// looking vector and the wrong one.
+    ///
+    /// The strategies are not interchangeable. Qwen3-Embedding is built on a
+    /// causal model and its embedding is the last token's state; BERT-family
+    /// encoders mean over the sequence. Using one model's convention on another
+    /// produces a working system that retrieves badly.
+    public enum Pooled: String, Sendable {
+        case mean
+        case lastToken
+        case cls
+
+        public static func forModel(_ id: String) -> Pooled {
+            let name = id.lowercased()
+            if name.contains("qwen3") { return .lastToken }
+            return .mean
+        }
+    }
+
     // ------------------------------------------------------------- lifecycle
 
     @discardableResult
@@ -144,6 +179,7 @@ public actor EmbedRuntime {
         case notLoaded
         case empty
         case tooLong(index: Int, tokens: Int, limit: Int)
+        case noHiddenStates
 
         public var description: String {
             switch self {
@@ -151,6 +187,8 @@ public actor EmbedRuntime {
                 return "the embedding model is not loaded"
             case .empty:
                 return "input is empty"
+            case .noHiddenStates:
+                return "the model returned no hidden states to pool"
             case let .tooLong(index, tokens, limit):
                 return "input \(index) is \(tokens) tokens and the limit is "
                      + "\(limit). It is refused rather than truncated: a vector "
@@ -205,15 +243,38 @@ public actor EmbedRuntime {
 
             let output = model(input, positionIds: nil, tokenTypeIds: nil,
                                attentionMask: maskArray)
-            let pooled = pooling(output, mask: maskArray, normalize: true,
-                                 applyLayerNorm: false)
-            pooled.eval()
-
-            let dims = pooled.shape[1]
-            let flat = pooled.asArray(Float.self)
-            return (0 ..< texts.count).map { row in
-                Array(flat[(row * dims) ..< ((row + 1) * dims)])
+            guard let hidden = output.hiddenStates else {
+                throw EmbedError.noHiddenStates
             }
+
+            // Pooled per row from that row's real length, which is why the
+            // token counts are kept above. Slicing at `length - 1` rather than
+            // at the padded end is what makes a vector independent of whatever
+            // else was in its batch: the library's `.last` takes the final
+            // position of the padded sequence, which for a short input in a
+            // long batch is padding.
+            var out: [[Float]] = []
+            for (row, ids) in encoded.enumerated() {
+                let length = ids.count
+                let sequence = hidden[row]
+                let vector: MLXArray
+                switch self.pooled {
+                case .lastToken:
+                    vector = sequence[length - 1]
+                case .cls:
+                    vector = sequence[0]
+                case .mean:
+                    vector = MLX.sum(sequence[0 ..< length], axis: 0)
+                           / MLXArray(Float(length))
+                }
+                // Normalised here rather than trusted from the model, so a
+                // caller scoring with a dot product gets cosine.
+                let norm = MLX.sqrt(MLX.sum(vector * vector))
+                let unit = vector / MLX.maximum(norm, MLXArray(Float(1e-12)))
+                unit.eval()
+                out.append(unit.asArray(Float.self))
+            }
+            return out
         }
     }
 }

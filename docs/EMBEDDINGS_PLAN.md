@@ -215,11 +215,41 @@ fails the same way. So the agreement check is a command rather than a test,
 following verify-ane, and the guarded tests beside it skip everywhere SwiftPM
 builds. A skip there is not evidence of anything; the command's verdict is.
 
-Still unverified: the vectors themselves. `verify-embed` has never returned a
-verdict on this hardware, because running it needs an xcodebuild-produced binary
-with staged weights. That is the next thing to do and it gates everything after
-it, since a correct looking wrong vector is the failure this whole plan is
-arranged around.
+**Verified.** Built with xcodebuild, run against staged weights:
+
+    loaded mlx-community/Qwen3-Embedding-0.6B-8bit in 1.93s
+      document  0.9998  Delete a Workload Domain
+      document  0.9998  Requirements for Enabling vSAN
+      document  1.0001  search and rescue of a lost hiker
+      query     1.0001  how do I decommission a workload domain?
+    ranking: 0.855 > 0.518 > 0.353
+    VERDICT: agrees with the Python client (worst 0.9998).
+
+The ranking matches Python's 0.855 / 0.519 / 0.353, so the two implementations
+order the corpus the same way and not merely produce similar numbers. Cosines
+slightly over 1.0 are the fixture's six decimal rounding, not a normalisation
+fault.
+
+It took two attempts, and the first one is the reason this check exists.
+Pooling was wrong: MLXEmbedders reads `1_Pooling/config.json` and falls back to
+`Strategy.none` when it is absent, the mlx-community conversions do not ship
+that directory, and the library therefore returned unpooled hidden states. The
+first run said "6 dimensions against the fixture's 1024", six being the token
+count of the input. That was loud only because the shapes disagreed; with no
+fixture to disagree with, something downstream takes the first row and gets a
+plausible vector that is not the passage's.
+
+So pooling is now chosen in `EmbedRuntime` by model family, like the prefixes,
+and applied per row from each row's real token count. Qwen3-Embedding is causal
+and its embedding is the last token's state; BERT-family encoders mean over the
+sequence, and using one convention on the other model produces a working system
+that retrieves badly. Pooling per row also keeps a vector independent of its
+batch, since the library's `.last` takes the final position of a padded
+sequence.
+
+One delta from upstream: `EmbeddingModelOutput.hiddenStates` and `pooledOutput`
+are made public in the vendored library, because pooling correctly requires
+them and the library's own pooling cannot be trusted for these conversions.
 
 ## Verification
 

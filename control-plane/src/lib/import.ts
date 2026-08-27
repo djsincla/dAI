@@ -99,8 +99,35 @@ function describe(id: string) {
       : name.includes('llama') ? 'llama-3'
       : name.includes('mistral') ? 'mistral'
       : null
-  const kind = /embed|bge|e5|gte|minilm/.test(name) ? 'embed' : 'generate'
+  // Families whose whole purpose is embedding. Anchored on separators rather
+  // than matched loosely: a bare /e5/ also matches the middle of an unrelated
+  // name, and mislabelling a chat model as an embedding one hides it from the
+  // catalogue and refuses every completion sent to it.
+  const kind = /(^|[-_/.])(embed\w*|bge|e5|gte|minilm|modernbert|nomic)([-_/.]|$)/
+    .test(name) ? 'embed' : 'generate'
   return { quant, family, kind }
+}
+
+/**
+ * Which runtime can actually load what was staged, read from the files.
+ *
+ * This was `kind === 'embed' ? 'coreml' : 'mlx'`, which encoded an assumption
+ * that has since stopped being true: embedding meant Core ML on the Neural
+ * Engine, and now an embedding model may be MLX weights that run on the GPU.
+ *
+ * Getting it wrong is not cosmetic. `/v1/embeddings` decides presence gating
+ * from this field, because the question is which device the work lands on. A
+ * Core ML model is permitted while somebody is using their machine, since the
+ * ANE is not what a desktop contends for. Labelling MLX weights `coreml` would
+ * therefore dispatch GPU work to a machine whose owner is sitting at it, which
+ * is the one failure this project cannot afford socially.
+ *
+ * Core ML ships a compiled bundle; MLX ships safetensors. The files say which
+ * arrived, and they cannot be wrong about it the way a name can.
+ */
+function runtimeFor(files: { path: string }[]): 'coreml' | 'mlx' {
+  return files.some((f) => /\.(mlpackage|mlmodelc|mlmodel)(\/|$)/.test(f.path))
+    ? 'coreml' : 'mlx'
 }
 
 /**
@@ -159,7 +186,7 @@ export async function importModel(
     await db.query(
       `INSERT INTO models (id, runtime, kind, size_bytes, quantization, family, imported_by)
        VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-      [id, kind === 'embed' ? 'coreml' : 'mlx', kind, total, quant, family, userId],
+      [id, runtimeFor(files), kind, total, quant, family, userId],
     )
     for (const f of files) {
       await db.query(
@@ -178,4 +205,4 @@ export async function importModel(
   }
 }
 
-export { relative }
+export { relative, describe as describeModel, runtimeFor }

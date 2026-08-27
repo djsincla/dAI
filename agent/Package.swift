@@ -53,6 +53,11 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXLLM", package: "mlx-swift-examples"),
                 .product(name: "MLXLMCommon", package: "mlx-swift-examples"),
+                // Embedding models, for /v1/embeddings. Vendored with the rest
+                // of mlx-swift-examples and simply not depended on until now;
+                // it carries Bert, NomicBert and Qwen3 with their own
+                // tokenizers and pooling. See docs/EMBEDDINGS_PLAN.md.
+                .product(name: "MLXEmbedders", package: "mlx-swift-examples"),
             ]
         ),
         .executableTarget(

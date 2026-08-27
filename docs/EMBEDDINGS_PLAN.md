@@ -147,10 +147,25 @@ and `RenderRuntime.swift`, wrapping `MLXEmbedders.loadModelContainer` and its
   that is not cosine and quietly favours longer passages.
 - **The prefix convention.** Nomic and E5 models are trained with a prefix
   declaring what the text is for: `search_query:` against `search_document:`.
-  A query embedded as a document lands somewhere measurably different. Since the
-  API cannot guess, the request carries the intent, and the server applies the
-  prefix the model's config declares. Getting this wrong degrades retrieval
-  silently and is invisible in the vector.
+  A query embedded as a document lands somewhere measurably different, 0.80
+  cosine rather than 1.0 for one string put through both. Since the API cannot
+  guess, the request carries the intent.
+
+  This said the server should apply the prefix the model's config declares, and
+  **that was wrong**, found while building the runtime. Sentence-transformers
+  records prefixes in `config_sentence_transformers.json` under `prompts`, and
+  the MLX conversion of nomic's ModernBERT embedder ships `"prompts": {}` while
+  still being a model that requires them: the conversion dropped them. A server
+  trusting that config would apply no prefix to a model that needs one, with no
+  error and nothing visible in the vector.
+
+  So the convention is carried in the agent, keyed by model family, with the
+  literals matched to `examples/python/rag_embed.py`. An index built by one and
+  queried through the other is only comparable while both agree, which makes
+  those two strings a compatibility surface rather than an implementation
+  detail. The registry is the better long term home, since an operator staging
+  a model knows what it wants; the agent default is what stops a staged model
+  being silently wrong in the meantime.
 
 That last point deserves a field. OpenAI's schema has nowhere to put it, so
 `input_type: "query" | "document"` is a documented extension, defaulting to
@@ -172,10 +187,18 @@ makes things better on its own.
     control-plane/src/lib/import.ts         runtime by staged artifact, not by kind
     control-plane/openapi/dai.yaml          the schema, including input_type
     control-plane/test/api.test.ts          route behaviour and every refusal
-    agent/Package.swift                     the MLXEmbedders product
-    agent/Sources/DaiWorker/EmbedRuntime.swift      new
+    agent/Package.swift                     the MLXEmbedders product      DONE
+    agent/Sources/DaiWorker/EmbedRuntime.swift      new                   DONE
     agent/Sources/DaiWorker/Worker.swift    dispatch embed to it
-    agent/Tests/DaiAgentTests/EmbedRuntimeTests.swift   new
+    agent/Tests/DaiAgentTests/EmbedRuntimeTests.swift   new               DONE
+
+Progress: the agent half of phase 1 is in, 375 agent tests passing. The runtime
+loads, refuses what it should refuse, and applies prefixes by family. What it
+has not done yet is produce a vector on this hardware: that needs the model
+staged where the agent looks, which is DAI_MODEL_DIR rather than the Python
+cache, and it is the first thing the next slice should do, because agreement
+with the known good implementation is the only check that catches a correct
+looking wrong answer.
 
 ## Verification
 

@@ -137,6 +137,46 @@ case "verify-ane":
         print(String(format: "  ceiling         %.1f items/s", 1 / (b.fill + b.predict)))
     }
 
+case "assigned":
+    // What the control plane says this machine should hold, and whether it does.
+    //
+    // There was no way to ask this, and chasing one model that would not
+    // transfer cost an afternoon for want of it. The agent log is silent when a
+    // pass has nothing to do, the fleet view reports what the node says it
+    // holds rather than what it was told to, and the control plane has no read
+    // endpoint for a group's models. Three views of the same question and none
+    // of them answer it.
+    guard args.count > 2 else { print("usage: dai-agent assigned <url>"); exit(2) }
+    do {
+        let dir = Enroll.identityDir()
+        let identity = try NodeIdentity.load(
+            certificate: dir.appendingPathComponent("node.crt"),
+            enclaveKey: Enroll.keyPath(dir))
+        let ca = try String(contentsOf: dir.appendingPathComponent("ca.crt"), encoding: .utf8)
+        let cp = try ControlPlane(base: URL(string: args[2])!, identity: identity,
+                                  serverCAPEM: ca)
+        let models = try await cp.assignedModels()
+        if models.isEmpty {
+            print("nothing is assigned to this node")
+            print("  Either no enabled group names a model for it, or this node")
+            print("  matches no enabled group. Both look identical from here.")
+            exit(0)
+        }
+        for m in models {
+            let dir = MLXRuntime.modelDirectory.appendingPathComponent(m.id)
+            let held = FileManager.default.fileExists(
+                atPath: dir.appendingPathComponent("config.json").path)
+            let bytes = m.files.reduce(0) { $0 + $1.sizeBytes }
+            print(String(format: "  %@ %@  %@  %d files, %.1f GB",
+                         held ? "held   " : "MISSING",
+                         m.id, m.runtime, m.files.count,
+                         Double(bytes) / 1_073_741_824))
+        }
+    } catch {
+        print("could not ask: \(error)")
+        exit(1)
+    }
+
 case "verify-embed":
     // The agreement check, as a command rather than a unit test, for the same
     // reason verify-ane is one: MLX needs the Metal shader library, SwiftPM's

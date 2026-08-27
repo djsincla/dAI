@@ -1131,6 +1131,62 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/OpenAIError' }
 
+  /admin/v1/pools/{poolId}/models:
+    get:
+      tags: [admin]
+      summary: What a group offers its machines, and which hold it
+      description: |
+        Assigned and held are different facts, and the gap between them is the
+        only thing anybody is looking for. A machine that has quietly stopped
+        fetching what it was assigned is otherwise indistinguishable from one
+        that is up to date.
+
+        A stood-down group offers nothing whatever its rows say, and `offering`
+        reflects that rather than leaving the reader to work out why nothing
+        arrived.
+      parameters:
+        - in: path
+          name: poolId
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The group, what it offers, and where each model is
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pool: { type: object, additionalProperties: true }
+                  offering:
+                    type: array
+                    items: { type: string }
+                  models:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        kind: { type: string }
+                        runtime: { type: string }
+                        sizeBytes: { type: integer }
+                        heldBy: { type: array, items: { type: string } }
+                        missingFrom: { type: array, items: { type: string } }
+                  members:
+                    type: array
+                    items: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such group
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
+                  detail: { type: string }
+
   /admin/v1/pools/{poolId}/name:
     put:
       tags: [admin]

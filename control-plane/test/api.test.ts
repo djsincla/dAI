@@ -1516,3 +1516,59 @@ describe('renaming a group', () => {
     expect([403, 404]).toContain(r.status)
   })
 })
+
+describe('what a group offers its machines', () => {
+  const offering = (poolId: string) =>
+    fetch(`${base}/admin/v1/pools/${poolId}/models`, { headers: asUser(fx.operatorToken) })
+
+  const push = async (modelId: string) => {
+    await db.query(
+      `INSERT INTO models (id, runtime, kind, size_bytes) VALUES ($1,'mlx','embed',1)
+       ON CONFLICT DO NOTHING`, [modelId])
+    await db.query(
+      `INSERT INTO pool_models (pool_id, model_id, assigned_by) VALUES ($1,$2,$3)
+       ON CONFLICT DO NOTHING`, [fx.poolId, modelId, fx.operatorId])
+  }
+
+  it('separates what is assigned from what is held', async () => {
+    // The distinction the endpoint exists for. A node that has quietly stopped
+    // fetching looks identical to one that is up to date unless these are
+    // reported apart.
+    await push('org/embedder')
+    const body = await (await offering(fx.poolId)).json()
+    expect(body.offering).toContain('org/embedder')
+    const m = body.models.find((x: { id: string }) => x.id === 'org/embedder')
+    expect(m.heldBy).toEqual([])
+    // Whatever the seed calls its machine: the point is that a member which
+    // does not hold the model appears under missingFrom and not heldBy.
+    expect(m.missingFrom).toEqual(body.members)
+    expect(body.members.length).toBeGreaterThan(0)
+  })
+
+  it('reports it held once the node says it holds it', async () => {
+    await push('org/embedder')
+    await db.query(
+      `UPDATE nodes SET resident_models = '{"org/embedder": 1}'::jsonb WHERE id = $1`,
+      [fx.nodeId])
+    const body = await (await offering(fx.poolId)).json()
+    const m = body.models.find((x: { id: string }) => x.id === 'org/embedder')
+    expect(m.heldBy).toEqual(body.members)
+    expect(m.missingFrom).toEqual([])
+  })
+
+  it('a stood-down group offers nothing, whatever its rows say', async () => {
+    // Rows survive standing a group down, and the machines stop being told.
+    // Reporting the rows here would send somebody looking for a transfer that
+    // was never going to start.
+    await push('org/embedder')
+    await db.query(`UPDATE pools SET enabled = false WHERE id = $1`, [fx.poolId])
+    const body = await (await offering(fx.poolId)).json()
+    expect(body.offering).toEqual([])
+    expect(body.models.map((m: { id: string }) => m.id)).toContain('org/embedder')
+  })
+
+  it('is a 404 for a group that does not exist', async () => {
+    const r = await offering('00000000-0000-0000-0000-000000000000')
+    expect([403, 404]).toContain(r.status)
+  })
+})

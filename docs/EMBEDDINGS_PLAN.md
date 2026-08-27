@@ -65,6 +65,20 @@ easy one quietly cancel the valuable one.**
 kind under normal presence gating. This unblocks every client, closes the
 api-first gap, and produces vectors that are actually vectors.
 
+**Two things the dispatch slice found.**
+
+`mayServe` gated the serve loop on `gpu != nil`, so a node staged with an
+embedding model and no chat model held the channel open, was routed to, and
+never took the request. The loop declined before reaching the handler that
+would have answered, and logged nothing, because from the loop's point of view
+it was correctly refusing to serve. It now gates on having either runtime.
+
+Testing it by driving the serve loop was the wrong instinct and cost an hour.
+The loop only takes a dispatch once presence, the pause switch and a settling
+period all agree, so a test that fed it one got back nothing and looked exactly
+like a handler declining to answer. The decisions moved into
+`EmbedRequest.parse`, which is a pure function and needs none of that.
+
 **A thing the route taught, worth recording before the dispatch slice.** The
 OpenAPI validator runs ahead of every handler, so a path absent from
 `openapi/dai.yaml` is answered 404 before any code in the route is reached. The
@@ -196,7 +210,7 @@ makes things better on its own.
     control-plane/test/api.test.ts          route behaviour and every refusal
     agent/Package.swift                     the MLXEmbedders product      DONE
     agent/Sources/DaiWorker/EmbedRuntime.swift      new                   DONE
-    agent/Sources/DaiWorker/Worker.swift    dispatch embed to it
+    agent/Sources/DaiWorker/ReverseChannel.swift  dispatch embed to it     DONE
     agent/Tests/DaiAgentTests/EmbedRuntimeTests.swift   new               DONE
 
 Progress: the agent half of phase 1 is in, 380 agent tests passing, plus a

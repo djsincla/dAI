@@ -278,3 +278,44 @@ public actor EmbedRuntime {
         }
     }
 }
+
+/// What an embed dispatch is asking for, or why it cannot be answered.
+///
+/// Pulled out of the channel so it can be tested without one. The refusals here
+/// are the two that would otherwise be answered with something plausible: a
+/// dispatch naming no model would be served from whatever weights happened to
+/// be resident, in a different vector space that nothing downstream can detect,
+/// and a dispatch with no input would come back as zero vectors for zero
+/// inputs, which passes every count check on the way home.
+public struct EmbedRequest: Equatable, Sendable {
+    public let model: String
+    public let inputs: [String]
+    public let intent: EmbedRuntime.Intent
+
+    public enum Refusal: Error, Equatable, Sendable {
+        case noModel
+        case noInput
+
+        public var reason: String {
+            switch self {
+            case .noModel: return "embed dispatch named no model"
+            case .noInput: return "embed dispatch had no input to embed"
+            }
+        }
+    }
+
+    public static func parse(modelHash: String?, body: JSONValue)
+        -> Result<EmbedRequest, Refusal>
+    {
+        guard let model = modelHash, !model.isEmpty else { return .failure(.noModel) }
+        let inputs = (body["input"]?.arrayValue ?? []).compactMap { $0.stringValue }
+        guard !inputs.isEmpty else { return .failure(.noInput) }
+        // Anything other than "query" is a document. The control plane has
+        // already refused a third value, and defaulting is right for a caller
+        // that sent nothing: a corpus is embedded far more often than a
+        // question is.
+        let intent: EmbedRuntime.Intent =
+            body["inputType"]?.stringValue == "query" ? .query : .document
+        return .success(EmbedRequest(model: model, inputs: inputs, intent: intent))
+    }
+}

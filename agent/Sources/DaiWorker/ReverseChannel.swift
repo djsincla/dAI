@@ -26,6 +26,26 @@ public actor ReverseChannel {
     /// loop owns that decision and hands the new runtime over, the same way it
     /// hands over a renewed certificate.
     private var gpu: MLXRuntime?
+
+    /// The embedding model this node currently holds, if any.
+    ///
+    /// Separate from `gpu` because it is a different model with a different
+    /// runtime, and one at a time because a node holding two sets of weights is
+    /// twice the resident memory for a machine whose owner may want it back.
+    /// Swapping when a request names a different model is the simple policy; a
+    /// fleet embedding two corpora at once would want better, and would notice.
+    private var embedder: EmbedRuntime?
+
+    /// Whether this node will answer embed dispatches.
+    ///
+    /// Held separately from `gpu` because the two are different capabilities
+    /// and the serve loop gated on the wrong one. `mayServe` required a
+    /// generation runtime before taking any dispatch at all, so a node staged
+    /// with an embedding model and no chat model held the channel open, was
+    /// routed to, and never took the request: the loop declined before the
+    /// handler that would have answered it was reached. Nothing logged, because
+    /// from the loop's point of view it was correctly refusing to serve.
+    private let embeds: Bool
     /// Reported, not used. Both loops heartbeat and each replaces
     /// `resident_models` wholesale, so a loop that can only see half of what
     /// this machine holds erases the other half every twenty seconds - which
@@ -106,6 +126,7 @@ public actor ReverseChannel {
     private var heldPlan: SplitRunner.Plan?
 
     public init(controlPlane: any ControlPlaneClient, gpu: MLXRuntime?,
+                embeds: Bool = false,
                 ane: ANERuntime? = nil,
                 source: SignalSource = MacSignalSource(),
                 status: StatusPublisher = StatusPublisher(),
@@ -114,6 +135,7 @@ public actor ReverseChannel {
         self.status = status
         self.controlPlane = controlPlane
         self.gpu = gpu
+        self.embeds = embeds
         self.ane = ane
         self.source = source
         self.monitor = PresenceMonitor(promoteAfter: promoteAfter)
@@ -198,11 +220,13 @@ public actor ReverseChannel {
         // presence does not gate it: nobody is sitting at it, and a
         // conversation needs a model that will still be resident a minute from
         // now, which the harvest tier cannot promise by design.
+        // Either runtime is enough to be worth holding the channel open for.
+        let canServe = gpu != nil || embeds
         if isCluster {
-            return (gpu != nil, reading.state,
+            return (canServe, reading.state,
                     defaultPolicy[.absent]!.maxCompletionTokens)
         }
-        return (p.gpu && p.dutyMax > 0 && gpu != nil, reading.state, p.maxCompletionTokens)
+        return (p.gpu && p.dutyMax > 0 && canServe, reading.state, p.maxCompletionTokens)
     }
 
     public func run(maxSeconds: TimeInterval = .infinity) async {
@@ -627,6 +651,56 @@ public actor ReverseChannel {
         }
     }
 
+    /// Vectors for a batch of strings, reported as vectors rather than text.
+    ///
+    /// Everything here is arranged around one property: a wrong embedding is
+    /// indistinguishable from a right one by inspection. So the failures are
+    /// reported as failures rather than approximated, and the count of vectors
+    /// is left to match the count of inputs so the control plane can check it.
+    private func handleEmbed(_ dispatch: ControlPlane.Dispatch) async {
+        let parsed = EmbedRequest.parse(modelHash: dispatch.modelHash, body: dispatch.body)
+        guard case let .success(request) = parsed else {
+            guard case let .failure(refusal) = parsed else { return }
+            try? await controlPlane.reportDispatch(
+                id: dispatch.id, text: nil, error: refusal.reason)
+            return
+        }
+        let model = request.model
+        let inputs = request.inputs
+        let intent = request.intent
+
+        // One embedding model at a time. A request naming a different one
+        // releases the previous, because holding both doubles what a returning
+        // user has to wait to get back.
+        if let held = embedder, await held.name != model {
+            _ = await held.unload()
+            embedder = nil
+        }
+        if embedder == nil { embedder = EmbedRuntime(modelId: model) }
+        guard let embedder else { return }
+
+        await publish(mayServe().state, activity: "embedding \(inputs.count) inputs")
+        let started = Date()
+        do {
+            if await !embedder.isLoaded { _ = try await embedder.load() }
+            let vectors = try await embedder.embed(inputs, intent: intent)
+            let seconds = Date().timeIntervalSince(started)
+            log("embedded \(inputs.count) inputs as \(intent.rawValue) in "
+                + String(format: "%.2fs", seconds))
+            try await controlPlane.reportDispatch(
+                id: dispatch.id, text: nil, error: nil, embeddings: vectors)
+        } catch {
+            // Reported rather than swallowed, and the runtime's refusals carry
+            // their own explanation: an input over the model's length says so
+            // and says it was not truncated, which is the difference between a
+            // caller splitting the text and a caller wondering why retrieval
+            // got worse.
+            log("embed failed: \(error)")
+            try? await controlPlane.reportDispatch(
+                id: dispatch.id, text: nil, error: String(describing: error))
+        }
+    }
+
     private func handle(_ dispatch: ControlPlane.Dispatch, maxTokens: Int) async {
         // Stamped however this ends, including badly. A request that failed
         // still means somebody was asking a moment ago, and starting the idle
@@ -634,6 +708,15 @@ public actor ReverseChannel {
         // client that is retrying.
         serving += 1
         defer { serving -= 1; lastRequestEndedAt = Date() }
+
+        // Embedding, which needs neither the generation runtime nor any of the
+        // machinery below it: no cancellation watch, no policy cap on length,
+        // no tool parsing, no prompt cache. It is checked before the `gpu`
+        // guard because a node can hold an embedding model and no chat model.
+        if dispatch.body["operation"]?.stringValue == "embed" {
+            await handleEmbed(dispatch)
+            return
+        }
 
         guard let gpu else {
             try? await controlPlane.reportDispatch(

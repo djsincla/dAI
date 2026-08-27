@@ -225,12 +225,26 @@ public actor ControlPlane {
                                completionTokens: Int = 0,
                                cachedTokens: Int = 0,
                                toolCalls: [ToolCall] = [],
-                               layerPlan: [[Int]] = []) async throws {
+                               layerPlan: [[Int]] = [],
+                               embeddings: [[Float]] = []) async throws {
         var body: [String: JSONValue] = [:]
+        // Vectors, not text, and checked for emptiness before the branch below
+        // rather than after: an embedding result has no text and no error, which
+        // is exactly the shape the count_tokens branch claims, and reporting a
+        // token count for a batch of embeddings would leave the control plane
+        // pairing vectors it never received.
+        if !embeddings.isEmpty {
+            body["result"] = .object([
+                "embeddings": .array(embeddings.map { vector in
+                    .array(vector.map { .number(Double($0)) })
+                }),
+                "promptTokens": .number(Double(promptTokens)),
+            ])
+        }
         // A count has no text and is still a success. Reported separately so
         // the control plane is not left deciding whether an empty answer means
         // failure.
-        if text == nil, error == nil {
+        if embeddings.isEmpty, text == nil, error == nil {
             body["result"] = .object(["promptTokens": .number(Double(promptTokens))])
         }
         if let text {

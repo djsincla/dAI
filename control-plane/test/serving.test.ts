@@ -594,14 +594,15 @@ describe('serving over HTTP', () => {
   /**
    * A model nothing can reach should not be advertised as though it could be.
    *
-   * `POST /v1/embeddings` returns 404, for the reasons in docs/EMBEDDINGS.md,
-   * while an embedding model is staged and resident like any other and so
-   * appeared in both catalogues. A caller cannot tell an advertised model from
-   * a servable one and picks by name, so the listing invited exactly the
-   * request that cannot be answered.
+   * While `POST /v1/embeddings` returned 404, an embedding model appeared in
+   * both catalogues and invited exactly the request that could not be answered:
+   * a caller cannot tell an advertised model from a servable one and picks by
+   * name. Now that it is served, hiding it would be the same fault in reverse.
    *
-   * Delete these when /v1/embeddings lands; they assert an absence that is only
-   * correct while the endpoint does not exist.
+   * These asserted an absence while the endpoint returned 404. It exists now
+   * and answers with vectors that agree with the reference client, so they are
+   * inverted rather than deleted: the record of why they were written is worth
+   * more than the two lines they cost.
    */
   const residentBoth = () =>
     fetch(`${base}/agent/v1/heartbeat`, {
@@ -614,34 +615,33 @@ describe('serving over HTTP', () => {
 
   const stageKinds = () => db.query(
     `INSERT INTO models (id, runtime, kind, size_bytes)
-     VALUES ('org/chat','mlx','generate',1), ('org/embed','coreml','embed',1)
+     VALUES ('org/chat','mlx','generate',1), ('org/embed','mlx','embed',1)
      ON CONFLICT DO NOTHING`)
 
-  it('does not advertise an embedding model while nothing serves one', async () => {
+  it('advertises an embedding model, now that one can be reached', async () => {
     await stageKinds()
     await residentBoth()
 
     const r = await fetch(`${base}/v1/models`, { headers: asUser(fx.operatorToken) })
     const ids = (await r.json()).data.map((m: any) => m.id)
     expect(ids).toContain('org/chat')
-    expect(ids).not.toContain('org/embed')
+    expect(ids).toContain('org/embed')
   })
 
-  it('hides it from the LM Studio surface too, and types the rest honestly', async () => {
+  it('types each by what the catalogue says it is, not by its context window', async () => {
     await stageKinds()
     await residentBoth()
 
     const r = await fetch(`${base}/api/v0/models`, { headers: asUser(fx.operatorToken) })
     const models = (await r.json()).data as any[]
-    expect(models.map((m) => m.id)).not.toContain('org/embed')
 
     // No node has reported a context window here. This field read
     // `context > 0 ? 'llm' : 'embeddings'`, so a usable chat model was
     // announced as something a client cannot send a conversation to whenever
-    // the window had not arrived yet.
-    const chat = models.find((m) => m.id === 'org/chat')
-    expect(chat).toBeDefined()
-    expect(chat.type).toBe('llm')
+    // the window had not arrived yet, and an embedding model was typed right
+    // only by accident.
+    expect(models.find((m) => m.id === 'org/chat').type).toBe('llm')
+    expect(models.find((m) => m.id === 'org/embed').type).toBe('embeddings')
   })
 
   /**

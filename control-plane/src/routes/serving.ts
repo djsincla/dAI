@@ -57,23 +57,20 @@ async function servableModels(db: Db, broker: Broker, groupId?: string | null) {
     const machines = new Map((shapes as { id: string; machines: number }[])
       .map((m) => [m.id, Math.max(1, Number(m.machines ?? 1))]))
 
-    // Embedding models are staged and resident like any other, and there is no
-    // endpoint that reaches them: `POST /v1/embeddings` returns 404, for the
-    // reasons in docs/EMBEDDINGS.md. Listing one invites exactly the request
-    // that cannot be answered, and a caller has no way to tell it apart from a
-    // model they can use. Either the endpoint exists or the model is not in the
-    // catalogue.
+    // What each model is, so both catalogue surfaces can say so.
+    //
+    // This was a filter that hid embedding models entirely, because
+    // `POST /v1/embeddings` returned 404 and listing a model no endpoint could
+    // reach invited exactly the request that would fail. The endpoint exists
+    // now and answers with vectors that agree with the reference client, so the
+    // models are listed and typed instead of hidden.
     //
     // Keyed on models.kind rather than on a zero context window. Context is
     // COALESCEd from what nodes report, so zero means "no context reported",
     // which an embedding model and a generation model whose node has not
-    // reported one both satisfy. Typing off that field would hide a working
-    // chat model the first time a node was slow to report, which is a worse
-    // failure than the one being fixed.
-    //
-    // Delete this filter when /v1/embeddings lands; see docs/EMBEDDINGS_PLAN.md.
-    const unreachable = new Set((shapes as { id: string; kind: string }[])
-      .filter((m) => m.kind === 'embed').map((m) => m.id))
+    // reported one both satisfy.
+    const kinds = new Map((shapes as { id: string; kind: string }[])
+      .map((m) => [m.id, m.kind]))
 
     const scope = groupId ? await membersOf(db, groupId) : null
 
@@ -105,6 +102,11 @@ async function servableModels(db: Db, broker: Broker, groupId?: string | null) {
 
     const models = new Map<string, {
       context: number; resident: boolean; live: boolean; machines: number
+      // What the repository says this is. Absent for a model a node holds that
+      // was never imported, which is treated as a chat model: that is what it
+      // was before kinds existed, and hiding it would empty the catalogue on a
+      // fleet that stages outside the repository.
+      kind: string
     }>()
     // Which in-scope machines hold each model, kept beside the listing rather
     // than in it. A staged split is only worth offering when enough of the
@@ -112,7 +114,6 @@ async function servableModels(db: Db, broker: Broker, groupId?: string | null) {
     const holders = new Map<string, Set<string>>()
     for (const row of rows as any[]) {
       if (scope !== null && !scope.has(row.node_id as string)) continue
-      if (unreachable.has(row.name as string)) continue
       // Recent heartbeat, not currently parked on the channel.
       //
       // These are different facts and conflating them broke the listing in the
@@ -141,6 +142,7 @@ async function servableModels(db: Db, broker: Broker, groupId?: string | null) {
         // node reads a long prompt.
         live: (seen?.live ?? false) || broker.isConnected(row.node_id),
         machines: width,
+        kind: kinds.get(row.name as string) ?? 'generate',
       })
     }
 
@@ -1196,16 +1198,17 @@ export function compatRoutes(db: Db, broker: Broker): Router {
       data: [...models].map(([id, m]) => ({
         id,
         object: 'model',
-        // Everything reachable on this surface is a chat model, because
-        // servableModels now excludes the kinds no endpoint serves.
+        // From the catalogue's own kind, not from a context window.
         //
         // This read `m.context > 0 ? 'llm' : 'embeddings'`, which typed off a
-        // context window that is COALESCEd to zero when a node has not reported
-        // one. That is true of an embedding model and also of a chat model on a
-        // node that was slow to report, so the field announced the wrong kind in
-        // the direction that matters: a usable model described as something a
-        // client cannot send a conversation to.
-        type: 'llm',
+        // value COALESCEd to zero when a node has not reported one. That is
+        // true of an embedding model and also of a chat model on a node that
+        // was slow to report, so the field announced the wrong kind in the
+        // direction that matters: a usable model described as something a
+        // client cannot send a conversation to. A model the repository has
+        // never seen is a chat model, which is what it was before kinds
+        // existed.
+        type: m.kind === 'embed' ? 'embeddings' : 'llm',
         publisher: 'dai',
         max_context_length: m.context || null,
         loaded_context_length: m.context || null,

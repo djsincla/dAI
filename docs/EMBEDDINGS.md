@@ -77,18 +77,33 @@ In dependency order. The route is the last and smallest item.
 Step 5 is an afternoon. Steps 1 to 3 are the work, and until they are done the
 endpoint should keep returning 404.
 
-## The smaller bug next door, now fixed
+## The endpoint exists now
+
+`POST /v1/embeddings` returns vectors from the fleet that agree with
+`examples/python/rag_embed.py` to 0.9998 cosine and reproduce its ranking
+exactly. The rest of this document describes why it did not, and is kept
+because the argument for the 404 is the argument for every refusal the endpoint
+now makes.
+
+See `EMBEDDINGS_PLAN.md` for what was built and what it cost to find out.
+
+## The smaller bug next door, fixed and then reopened deliberately
 
 `/v1/models` and `/api/v0/models` listed `ane:embed` as an available model of
 type `embeddings`, which invited exactly the request that 404s. A caller cannot
 tell an advertised model from a servable one and picks by name, so the listing
 promised something no endpoint could deliver.
 
-`servableModels` now drops models whose `models.kind` is `embed`. Keyed on the
-repository's own column rather than on a zero context window: context is
-COALESCEd from what nodes report, so zero also describes a chat model on a node
-that has not reported one yet, and filtering on it would have hidden working
-models intermittently.
+`servableModels` dropped models whose `models.kind` is `embed`, which was right
+while nothing served them and wrong the moment something did. They are listed
+again, and typed from the same column: `embed` is advertised as `embeddings`
+and everything else as `llm`.
+
+The keying is the part worth keeping. Context is COALESCEd from what nodes
+report, so a zero window describes an embedding model and equally a chat model
+on a node that has not reported one yet. Typing or filtering on that field
+hides working models intermittently, which is how this surface got the kind
+wrong in both directions.
 
 The same reasoning fixed a second case of it. The LM Studio surface typed models
 as `context > 0 ? 'llm' : 'embeddings'`, so a usable chat model was announced as

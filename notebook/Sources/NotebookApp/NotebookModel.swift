@@ -229,8 +229,12 @@ final class NotebookModel {
             // start and the chunk count is not. "665 of 0" is what showing a
             // total nobody knows looks like.
             let percent = pages > 0 ? Int(Double(page) / Double(pages) * 100) : 0
+            // The memory reading is shown rather than kept, because an import
+            // that takes an hour is exactly when somebody wants to know whether
+            // to keep waiting or to close something else.
             working = "Embedding \(progress.document): page \(page) of "
-                    + "\(pages) (\(percent)%) · \(chunks) chunks"
+                    + "\(pages) (\(percent)%) · \(chunks) chunks · "
+                    + "\(progress.memory.resident / 1_048_576) MB"
         case let .done(chunks):
             working = nil
             problem = nil

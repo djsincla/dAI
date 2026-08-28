@@ -113,10 +113,62 @@ public actor Embedder {
     /// competing with the model somebody is actually being served by.
     public static let gpuCacheLimit = 512 * 1024 * 1024
 
+    /// Apply the cache limit before anything allocates.
+    ///
+    /// Called at launch as well as from ``load()``, because the limit only
+    /// governs allocations that come after it and the first model load is a
+    /// large one. Cheap and idempotent, so calling it twice costs nothing.
+    public static func configureMemory() {
+        MLX.GPU.set(cacheLimit: gpuCacheLimit)
+    }
+
+    /// MLX's own accounting of what it holds.
+    ///
+    /// `active` is memory inside live MLXArrays; `cache` is memory MLX has
+    /// finished with and kept so the next allocation is cheap. **They are
+    /// reported separately because they have different causes and different
+    /// fixes**: active growth means something is holding arrays, cache growth
+    /// means the limit is not taking effect. A single resident-size figure
+    /// cannot tell them apart, and during the 8,894 page import it did not:
+    /// footprint climbed 65 MB a minute and said nothing about which half.
+    public struct Memory: Sendable, Equatable {
+        public var active: Int
+        public var cache: Int
+        public var peak: Int
+
+        public var resident: Int { active + cache }
+
+        public var summary: String {
+            func mb(_ bytes: Int) -> Int { bytes / 1_048_576 }
+            return "\(mb(active)) MB active, \(mb(cache)) MB cached"
+        }
+    }
+
+    public static func memory() -> Memory {
+        let snapshot = MLX.GPU.snapshot()
+        return Memory(active: snapshot.activeMemory,
+                      cache: snapshot.cacheMemory,
+                      peak: snapshot.peakMemory)
+    }
+
+    /// Hand MLX's recycling cache back to the system, now.
+    ///
+    /// **Defensive, not a fix for anything observed.** Measurement showed the
+    /// cache limit already holding: through the 8,894 page import MLX sat at
+    /// 603 MB active and 512 MB cached, exactly the limit, while the process
+    /// footprint climbed by gigabytes for reasons that had nothing to do with
+    /// MLX. It is kept because the limit is applied on deallocation rather than
+    /// continuously, so a run that allocates faster than it frees could still
+    /// overshoot, and because it returns the cache between documents rather
+    /// than holding it for the life of the app.
+    public func trim() {
+        MLX.GPU.clearCache()
+    }
+
     @discardableResult
     public func load() async throws -> TimeInterval {
         if container != nil { return 0 }
-        MLX.GPU.set(cacheLimit: Self.gpuCacheLimit)
+        Self.configureMemory()
         let started = Date()
         container = Container(raw: try await MLXEmbedders.loadModelContainer(
             configuration: ModelConfiguration(id: modelId)))

@@ -20,6 +20,13 @@ struct NotebookMLXApp: App {
     /// serving the fleet.
     @State private var embedding = EmbeddingService()
 
+    /// The GPU cache limit is set before any window exists.
+    ///
+    /// It governs allocations made after it, so setting it when the first model
+    /// loads leaves the load itself uncapped. Nothing here touches MLX before
+    /// this runs.
+    init() { Embedder.configureMemory() }
+
     var body: some Scene {
         WindowGroup {
             ContentView(library: library, model: model, embedding: embedding)

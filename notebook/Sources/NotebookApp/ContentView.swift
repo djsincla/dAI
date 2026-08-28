@@ -385,7 +385,7 @@ struct RecordView: View {
                         .padding(.top, 60)
                 } else {
                     ForEach(Array(model.turns.enumerated()), id: \.offset) { _, turn in
-                        TurnView(turn: turn)
+                        TurnView(turn: turn, package: model.package)
                     }
                 }
             }
@@ -422,6 +422,7 @@ struct EmptyRecord: View {
 /// what settings. All four, because this is a record rather than a transcript.
 struct TurnView: View {
     let turn: NotebookPackage.Turn
+    let package: NotebookPackage?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -430,7 +431,7 @@ struct TurnView: View {
                 .textSelection(.enabled)
 
             if !turn.citations.isEmpty {
-                CitationStrip(citations: turn.citations)
+                CitationStrip(citations: turn.citations, package: package)
             }
 
             Text(turn.answer)
@@ -447,27 +448,54 @@ struct TurnView: View {
 
 struct CitationStrip: View {
     let citations: [NotebookPackage.Turn.Citation]
+    let package: NotebookPackage?
+    @State private var opened: NotebookPackage.Turn.Citation?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 2) {
             ForEach(Array(citations.enumerated()), id: \.offset) { _, c in
-                HStack(spacing: 8) {
-                    // The score is shown, not hidden. Whether the right thing
-                    // was retrieved is the first question about any answer, and
-                    // it is answerable at a glance only if the numbers are here.
-                    Text(String(format: "%.3f", c.score))
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 46, alignment: .trailing)
-                    Text(c.citation).font(.callout).lineLimit(1)
-                    Spacer(minLength: 0)
+                Button {
+                    opened = c
+                } label: {
+                    HStack(spacing: 8) {
+                        // The score is shown, not hidden. Whether the right
+                        // thing was retrieved is the first question about any
+                        // answer, and it is answerable at a glance only if the
+                        // numbers are here.
+                        Text(String(format: "%.3f", c.score))
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 46, alignment: .trailing)
+                        Text(c.citation).font(.callout).lineLimit(1)
+                        if page(of: c) != nil {
+                            Image(systemName: "arrow.up.forward.square")
+                                .font(.caption2).foregroundStyle(.tertiary)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .contentShape(Rectangle())
                 }
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel("\(c.citation), score \(String(format: "%.3f", c.score))")
+                .buttonStyle(.plain)
+                .disabled(package == nil)
+                .help("Open the passage this came from")
+                .accessibilityLabel("\(c.citation), score "
+                                    + "\(String(format: "%.3f", c.score))")
+                .accessibilityHint("Opens the passage in its original document")
             }
         }
         .padding(10)
         .background(.quaternary.opacity(0.14), in: RoundedRectangle(cornerRadius: 8))
+        .sheet(item: $opened) { citation in
+            if let package {
+                SourceViewer(citation: citation, package: package)
+            }
+        }
+    }
+
+    private func page(of c: NotebookPackage.Turn.Citation) -> Int? {
+        guard let fragment = c.url.split(separator: "#").last,
+              fragment.hasPrefix("page=") else { return nil }
+        return Int(fragment.dropFirst("page=".count))
     }
 }
 

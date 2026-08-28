@@ -123,7 +123,11 @@ public struct NotebookPackage: Sendable {
     /// transcript. Weeks later the question worth answering is usually "what
     /// was different about that run", and a transcript cannot say.
     public struct Turn: Codable, Sendable, Equatable {
-        public struct Citation: Codable, Sendable, Equatable {
+        public struct Citation: Codable, Sendable, Equatable, Identifiable {
+            /// Identity is the locator: one citation can name many chunks of a
+            /// long document and the url is what tells them apart.
+            public var id: String { "\(citation)|\(url)" }
+
             public var citation: String
             public var section: String
             public var url: String

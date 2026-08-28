@@ -11,9 +11,16 @@ import Testing
 /// the way they are.
 struct VectorStoreTests {
 
-    static func temporary(_ name: String = UUID().uuidString) -> URL {
+    /// A directory no other run has touched.
+    ///
+    /// The label is for reading a failure, not for identity: a fixed name made
+    /// `turns append and read back in order` pass on a clean machine and fail
+    /// on the second run, because the record is append only and the previous
+    /// run's turns were still in it. A test that depends on what a previous run
+    /// left behind is a test that passes when it should not.
+    static func temporary(_ label: String = "t") -> URL {
         FileManager.default.temporaryDirectory
-            .appendingPathComponent("notebookkit-\(name)")
+            .appendingPathComponent("notebookkit-\(label)-\(UUID().uuidString)")
     }
 
     @Test("a float survives the round trip byte for byte")

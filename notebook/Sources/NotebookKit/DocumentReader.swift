@@ -38,7 +38,7 @@ public enum DocumentReader {
     /// keep, and the caller's job to keep as little as possible.
     public static func eachPage(
         of url: URL,
-        _ body: (_ number: Int, _ text: String) throws -> Void) throws {
+        _ body: (_ number: Int, _ pages: Int, _ text: String) throws -> Void) throws {
         #if canImport(PDFKit)
         guard let document = PDFDocument(url: url) else {
             throw Extraction.Failure.unreadable(
@@ -52,7 +52,7 @@ public enum DocumentReader {
             else { continue }
             sawText = true
             // 1 based, matching what a reader sees in a PDF viewer.
-            try body(index + 1, text)
+            try body(index + 1, document.pageCount, text)
         }
         guard sawText else {
             throw Extraction.Failure.unreadable(

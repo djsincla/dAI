@@ -271,6 +271,21 @@ final class NotebookModel {
     private(set) var asking = false
     private(set) var lastHits: [Retrieval.Hit] = []
 
+    /// The question being worked on, shown in the record before it finishes.
+    ///
+    /// Retrieval is local and takes milliseconds; generation is a request to
+    /// another machine and takes seconds. Showing the question straight away,
+    /// then its citations as soon as they exist, means the wait is spent
+    /// looking at something true rather than at a spinner. It is also the only
+    /// honest thing available: nothing streams, because a completion is
+    /// dispatched as one unit so a preemption has a bounded worst case.
+    struct Pending: Equatable {
+        var question: String
+        var stage: String
+        var citations: [NotebookPackage.Turn.Citation] = []
+    }
+    private(set) var pending: Pending?
+
     var canAsk: Bool { isOpen && chunkCount > 0 && !asking && working == nil }
 
     var whyNotAsking: String {
@@ -292,13 +307,25 @@ final class NotebookModel {
              gateway: Gateway?, settings: Retrieval.Settings = .init()) {
         guard let package, !asking else { return }
         asking = true
+        pending = Pending(question: question, stage: "Retrieving…")
         let started = Date()
         Task { [weak self] in
             do {
                 let hits = try await Retrieval.search(
                     question: question, in: package, using: embedder,
                     settings: settings)
-                await MainActor.run { self?.lastHits = hits }
+                await MainActor.run {
+                    self?.lastHits = hits
+                    // The citations are real and already known, so they are
+                    // shown while the answer is still being written.
+                    self?.pending?.citations = hits.map {
+                        .init(citation: $0.chunk.citation, section: $0.chunk.section,
+                              url: $0.chunk.url, score: $0.score)
+                    }
+                    self?.pending?.stage = hits.isEmpty
+                        ? "Nothing retrieved"
+                        : "Asking the fleet…"
+                }
 
                 let manifest = try package.manifest()
                 var answer = "Retrieval only: \(hits.count) passages found."
@@ -307,6 +334,7 @@ final class NotebookModel {
                 var generation: String?
 
                 if let gateway {
+                    await MainActor.run { self?.pending?.stage = "Asking the fleet…" }
                     // Only the last few turns travel. The whole record would
                     // eventually exceed the model's window, and the cost of
                     // trimming is that a question about something said twenty
@@ -343,11 +371,13 @@ final class NotebookModel {
                 try package.append(turn)
                 await MainActor.run {
                     self?.turns.append(turn)
+                    self?.pending = nil
                     self?.asking = false
                 }
             } catch {
                 await MainActor.run {
                     self?.problem = "\(error)"
+                    self?.pending = nil
                     self?.asking = false
                 }
             }

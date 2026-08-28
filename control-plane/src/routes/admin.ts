@@ -2009,7 +2009,8 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
     // Which machines this group actually reaches, evaluated rather than joined:
     // membership is a rule as often as it is a list.
     const { rows: nodes } = await db.query(
-      `SELECT id, hostname, tier, tiers, chip, memory_gb, resident_models
+      `SELECT id, hostname, tier, tiers, chip, memory_gb,
+              resident_models, stored_models
          FROM nodes WHERE state = 'active'`)
     const members = (nodes as any[]).filter((n) => nodeMatchesPool(n as never, pool as never))
 
@@ -2018,11 +2019,25 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
       // A stood-down group offers nothing, whatever its rows say, and saying so
       // here saves the reader working out why nothing arrived.
       offering: pool.enabled === false ? [] : models.map((m: any) => m.id),
+      // Held and loaded are different facts and the first version of this
+      // reported the second under the first's name.
+      //
+      // `resident_models` is what a runtime currently has in memory: the model
+      // a node is serving, the ANE probe, a built split share. `stored_models`
+      // is what is on its disk. A node that has fetched 619 MB and not been
+      // asked to serve it holds the model and loads nothing, and reading
+      // residency for possession said "missing from rotorua" about a machine
+      // that had held it for five hours. That answer was believed, because the
+      // endpoint had been built to answer exactly this question.
       models: models.map((m: any) => ({
         id: m.id, kind: m.kind, runtime: m.runtime, sizeBytes: Number(m.size_bytes),
-        heldBy: members.filter((n) => (n.resident_models ?? {})[m.id] !== undefined)
+        heldBy: members.filter((n) => (n.stored_models ?? {})[m.id] !== undefined)
           .map((n) => n.hostname),
-        missingFrom: members.filter((n) => (n.resident_models ?? {})[m.id] === undefined)
+        missingFrom: members.filter((n) => (n.stored_models ?? {})[m.id] === undefined)
+          .map((n) => n.hostname),
+        // Reported beside possession rather than instead of it. "Nobody is
+        // serving this" and "nobody has the weights" need different actions.
+        loadedOn: members.filter((n) => (n.resident_models ?? {})[m.id] !== undefined)
           .map((n) => n.hostname),
       })),
       members: members.map((n) => n.hostname),

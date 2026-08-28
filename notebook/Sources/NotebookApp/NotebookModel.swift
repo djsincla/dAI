@@ -34,6 +34,9 @@ final class NotebookModel {
         var kind: Kind
         var bytes: Int
         var state: State
+        /// Off means its chunks are skipped at query time. They stay in the
+        /// index, so this costs nothing and is instantly reversible.
+        var enabled: Bool = true
 
         enum Kind: String {
             case text, pdf, csv, excel
@@ -90,11 +93,13 @@ final class NotebookModel {
         let urls = (try? fm.contentsOfDirectory(
             at: package.originalsURL,
             includingPropertiesForKeys: [.fileSizeKey])) ?? []
+        let off = Set((try? package.manifest().disabledSources) as? [String] ?? [])
         return urls.map { url in
             let bytes = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
             return Source(name: url.lastPathComponent,
                           kind: kind(for: url), bytes: bytes,
-                          state: .ready(chunks: 0))
+                          state: .ready(chunks: 0),
+                          enabled: !off.contains(url.lastPathComponent))
         }.sorted { $0.name < $1.name }
     }
 
@@ -196,6 +201,30 @@ final class NotebookModel {
         turns = (try? package.turns()) ?? []
     }
 
+    /// Switch a source on or off for future questions.
+    ///
+    /// Written to the manifest immediately, because the state of the notebook
+    /// when a question was asked is part of the record and a toggle that only
+    /// existed in memory would make the record wrong.
+    func setEnabled(_ enabled: Bool, for name: String) {
+        guard let package else { return }
+        do {
+            var manifest = try package.manifest()
+            var off = Set(manifest.disabledSources ?? [])
+            if enabled { off.remove(name) } else { off.insert(name) }
+            manifest.disabledSources = off.isEmpty ? nil : off.sorted()
+            try package.write(manifest)
+            self.manifest = manifest
+            if let index = sources.firstIndex(where: { $0.name == name }) {
+                sources[index].enabled = enabled
+            }
+        } catch {
+            problem = "Could not change \(name): \(error.localizedDescription)"
+        }
+    }
+
+    var activeSources: [String] { sources.filter(\.enabled).map(\.name) }
+
     // ------------------------------------------------------------- asking
 
     private(set) var asking = false
@@ -268,7 +297,8 @@ final class NotebookModel {
                     embeddingModel: manifest.embeddingModel,
                     answeredBy: node, presenceState: presence,
                     generationModel: generation,
-                    seconds: Date().timeIntervalSince(started))
+                    seconds: Date().timeIntervalSince(started),
+                    sources: await MainActor.run { self?.activeSources } ?? [])
                 try package.append(turn)
                 await MainActor.run {
                     self?.turns.append(turn)

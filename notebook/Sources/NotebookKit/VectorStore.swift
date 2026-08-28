@@ -276,8 +276,12 @@ public actor VectorStore {
     /// subject, and without a limit a single verbose section wins every slot
     /// and the answer is grounded in one place when it should be grounded in
     /// several. Retrieval quality is mostly this rule rather than the metric.
+    /// - Parameter excluding: file names whose chunks are skipped.
+    ///   Filtered here rather than in SQL because a locator is
+    ///   `name#page=12` and matching it in SQL would mean a LIKE per source.
     public func search(_ query: [Float], k: Int = 6,
-                       perSection: Int = 2) throws -> [(chunk: Chunk, score: Float)] {
+                       perSection: Int = 2,
+                       excluding: Set<String> = []) throws -> [(chunk: Chunk, score: Float)] {
         var statement: OpaquePointer?
         defer { sqlite3_finalize(statement) }
         let sql = """
@@ -290,6 +294,11 @@ public actor VectorStore {
 
         var scored: [(Chunk, Float)] = []
         while sqlite3_step(statement) == SQLITE_ROW {
+            if !excluding.isEmpty {
+                let locator = Self.text(statement, 3)
+                let file = String(locator.split(separator: "#").first ?? "")
+                if excluding.contains(file) { continue }
+            }
             guard let raw = sqlite3_column_blob(statement, 7) else { continue }
             let bytes = Int(sqlite3_column_bytes(statement, 7))
             let vector = Self.vector(from: Data(bytes: raw, count: bytes))

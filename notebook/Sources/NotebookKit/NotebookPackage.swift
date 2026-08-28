@@ -56,12 +56,22 @@ public struct NotebookPackage: Sendable {
         /// behaves oddly.
         public var embeddedBy: String
 
+        /// Sources switched off, by file name.
+        ///
+        /// Their chunks stay in the index and are skipped at query time rather
+        /// than deleted, so turning one back on costs nothing and needs no
+        /// re-embedding. "What does this look like without that source" is the
+        /// question a notebook exists to answer, and it should not cost minutes
+        /// to ask.
+        public var disabledSources: [String]?
+
         public init(name: String,
                     embeddingModel: String = Manifest.defaultModel,
                     dimensions: Int? = nil,
                     chunkChars: Int = 600, overlap: Int = 100,
                     createdAt: Date = Date(),
-                    embeddedBy: String = "local") {
+                    embeddedBy: String = "local",
+                    disabledSources: [String]? = nil) {
             self.name = name
             self.embeddingModel = embeddingModel
             self.dimensions = dimensions
@@ -69,6 +79,7 @@ public struct NotebookPackage: Sendable {
             self.overlap = overlap
             self.createdAt = createdAt
             self.embeddedBy = embeddedBy
+            self.disabledSources = disabledSources
         }
 
         /// The model both implementations run and the only architecture Swift
@@ -155,12 +166,19 @@ public struct NotebookPackage: Sendable {
         public var presenceState: String?
         public var generationModel: String?
         public var seconds: Double?
+        /// Which sources were switched on when this was asked.
+        ///
+        /// Optional so records written before toggles existed still decode. Two
+        /// turns with the same question and different answers are usually
+        /// explained by this rather than by the model, and without it the
+        /// record cannot say so.
+        public var sources: [String]?
 
         public init(askedAt: Date = Date(), question: String, answer: String,
                     citations: [Citation], k: Int, hybrid: Bool,
                     embeddingModel: String, answeredBy: String? = nil,
                     presenceState: String? = nil, generationModel: String? = nil,
-                    seconds: Double? = nil) {
+                    seconds: Double? = nil, sources: [String]? = nil) {
             self.askedAt = askedAt
             self.question = question
             self.answer = answer
@@ -172,6 +190,7 @@ public struct NotebookPackage: Sendable {
             self.presenceState = presenceState
             self.generationModel = generationModel
             self.seconds = seconds
+            self.sources = sources
         }
     }
 

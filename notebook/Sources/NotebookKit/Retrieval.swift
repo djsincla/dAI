@@ -66,7 +66,8 @@ public struct Retrieval: Sendable {
 
         let vector = try await embedder.embed([trimmed], intent: .query)[0]
         return try await store.search(vector, k: settings.k,
-                                      perSection: settings.perSection)
+                                      perSection: settings.perSection,
+                                      excluding: Set(manifest.disabledSources ?? []))
             .map { Hit(chunk: $0.chunk, score: $0.score) }
     }
 }

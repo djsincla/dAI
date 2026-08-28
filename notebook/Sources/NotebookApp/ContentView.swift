@@ -251,7 +251,9 @@ struct SourceList: View {
                     DropHint()
                 } else {
                     ForEach(model.sources) { source in
-                        SourceRow(source: source)
+                        SourceRow(source: source) { on in
+                            model.setEnabled(on, for: source.name)
+                        }
                     }
                 }
             }
@@ -279,22 +281,34 @@ struct SourceList: View {
 
 struct SourceRow: View {
     let source: NotebookModel.Source
+    var setEnabled: (Bool) -> Void
 
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: source.kind.symbol)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(source.enabled ? .secondary : .tertiary)
                 .frame(width: 18)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(source.name).lineLimit(1)
+                    .foregroundStyle(source.enabled ? .primary : .secondary)
                 Text(detail).font(.caption).foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)
+            // A switch rather than a checkbox: this is a state the source is
+            // in, not an action taken on it, and it changes what the next
+            // question can see.
+            Toggle("", isOn: Binding(get: { source.enabled },
+                                     set: { setEnabled($0) }))
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .labelsHidden()
         }
         .padding(.vertical, 2)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(source.name), \(source.kind.rawValue), \(detail)")
+        .accessibilityValue(source.enabled ? "included" : "excluded")
+        .accessibilityHint("Switch off to ask without this source")
     }
 
     private var detail: String {
@@ -303,8 +317,9 @@ struct SourceRow: View {
         case .extracting: return "extracting"
         case let .embedding(done, total): return "embedding \(done) of \(total)"
         case let .ready(chunks):
-            return chunks > 0 ? "\(chunks) chunks" : ByteCountFormatter
+            let size = chunks > 0 ? "\(chunks) chunks" : ByteCountFormatter
                 .string(fromByteCount: Int64(source.bytes), countStyle: .file)
+            return source.enabled ? size : "\(size) · excluded"
         case let .failed(why): return why
         }
     }
@@ -376,6 +391,8 @@ struct RecordView: View {
     @Bindable var model: NotebookModel
     @Binding var question: String
     @Bindable var embedding: EmbeddingService
+    /// Two turns chosen to compare, by their position in the record.
+    @State private var picked: [Int] = []
 
     var body: some View {
         ScrollView {
@@ -384,8 +401,11 @@ struct RecordView: View {
                     EmptyRecord(isOpen: model.isOpen)
                         .padding(.top, 60)
                 } else {
-                    ForEach(Array(model.turns.enumerated()), id: \.offset) { _, turn in
-                        TurnView(turn: turn, package: model.package)
+                    ForEach(Array(model.turns.enumerated()), id: \.offset) { index, turn in
+                        TurnView(turn: turn, package: model.package,
+                                 picked: picked.contains(index)) {
+                            pick(index)
+                        }
                     }
                 }
             }
@@ -395,6 +415,34 @@ struct RecordView: View {
             .frame(maxWidth: .infinity, alignment: .center)
         }
         .safeAreaInset(edge: .bottom) { AskBar(model: model, question: $question, embedding: embedding) }
+        .safeAreaInset(edge: .top) {
+            if picked.count == 1 {
+                // Said rather than left to be guessed. One turn chosen is a
+                // half finished gesture and the way out has to be visible.
+                HStack(spacing: 10) {
+                    Text("Choose a second turn to compare")
+                        .font(.callout)
+                    Button("Cancel") { picked = [] }.buttonStyle(.borderless)
+                    Spacer()
+                }
+                .padding(.horizontal, 28).padding(.vertical, 8)
+                .background(.bar)
+            }
+        }
+        .sheet(isPresented: Binding(get: { picked.count == 2 },
+                                    set: { if !$0 { picked = [] } })) {
+            if picked.count == 2 {
+                CompareView(left: model.turns[picked[0]],
+                            right: model.turns[picked[1]],
+                            package: model.package)
+            }
+        }
+    }
+
+    /// Choosing turns to compare: first, then second, then the sheet.
+    private func pick(_ index: Int) {
+        if let at = picked.firstIndex(of: index) { picked.remove(at: at) }
+        else if picked.count < 2 { picked.append(index) }
     }
 }
 
@@ -423,6 +471,8 @@ struct EmptyRecord: View {
 struct TurnView: View {
     let turn: NotebookPackage.Turn
     let package: NotebookPackage?
+    var picked: Bool = false
+    var compare: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -442,7 +492,20 @@ struct TurnView: View {
             Provenance(turn: turn)
         }
         .padding(18)
-        .background(.quaternary.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+        .background(picked ? AnyShapeStyle(.tint.opacity(0.12))
+                           : AnyShapeStyle(.quaternary.opacity(0.12)),
+                    in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            if picked {
+                RoundedRectangle(cornerRadius: 12).strokeBorder(.tint)
+            }
+        }
+        .contextMenu {
+            if let compare {
+                Button(picked ? "Remove from Comparison" : "Compare With…",
+                       action: compare)
+            }
+        }
     }
 }
 

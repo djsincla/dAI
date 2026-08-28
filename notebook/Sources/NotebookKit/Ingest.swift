@@ -13,6 +13,10 @@ public actor Ingest {
         case extracting
         case chunking
         case embedding(done: Int, total: Int)
+        /// Streaming a paged document: the total number of chunks is not known
+        /// until the end, but the number of pages is known at the start, and
+        /// that is the number somebody waiting an hour actually wants.
+        case embeddingPage(page: Int, pages: Int, chunks: Int)
         case done(chunks: Int)
         case failed(String)
     }
@@ -65,9 +69,9 @@ public actor Ingest {
                 // exhausted a machine that was also serving a 30B model.
                 var buffer: [Extraction.Chunk] = []
                 var pagesSeen = 0
-                try DocumentReader.eachPage(of: stored) { number, text in
+                try DocumentReader.eachPage(of: stored) { number, pageCount, text in
                     try Task.checkCancellation()
-                    pagesSeen += 1
+                    pagesSeen = number
                     let pieces = (try? Extraction.prose(
                         text, title: "\(name) p\(number)",
                         locator: "\(name)#page=\(number)",
@@ -82,7 +86,8 @@ public actor Ingest {
                         // the buffer would grow to the whole document again.
                         written += try Self.flush(window, store: store,
                                                   embedder: embedder)
-                        say(.embedding(done: written, total: 0))
+                        say(.embeddingPage(page: number, pages: pageCount,
+                                           chunks: written))
                     }
                 }
                 if !buffer.isEmpty {

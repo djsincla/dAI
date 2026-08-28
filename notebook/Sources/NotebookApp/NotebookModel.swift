@@ -224,6 +224,13 @@ final class NotebookModel {
         case .chunking: working = "Chunking \(progress.document)…"
         case let .embedding(done, total):
             working = "Embedding \(progress.document): \(done) of \(total)"
+        case let .embeddingPage(page, pages, chunks):
+            // Pages rather than chunks, because the page count is known at the
+            // start and the chunk count is not. "665 of 0" is what showing a
+            // total nobody knows looks like.
+            let percent = pages > 0 ? Int(Double(page) / Double(pages) * 100) : 0
+            working = "Embedding \(progress.document): page \(page) of "
+                    + "\(pages) (\(percent)%) · \(chunks) chunks"
         case let .done(chunks):
             working = nil
             problem = nil

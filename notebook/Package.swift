@@ -16,8 +16,18 @@ let package = Package(
         .executable(name: "NotebookApp", targets: ["NotebookApp"]),
         .executable(name: "notebook-import", targets: ["notebook-import"]),
     ],
+    dependencies: [
+        // xlsx is a zip of XML, so reading one means unzipping and parsing
+        // rather than a format decision. CoreXLSX is MIT, has no dependencies
+        // of its own beyond XMLCoder, and is far less code than the two we
+        // would otherwise write and own. The alternative was ZIPFoundation
+        // plus XMLParser, which is the same work with our name on it.
+        .package(url: "https://github.com/CoreOffice/CoreXLSX.git", from: "0.14.2"),
+    ],
     targets: [
-        .target(name: "NotebookKit"),
+        .target(name: "NotebookKit", dependencies: [
+            .product(name: "CoreXLSX", package: "CoreXLSX"),
+        ]),
         // Writes a notebook so the format can be checked against rag_ask.py.
         .executableTarget(name: "notebook-demo", dependencies: ["NotebookKit"]),
         // The app. Built as an executable and wrapped into a bundle by
@@ -27,6 +37,7 @@ let package = Package(
         // Adopts an index that already exists, so work already done is not
         // done again. See Sources/notebook-import/main.swift.
         .executableTarget(name: "notebook-import", dependencies: ["NotebookKit"]),
-        .testTarget(name: "NotebookKitTests", dependencies: ["NotebookKit"]),
+        .testTarget(name: "NotebookKitTests", dependencies: ["NotebookKit"],
+                    resources: [.copy("Fixtures")]),
     ]
 )

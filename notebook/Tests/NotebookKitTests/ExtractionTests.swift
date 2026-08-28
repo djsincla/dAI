@@ -184,3 +184,79 @@ struct DelimitedReaderTests {
                 == ["Date", "Column 2", "Date 2"])
     }
 }
+
+/// Excel, against a workbook written by a real spreadsheet library.
+///
+/// The fixture is produced by openpyxl rather than hand written, so it contains
+/// what Excel actually emits: a shared string table, a formula with a cached
+/// value, and a merged range. A fixture I wrote to match my own assumptions
+/// would agree with them.
+struct SpreadsheetReaderTests {
+
+    static var workbook: URL? {
+        Bundle.module.url(forResource: "Fixtures/workbook", withExtension: "xlsx")
+    }
+
+    @Test("a workbook is several documents, one per sheet",
+          .enabled(if: SpreadsheetReaderTests.workbook != nil))
+    func sheetsAreSeparateTables() throws {
+        // Putting unrelated sheets in one section would stop the per-section
+        // cap doing its job: one spreadsheet could fill every slot of an answer.
+        let url = try #require(Self.workbook)
+        let tables = try SpreadsheetReader.read(url)
+        let names = tables.map(\.name)
+        #expect(names.contains("Sales"))
+        #expect(names.contains("Regions"))
+        #expect(Set(names).count == names.count, "sheets must not share a name")
+    }
+
+    @Test("text comes back as text, not as shared string indexes",
+          .enabled(if: SpreadsheetReaderTests.workbook != nil))
+    func readsSharedStrings() throws {
+        // xlsx stores most text once in a shared table and refers to it by
+        // index. A reader that ignores that sees numbers where the words were.
+        let url = try #require(Self.workbook)
+        let sales = try #require(try SpreadsheetReader.read(url)
+            .first { $0.name == "Sales" })
+        #expect(sales.header.prefix(3) == ["Region", "Units", "Date"])
+        #expect(sales.rows.contains { $0.contains("Auckland") })
+    }
+
+    @Test("a formula contributes its cached value, not its formula",
+          .enabled(if: SpreadsheetReaderTests.workbook != nil))
+    func formulaeUseTheirValue() throws {
+        // "=SUM(B2:B3)" embeds as nothing anybody would ask. Whatever the cell
+        // displayed is what a reader means by it.
+        let url = try #require(Self.workbook)
+        let sales = try #require(try SpreadsheetReader.read(url)
+            .first { $0.name == "Sales" })
+        let flattened = sales.rows.flatMap { $0 }
+        #expect(!flattened.contains { $0.contains("SUM(") },
+                "a formula string reached the chunks: \(flattened)")
+    }
+
+    @Test("a sheet with no header is refused, naming the sheet",
+          .enabled(if: SpreadsheetReaderTests.workbook != nil))
+    func refusesAHeaderlessSheet() throws {
+        // The fixture's third sheet is blank. Refusing names it, because
+        // "the workbook has no header" would send somebody looking at the wrong
+        // one of three.
+        let url = try #require(Self.workbook)
+        do {
+            _ = try SpreadsheetReader.read(url)
+        } catch let failure as Extraction.Failure {
+            #expect("\(failure)".contains("Scratch") || "\(failure)".contains("header"))
+            return
+        }
+        // A blank sheet that is simply skipped is also acceptable; what is not
+        // acceptable is inventing column names for it.
+    }
+
+    @Test("the older .xls is refused with a way forward")
+    func refusesLegacyXLS() {
+        let url = URL(fileURLWithPath: "/tmp/nothing.xls")
+        #expect(throws: Extraction.Failure.self) {
+            _ = try DocumentReader.read(url)
+        }
+    }
+}

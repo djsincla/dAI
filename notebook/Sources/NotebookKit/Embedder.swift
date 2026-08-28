@@ -103,9 +103,20 @@ public actor Embedder {
 
     // ------------------------------------------------------------- lifecycle
 
+    /// How much freed GPU memory MLX may keep for reuse.
+    ///
+    /// MLX holds on to buffers it has finished with, so the next allocation is
+    /// cheap. That is right on a machine doing one thing and wrong on this one:
+    /// a laptop embedding a corpus while its fleet agent serves a 30B model has
+    /// no spare gigabytes, and an unbounded cache is indistinguishable from a
+    /// leak from the outside. Half a gigabyte keeps batches cheap without
+    /// competing with the model somebody is actually being served by.
+    public static let gpuCacheLimit = 512 * 1024 * 1024
+
     @discardableResult
     public func load() async throws -> TimeInterval {
         if container != nil { return 0 }
+        MLX.GPU.set(cacheLimit: Self.gpuCacheLimit)
         let started = Date()
         container = Container(raw: try await MLXEmbedders.loadModelContainer(
             configuration: ModelConfiguration(id: modelId)))

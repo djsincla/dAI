@@ -21,6 +21,50 @@ public enum DocumentReader {
         case tables([Extraction.Table])
     }
 
+    /// Whether this is worth streaming rather than reading whole.
+    ///
+    /// A PDF is, because its text is held twice while it is being read: once
+    /// per page and once concatenated. The VCF document extracts to 21.7M
+    /// characters, so reading it whole costs about 90 MB of strings before a
+    /// single chunk exists, and the chunks are a third copy.
+    public static func isPaged(_ url: URL) -> Bool {
+        url.pathExtension.lowercased() == "pdf"
+    }
+
+    /// One page at a time, holding one page at a time.
+    ///
+    /// The document is opened once and each page's text is handed over and then
+    /// released. Nothing accumulates here: it is the caller's business what to
+    /// keep, and the caller's job to keep as little as possible.
+    public static func eachPage(
+        of url: URL,
+        _ body: (_ number: Int, _ text: String) throws -> Void) throws {
+        #if canImport(PDFKit)
+        guard let document = PDFDocument(url: url) else {
+            throw Extraction.Failure.unreadable(
+                url.lastPathComponent, "PDFKit could not open it")
+        }
+        var sawText = false
+        for index in 0 ..< document.pageCount {
+            guard let page = document.page(at: index),
+                  let text = page.string,
+                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { continue }
+            sawText = true
+            // 1 based, matching what a reader sees in a PDF viewer.
+            try body(index + 1, text)
+        }
+        guard sawText else {
+            throw Extraction.Failure.unreadable(
+                url.lastPathComponent,
+                "it has no text layer. A scan needs OCR before it can be read.")
+        }
+        #else
+        throw Extraction.Failure.unreadable(url.lastPathComponent,
+                                            "PDF reading needs PDFKit")
+        #endif
+    }
+
     public static func read(_ url: URL) throws -> Content {
         switch url.pathExtension.lowercased() {
         case "pdf": return try pdf(url)

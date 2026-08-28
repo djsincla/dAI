@@ -24,6 +24,35 @@ public actor Ingest {
     public struct Progress: Sendable, Equatable {
         public let document: String
         public let stage: Stage
+        /// What MLX held when this was reported.
+        ///
+        /// Carried on every progress line rather than logged separately so that
+        /// an import which grows can be seen growing, and seen in the two
+        /// numbers that distinguish a leak from a cache. Watching Activity
+        /// Monitor climb tells you something is wrong an hour after it started
+        /// and never tells you what.
+        public let memory: Embedder.Memory
+    }
+
+    /// Batches embedded between handing MLX's cache back.
+    ///
+    /// Not every batch: trimming makes the next batch re-allocate its buffers,
+    /// which is the cost the cache exists to avoid. Every 32 batches is roughly
+    /// every 500 chunks, about ten seconds on the VCF import.
+    ///
+    /// The memory that import actually lost was PDFKit's, not MLX's, and the
+    /// fix for it is in `DocumentReader.reopenEvery`. This is the cheap belt to
+    /// that braces.
+    public static let trimEvery = 32
+
+    /// Whether this flush is one of the ones that trims.
+    ///
+    /// Pure and separate so the cadence is testable, because nothing else here
+    /// is: MLX will not run under `swift test`, so the only part of this fix a
+    /// test can reach is the arithmetic that decides when to act.
+    static func shouldTrim(afterFlushes flushes: Int,
+                           every: Int = trimEvery) -> Bool {
+        every > 0 && flushes > 0 && flushes.isMultiple(of: every)
     }
 
     private let package: NotebookPackage
@@ -45,7 +74,10 @@ public actor Ingest {
     public func add(_ url: URL, batch: Int = 16,
                     report: @Sendable @escaping (Progress) -> Void) async throws -> Int {
         let name = url.lastPathComponent
-        func say(_ stage: Stage) { report(Progress(document: name, stage: stage)) }
+        func say(_ stage: Stage) {
+            report(Progress(document: name, stage: stage,
+                            memory: Embedder.memory()))
+        }
 
         do {
             say(.copying)
@@ -69,6 +101,7 @@ public actor Ingest {
                 // exhausted a machine that was also serving a 30B model.
                 var buffer: [Extraction.Chunk] = []
                 var pagesSeen = 0
+                var flushes = 0
                 try DocumentReader.eachPage(of: stored) { number, pageCount, text in
                     try Task.checkCancellation()
                     pagesSeen = number
@@ -86,6 +119,10 @@ public actor Ingest {
                         // the buffer would grow to the whole document again.
                         written += try Self.flush(window, store: store,
                                                   embedder: embedder)
+                        flushes += 1
+                        if Self.shouldTrim(afterFlushes: flushes) {
+                            Self.trim(embedder)
+                        }
                         say(.embeddingPage(page: number, pages: pageCount,
                                            chunks: written))
                     }
@@ -101,6 +138,7 @@ public actor Ingest {
                 say(.chunking)
                 let chunks = try chunks(from: content, name: name)
                 guard !chunks.isEmpty else { throw Extraction.Failure.empty(name) }
+                var flushes = 0
                 for start in stride(from: 0, to: chunks.count, by: batch) {
                     try Task.checkCancellation()
                     let window = Array(chunks[start ..< min(start + batch, chunks.count)])
@@ -109,6 +147,10 @@ public actor Ingest {
                                                            intent: .document)
                     try await store.add(window.map(Self.stored), vectors: vectors)
                     written += window.count
+                    flushes += 1
+                    if Self.shouldTrim(afterFlushes: flushes) {
+                        await embedder.trim()
+                    }
                 }
             }
 
@@ -152,6 +194,20 @@ public actor Ingest {
         }
         semaphore.wait()
         return try outcome!.get()
+    }
+
+    /// Trim from the page walk, which is not async.
+    ///
+    /// The same hop through a detached task that `flush` makes, and for the same
+    /// reason: `DocumentReader.eachPage` hands back a plain closure and the
+    /// embedder is an actor.
+    private static func trim(_ embedder: Embedder) {
+        let semaphore = DispatchSemaphore(value: 0)
+        Task.detached {
+            await embedder.trim()
+            semaphore.signal()
+        }
+        semaphore.wait()
     }
 
     /// The meta rag_ask.py reads to decide how to embed a question.

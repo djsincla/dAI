@@ -17,6 +17,7 @@ let package = Package(
         .executable(name: "notebook-import", targets: ["notebook-import"]),
         .executable(name: "notebook-verify", targets: ["notebook-verify"]),
         .executable(name: "notebook-reembed", targets: ["notebook-reembed"]),
+        .executable(name: "notebook-ingest", targets: ["notebook-ingest"]),
     ],
     dependencies: [
         // xlsx is a zip of XML, so reading one means unzipping and parsing
@@ -52,6 +53,9 @@ let package = Package(
         // Re-embeds an existing notebook with a different model, keeping its
         // chunks and citations. See its main.swift.
         .executableTarget(name: "notebook-reembed", dependencies: ["NotebookKit"]),
+        // Ingests one document and reports memory as it goes, so a fix to the
+        // memory an import costs can be measured. See its main.swift.
+        .executableTarget(name: "notebook-ingest", dependencies: ["NotebookKit"]),
         .testTarget(name: "NotebookKitTests", dependencies: ["NotebookKit"],
                     resources: [.copy("Fixtures")]),
     ]

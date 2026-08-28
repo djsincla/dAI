@@ -36,23 +36,62 @@ public enum DocumentReader {
     /// The document is opened once and each page's text is handed over and then
     /// released. Nothing accumulates here: it is the caller's business what to
     /// keep, and the caller's job to keep as little as possible.
+    /// Pages read before the document is closed and opened again.
+    ///
+    /// **`PDFDocument` owns every page it hands out and keeps them until it is
+    /// released.** Draining our own reference per page is not enough, because
+    /// the document still holds its own: reading the 8,894 page VCF manual
+    /// reached a 3.36 GB footprint with no pool and 3.26 GB with one. The page
+    /// cache is not something PDFKit exposes a way to purge, so the only lever
+    /// is the document's lifetime, and reopening is what makes that lever
+    /// reachable without giving up streaming.
+    ///
+    /// 512 pages is about six seconds of reading against roughly a second to
+    /// reopen, and bounds the cache at a few hundred megabytes.
+    public static let reopenEvery = 512
+
     public static func eachPage(
-        of url: URL,
+        of url: URL, reopenEvery: Int = DocumentReader.reopenEvery,
         _ body: (_ number: Int, _ pages: Int, _ text: String) throws -> Void) throws {
         #if canImport(PDFKit)
-        guard let document = PDFDocument(url: url) else {
+        guard var document = PDFDocument(url: url) else {
             throw Extraction.Failure.unreadable(
                 url.lastPathComponent, "PDFKit could not open it")
         }
+        // Read once: reopening must not change what is being iterated, and a
+        // document whose page count moved under us would silently truncate.
+        let pageCount = document.pageCount
         var sawText = false
-        for index in 0 ..< document.pageCount {
-            guard let page = document.page(at: index),
-                  let text = page.string,
-                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            else { continue }
-            sawText = true
-            // 1 based, matching what a reader sees in a PDF viewer.
-            try body(index + 1, document.pageCount, text)
+        for index in 0 ..< pageCount {
+            if shouldReopen(atPage: index, every: reopenEvery) {
+                // Replacing it drops the old one and its cache with it. The
+                // per-page pool above is what makes this work: a page we were
+                // still holding would keep the whole document alive.
+                guard let fresh = PDFDocument(url: url) else {
+                    throw Extraction.Failure.unreadable(
+                        url.lastPathComponent,
+                        "PDFKit could not reopen it at page \(index + 1)")
+                }
+                document = fresh
+            }
+            // **Each page gets its own autorelease pool, and it is not optional.**
+            //
+            // PDFKit is Objective-C: `page(at:)` and `page.string` hand back
+            // autoreleased objects, which are freed when a pool drains. A loop
+            // like this one drains nothing until it ends, so on an 8,894 page
+            // document every page object and every page string stays alive to
+            // the last page. That is a gigabyte accumulating inside a function
+            // written to hold one page at a time, and it is invisible in this
+            // code because the retain is the runtime's rather than ours.
+            try autoreleasepool {
+                guard let page = document.page(at: index),
+                      let text = page.string,
+                      !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                else { return }
+                sawText = true
+                // 1 based, matching what a reader sees in a PDF viewer.
+                try body(index + 1, pageCount, text)
+            }
         }
         guard sawText else {
             throw Extraction.Failure.unreadable(
@@ -63,6 +102,15 @@ public enum DocumentReader {
         throw Extraction.Failure.unreadable(url.lastPathComponent,
                                             "PDF reading needs PDFKit")
         #endif
+    }
+
+    /// Whether this page is one where the document is reopened.
+    ///
+    /// Pure and separate because it is the only part of the reopening that a
+    /// test can reach: everything else needs PDFKit and a large document. Never
+    /// at page zero, where the document has just been opened.
+    static func shouldReopen(atPage index: Int, every: Int) -> Bool {
+        index > 0 && every > 0 && index.isMultiple(of: every)
     }
 
     public static func read(_ url: URL) throws -> Content {

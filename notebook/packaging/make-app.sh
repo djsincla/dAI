@@ -21,6 +21,22 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/NotebookMLX"
 
+# The Metal shader library, without which every GPU call aborts.
+#
+# SwiftPM cannot compile MLX's Metal shaders, which is why the agent is built
+# with xcodebuild and ships mlx-swift_Cmlx.bundle beside its binary. Rather than
+# stand up a second xcodebuild for this package, the agent's already-built
+# bundle is borrowed: it is the same vendored mlx-swift, by path, so it is the
+# same shaders. If the agent has not been built, embedding will abort with
+# "Failed to load the default metallib" and this says so now instead.
+CMLX="$ROOT/../agent/.xcbuild/Build/Products/Release/mlx-swift_Cmlx.bundle"
+if [[ -d "$CMLX" ]]; then
+  cp -R "$CMLX" "$APP/Contents/MacOS/"
+else
+  echo "warning: no Metal shader bundle found at $CMLX" >&2
+  echo "         build the agent first, or embedding will abort at runtime" >&2
+fi
+
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

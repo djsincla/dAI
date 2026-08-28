@@ -15,6 +15,7 @@ let package = Package(
         .executable(name: "notebook-demo", targets: ["notebook-demo"]),
         .executable(name: "NotebookApp", targets: ["NotebookApp"]),
         .executable(name: "notebook-import", targets: ["notebook-import"]),
+        .executable(name: "notebook-verify", targets: ["notebook-verify"]),
     ],
     dependencies: [
         // xlsx is a zip of XML, so reading one means unzipping and parsing
@@ -23,10 +24,17 @@ let package = Package(
         // would otherwise write and own. The alternative was ZIPFoundation
         // plus XMLParser, which is the same work with our name on it.
         .package(url: "https://github.com/CoreOffice/CoreXLSX.git", from: "0.14.2"),
+        // The same vendored copy the agent builds against, by path rather than
+        // by version. Two copies of MLXEmbedders at different revisions could
+        // pool or normalise differently, and an index built by one would be
+        // silently incomparable with a query from the other. One copy is the
+        // only way to be sure they agree.
+        .package(path: "../agent/vendor/mlx-swift-examples"),
     ],
     targets: [
         .target(name: "NotebookKit", dependencies: [
             .product(name: "CoreXLSX", package: "CoreXLSX"),
+            .product(name: "MLXEmbedders", package: "mlx-swift-examples"),
         ]),
         // Writes a notebook so the format can be checked against rag_ask.py.
         .executableTarget(name: "notebook-demo", dependencies: ["NotebookKit"]),
@@ -37,6 +45,9 @@ let package = Package(
         // Adopts an index that already exists, so work already done is not
         // done again. See Sources/notebook-import/main.swift.
         .executableTarget(name: "notebook-import", dependencies: ["NotebookKit"]),
+        // Checks this embedder against the agent's fixture. See its main.swift
+        // for why it is a command and not a test.
+        .executableTarget(name: "notebook-verify", dependencies: ["NotebookKit"]),
         .testTarget(name: "NotebookKitTests", dependencies: ["NotebookKit"],
                     resources: [.copy("Fixtures")]),
     ]

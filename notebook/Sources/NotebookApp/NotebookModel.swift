@@ -149,6 +149,15 @@ final class NotebookModel {
     /// document into a new notebook is the first thing anybody does.
     private(set) var queued: [URL] = []
     private var job: Task<Void, Never>?
+    /// Whether a document is being processed right now.
+    ///
+    /// Tracked explicitly rather than inferred. This guard read
+    /// `job == nil || working == nil`, and `working` is set by enqueue itself
+    /// while `job` stays non nil after any earlier ingest, so both halves were
+    /// false from the second document onward and the queue could never drain.
+    /// It worked once and then silently stopped, which is the worst shape a
+    /// bug can have.
+    private var ingesting = false
 
     func enqueue(_ urls: [URL]) {
         queued.append(contentsOf: urls)
@@ -156,7 +165,7 @@ final class NotebookModel {
     }
 
     func startQueued(using embedder: Embedder) {
-        guard !queued.isEmpty, job == nil || working == nil else { return }
+        guard !queued.isEmpty, !ingesting else { return }
         let urls = queued
         queued = []
         add(urls, using: embedder)
@@ -170,6 +179,7 @@ final class NotebookModel {
     func add(_ urls: [URL], using embedder: Embedder) {
         guard let package else { return }
         job?.cancel()
+        ingesting = true
         job = Task { [weak self] in
             let ingest = Ingest(package: package, embedder: embedder)
             for url in urls {
@@ -185,13 +195,27 @@ final class NotebookModel {
                 }
             }
             await MainActor.run {
+                self?.ingesting = false
                 self?.working = nil
                 self?.reload()
+                // Anything dropped while this was running goes next, rather
+                // than sitting in the queue until something else happens to
+                // change and trigger a drain.
+                if let more = self?.queued, !more.isEmpty {
+                    self?.startQueued(using: embedder)
+                }
             }
         }
     }
 
-    func cancelWork() { job?.cancel(); working = nil }
+    func cancelWork() {
+        job?.cancel()
+        // Cleared too, so Stop means stop rather than stop this one and start
+        // the next.
+        queued = []
+        ingesting = false
+        working = nil
+    }
 
     private func note(_ progress: Ingest.Progress) {
         switch progress.stage {

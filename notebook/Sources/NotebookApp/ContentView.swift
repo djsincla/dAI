@@ -412,9 +412,10 @@ struct RecordView: View {
     @State private var picked: [Int] = []
 
     var body: some View {
+        ScrollViewReader { scroll in
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 28) {
-                if model.turns.isEmpty {
+                if model.turns.isEmpty && model.pending == nil {
                     EmptyRecord(isOpen: model.isOpen)
                         .padding(.top, 60)
                 } else {
@@ -423,6 +424,11 @@ struct RecordView: View {
                                  picked: picked.contains(index)) {
                             pick(index)
                         }
+                        .id(index)
+                    }
+                    if let pending = model.pending {
+                        PendingTurnView(pending: pending, package: model.package)
+                            .id("pending")
                     }
                 }
             }
@@ -430,6 +436,19 @@ struct RecordView: View {
             .padding(.vertical, 24)
             .frame(maxWidth: 760, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .center)
+        }
+        // The question is put on screen the moment it is asked, and scrolled
+        // to, so submitting does something visible rather than nothing until
+        // the answer lands.
+        .onChange(of: model.pending?.question) { _, question in
+            guard question != nil else { return }
+            withAnimation { scroll.scrollTo("pending", anchor: .bottom) }
+        }
+        .onChange(of: model.turns.count) { _, _ in
+            if let last = model.turns.indices.last {
+                withAnimation { scroll.scrollTo(last, anchor: .bottom) }
+            }
+        }
         }
         .safeAreaInset(edge: .bottom) { AskBar(model: model, question: $question, embedding: embedding) }
         .safeAreaInset(edge: .top) {
@@ -480,6 +499,42 @@ struct EmptyRecord: View {
                 .frame(maxWidth: 420)
         }
         .frame(maxWidth: .infinity)
+    }
+}
+
+/// A question being worked on.
+///
+/// Shaped like a finished turn so it does not move when it becomes one, with
+/// the stage where the provenance line will be. The citations appear as soon as
+/// retrieval finishes, which is most of the useful information and arrives in
+/// milliseconds, while the answer is still seconds away.
+struct PendingTurnView: View {
+    let pending: NotebookModel.Pending
+    let package: NotebookPackage?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(pending.question)
+                .font(.title3.weight(.semibold))
+                .textSelection(.enabled)
+
+            if !pending.citations.isEmpty {
+                CitationStrip(citations: pending.citations, package: package)
+            }
+
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text(pending.stage).font(.callout).foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(18)
+        .background(.quaternary.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(.tint.opacity(0.35))
+        }
+        .transition(.opacity)
     }
 }
 

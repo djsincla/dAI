@@ -320,6 +320,26 @@ public actor VectorStore {
         return out
     }
 
+    /// The stored text of one chunk, for showing what a citation named.
+    ///
+    /// Matched on the locator as well as the citation, because a long document
+    /// produces many chunks under one citation and the url is what distinguishes
+    /// them.
+    public func text(forCitation citation: String, url: String) throws -> String? {
+        var statement: OpaquePointer?
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_prepare_v2(
+            db, "SELECT text FROM chunks WHERE citation = ? AND url = ? LIMIT 1",
+            -1, &statement, nil) == SQLITE_OK else {
+            throw StoreError.sql(String(cString: sqlite3_errmsg(db)))
+        }
+        sqlite3_bind_text(statement, 1, citation, -1, Self.transient)
+        sqlite3_bind_text(statement, 2, url, -1, Self.transient)
+        guard sqlite3_step(statement) == SQLITE_ROW,
+              let raw = sqlite3_column_text(statement, 0) else { return nil }
+        return String(cString: raw)
+    }
+
     // ------------------------------------------------------------- bytes
 
     public static func blob(from vector: [Float]) -> Data {

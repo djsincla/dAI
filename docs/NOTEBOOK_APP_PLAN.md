@@ -127,25 +127,27 @@ in the notebook package, so reopening a file reopens the thread.
 
 Two properties of this fleet shape the design, and both are easy to get wrong.
 
-### There is no streaming, by design
+### Every exchange is recorded, which is the point
 
-`POST /v1/chat/completions` refuses `stream`: *"a completion is dispatched to a
-node as one unit so that a yield has a bounded worst case"*. That is preemption
-working as intended, not a gap. A harvested machine must be returnable to its
-owner within a bounded time, and a half streamed answer has no seam to stop at.
+A turn is: a question, what was retrieved for it, what the model returned, and
+under what settings. All four are written into the notebook.
 
-So the UI cannot fake a token stream, and should not try. What it can do:
+That makes the file an **experiment record** rather than a chat transcript, and
+for this use it is the difference between a toy and a tool. Weeks later the
+notebook still says which embedding model produced the vectors, what k and
+which retrieval mode were in force, which chunks came back with what scores,
+which machine answered and in what presence state, and what it said. Every one
+of those has been the answer to a question at some point today, and none of
+them survives in a plain transcript.
 
-- Show the retrieval **immediately**, because it is local and takes
-  milliseconds. The citations appear while the answer is still being written,
-  which is more informative than a blinking cursor and is genuinely true.
-- Say which machine is answering and what its presence state is, from the `dai`
-  block already in the response.
-- Make waiting cancellable, and mean it: the gateway drops a dispatch whose
-  caller has gone.
+It also makes **compare** trivial rather than a feature: two turns with the same
+question and different settings are two rows in the same file, already holding
+everything needed to say which was better and why.
 
-A several second wait with the sources already on screen reads better than a
-spinner, and it does not lie about what is happening.
+Nothing streams. A completion is dispatched as one unit so a preemption has a
+bounded worst case, and there is no half answer to record. The UI shows the
+retrieval as soon as it has it, which is immediate and local, and the answer
+when it arrives.
 
 ### Prompt layout decides whether the cache works
 

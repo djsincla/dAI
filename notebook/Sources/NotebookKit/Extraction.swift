@@ -128,8 +128,17 @@ public enum Extraction {
         }
 
         return pieces.enumerated().map { index, piece in
-            Chunk(citation: title, section: title, locator: locator,
-                  text: piece, part: index, parts: pieces.count)
+            // The locator carries the part when there is more than one.
+            //
+            // Without it every chunk of a text file has the same citation and
+            // the same locator, so a citation cannot say which passage it
+            // named and the viewer shows the first one every time. A page
+            // number does this job for PDFs; nothing did it for prose.
+            let where_ = pieces.count > 1 ? "\(locator)#part=\(index + 1)" : locator
+            return Chunk(citation: pieces.count > 1
+                            ? "\(title) (\(index + 1)/\(pieces.count))" : title,
+                         section: title, locator: where_,
+                         text: piece, part: index, parts: pieces.count)
         }
     }
 

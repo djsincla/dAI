@@ -68,6 +68,11 @@ struct ContentView: View {
         }
         .navigationTitle(model.title)
         .navigationSubtitle(model.subtitle)
+        // The list counts sources and questions, and both change while a
+        // notebook is open. Without this the sidebar says "0 sources" beside a
+        // column showing one, which reads as the app having lost the file.
+        .onChange(of: model.sources.count) { _, _ in library.reload() }
+        .onChange(of: model.turns.count) { _, _ in library.reload() }
         .onChange(of: selection) { _, url in
             guard let url else { return }
             model.open(url)

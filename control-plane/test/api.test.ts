@@ -1545,15 +1545,47 @@ describe('what a group offers its machines', () => {
     expect(body.members.length).toBeGreaterThan(0)
   })
 
-  it('reports it held once the node says it holds it', async () => {
+  it('reports it held once the node has it on disk', async () => {
     await push('org/embedder')
     await db.query(
-      `UPDATE nodes SET resident_models = '{"org/embedder": 1}'::jsonb WHERE id = $1`,
+      `UPDATE nodes SET stored_models = '{"org/embedder": 1}'::jsonb WHERE id = $1`,
       [fx.nodeId])
     const body = await (await offering(fx.poolId)).json()
     const m = body.models.find((x: { id: string }) => x.id === 'org/embedder')
     expect(m.heldBy).toEqual(body.members)
     expect(m.missingFrom).toEqual([])
+  })
+
+  it('holds without loading, which is the ordinary state', async () => {
+    // The distinction the first version of this endpoint collapsed. A node that
+    // has fetched a model and has not been asked to serve it holds it and loads
+    // nothing, and reading residency for possession reported it missing from a
+    // machine that had held it for hours.
+    await push('org/embedder')
+    await db.query(
+      `UPDATE nodes SET stored_models = '{"org/embedder": 1}'::jsonb,
+                        resident_models = '{}'::jsonb WHERE id = $1`, [fx.nodeId])
+    const body = await (await offering(fx.poolId)).json()
+    const m = body.models.find((x: { id: string }) => x.id === 'org/embedder')
+    expect(m.heldBy).toEqual(body.members)
+    expect(m.loadedOn).toEqual([])
+    expect(m.missingFrom).toEqual([])
+  })
+
+  it('loading something it does not store is reported as both', async () => {
+    // Possible and worth seeing rather than hiding: the ANE probe is resident
+    // on every node and is in no catalogue, and a model loaded from outside the
+    // fleet's own directory would look like this.
+    await push('org/embedder')
+    await db.query(
+      `UPDATE nodes SET stored_models = '{}'::jsonb,
+                        resident_models = '{"org/embedder": 1}'::jsonb WHERE id = $1`,
+      [fx.nodeId])
+    const body = await (await offering(fx.poolId)).json()
+    const m = body.models.find((x: { id: string }) => x.id === 'org/embedder')
+    expect(m.heldBy).toEqual([])
+    expect(m.missingFrom).toEqual(body.members)
+    expect(m.loadedOn).toEqual(body.members)
   })
 
   it('a stood-down group offers nothing, whatever its rows say', async () => {

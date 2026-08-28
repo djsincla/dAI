@@ -1136,10 +1136,16 @@ paths:
       tags: [admin]
       summary: What a group offers its machines, and which hold it
       description: |
-        Assigned and held are different facts, and the gap between them is the
-        only thing anybody is looking for. A machine that has quietly stopped
-        fetching what it was assigned is otherwise indistinguishable from one
-        that is up to date.
+        Assigned, held and loaded are three facts, and the gaps between them are
+        what anybody is looking for. A machine that has quietly stopped fetching
+        what it was assigned is otherwise indistinguishable from one that is up
+        to date.
+
+        `heldBy` is possession, from the node's `stored_models`: the weights are
+        on its disk. `loadedOn` is residency: a runtime has the model in memory
+        right now. The ordinary state for a fetched model nobody has asked for
+        is held and not loaded, and reading residency for possession reports a
+        model missing from a machine that has had it for hours.
 
         A stood-down group offers nothing whatever its rows say, and `offering`
         reflects that rather than leaving the reader to work out why nothing
@@ -1170,8 +1176,18 @@ paths:
                         kind: { type: string }
                         runtime: { type: string }
                         sizeBytes: { type: integer }
-                        heldBy: { type: array, items: { type: string } }
-                        missingFrom: { type: array, items: { type: string } }
+                        heldBy:
+                          description: Machines with the weights on disk.
+                          type: array
+                          items: { type: string }
+                        missingFrom:
+                          description: Members without them.
+                          type: array
+                          items: { type: string }
+                        loadedOn:
+                          description: Machines with it in memory right now.
+                          type: array
+                          items: { type: string }
                   members:
                     type: array
                     items: { type: string }

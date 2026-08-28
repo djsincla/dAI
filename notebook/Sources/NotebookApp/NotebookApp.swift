@@ -27,6 +27,8 @@ struct NotebookMLXApp: App {
         }
         .windowToolbarStyle(.unified)
 
+        Settings { SettingsView() }
+
         // One window per notebook, keyed by its URL. SwiftUI brings an existing
         // window forward rather than opening a second onto the same file, which
         // is what stops two models appending to one record.

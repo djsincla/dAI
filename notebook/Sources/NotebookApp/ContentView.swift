@@ -519,7 +519,21 @@ struct AskBar: View {
               let embedder = embedding.ready(for: manifest.embeddingModel) else { return }
         let asked = question
         question = ""
-        model.ask(asked, using: embedder)
+        model.ask(asked, using: embedder, gateway: Self.gateway())
+    }
+
+    /// The fleet, when one has been configured.
+    ///
+    /// nil is a working state, not a failure: retrieval alone is useful and is
+    /// what this app did before generation existed. A turn without an answer
+    /// says so rather than pretending.
+    static func gateway() -> Gateway? {
+        guard let url = URL(string: GatewaySettings.baseURL),
+              Credentials.read()?.isEmpty == false else { return nil }
+        let ca = GatewaySettings.caPath
+        return Gateway(configuration: .init(baseURL: url,
+                                            caCertificatePath: ca.isEmpty ? nil : ca),
+                       credential: { Credentials.read() })
     }
 
     var body: some View {

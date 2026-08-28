@@ -210,15 +210,16 @@ final class NotebookModel {
         return ""
     }
 
-    /// Retrieve for a question and record the turn.
+    /// Retrieve, then ask the fleet, then record all of it.
     ///
-    /// Generation is not wired yet, so the answer is the retrieval itself
-    /// rather than prose. Recorded all the same: what was asked, what came
-    /// back, with what scores and under which settings is the useful half, and
-    /// inventing prose to fill the other half would make it impossible to tell
-    /// which half was real.
+    /// Retrieval is local and instant; generation is a request to another
+    /// machine that takes seconds. The citations are published as soon as they
+    /// exist so the window has something true on it while the answer is being
+    /// written, which is both more informative than a spinner and the only
+    /// honest thing to show: nothing streams, because a completion is
+    /// dispatched as one unit so a preemption has a bounded worst case.
     func ask(_ question: String, using embedder: Embedder,
-             settings: Retrieval.Settings = .init()) {
+             gateway: Gateway?, settings: Retrieval.Settings = .init()) {
         guard let package, !asking else { return }
         asking = true
         let started = Date()
@@ -227,24 +228,49 @@ final class NotebookModel {
                 let hits = try await Retrieval.search(
                     question: question, in: package, using: embedder,
                     settings: settings)
+                await MainActor.run { self?.lastHits = hits }
+
                 let manifest = try package.manifest()
+                var answer = "Retrieval only: \(hits.count) passages found."
+                var node: String?
+                var presence: String?
+                var generation: String?
+
+                if let gateway {
+                    // Only the last few turns travel. The whole record would
+                    // eventually exceed the model's window, and the cost of
+                    // trimming is that a question about something said twenty
+                    // turns ago is answered from the passages instead.
+                    let history = await MainActor.run {
+                        (self?.turns.suffix(6) ?? []).map {
+                            (question: $0.question, answer: $0.answer)
+                        }
+                    }
+                    let reply = try await gateway.answer(
+                        question: question,
+                        passages: hits.map { ($0.chunk.citation, $0.chunk.text) },
+                        history: Array(history),
+                        model: GatewaySettings.model.isEmpty
+                            ? nil : GatewaySettings.model)
+                    answer = reply.text
+                    node = reply.node
+                    presence = reply.presenceState
+                    generation = reply.model
+                }
+
                 let turn = NotebookPackage.Turn(
-                    question: question,
-                    answer: hits.isEmpty
-                        ? "Nothing was retrieved for this question."
-                        : "Retrieval only: \(hits.count) passages found. "
-                          + "Generation is not wired yet, so no answer was "
-                          + "written. The passages below are real.",
+                    question: question, answer: answer,
                     citations: hits.map {
                         .init(citation: $0.chunk.citation, section: $0.chunk.section,
                               url: $0.chunk.url, score: $0.score)
                     },
                     k: settings.k, hybrid: false,
                     embeddingModel: manifest.embeddingModel,
+                    answeredBy: node, presenceState: presence,
+                    generationModel: generation,
                     seconds: Date().timeIntervalSince(started))
                 try package.append(turn)
                 await MainActor.run {
-                    self?.lastHits = hits
                     self?.turns.append(turn)
                     self?.asking = false
                 }

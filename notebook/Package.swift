@@ -14,6 +14,7 @@ let package = Package(
         .library(name: "NotebookKit", targets: ["NotebookKit"]),
         .executable(name: "notebook-demo", targets: ["notebook-demo"]),
         .executable(name: "NotebookApp", targets: ["NotebookApp"]),
+        .executable(name: "notebook-import", targets: ["notebook-import"]),
     ],
     targets: [
         .target(name: "NotebookKit"),
@@ -23,6 +24,9 @@ let package = Package(
         // packaging/make-app.sh, so it runs from the command line during
         // development and becomes a document app in Xcode later.
         .executableTarget(name: "NotebookApp", dependencies: ["NotebookKit"]),
+        // Adopts an index that already exists, so work already done is not
+        // done again. See Sources/notebook-import/main.swift.
+        .executableTarget(name: "notebook-import", dependencies: ["NotebookKit"]),
         .testTarget(name: "NotebookKitTests", dependencies: ["NotebookKit"]),
     ]
 )

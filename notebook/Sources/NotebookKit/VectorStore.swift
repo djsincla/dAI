@@ -253,6 +253,13 @@ public actor VectorStore {
         return Int(sqlite3_column_int64(statement, 0))
     }
 
+    /// How wide this notebook's vectors are, from the first one stored.
+    ///
+    /// Read rather than declared. An imported index knows its own width and the
+    /// manifest should agree with it rather than with whatever the app would
+    /// have chosen.
+    public func dimensions() throws -> Int? { try dimensionsOfFirstChunk() }
+
     private func dimensionsOfFirstChunk() throws -> Int? {
         var statement: OpaquePointer?
         defer { sqlite3_finalize(statement) }

@@ -42,7 +42,8 @@ struct ReaderIntegrationTests {
         try Data(csv.utf8).write(to: url)
         defer { try? FileManager.default.removeItem(at: url) }
 
-        guard case let .table(table) = try DocumentReader.read(url) else {
+        guard case let .tables(tables) = try DocumentReader.read(url),
+              let table = tables.first else {
             Issue.record("a csv should read as a table"); return
         }
         #expect(table.header == ["Region", "Units", "Note"])

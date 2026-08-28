@@ -15,14 +15,23 @@ public enum DocumentReader {
     public enum Content: Sendable, Equatable {
         /// Prose, with a locator for each page where the format has pages.
         case prose(text: String, pages: [Int: String])
-        case table(Extraction.Table)
+        /// One or more tables. A workbook is several documents rather than one:
+        /// putting unrelated sheets in the same section would stop the
+        /// per-section cap doing its job.
+        case tables([Extraction.Table])
     }
 
     public static func read(_ url: URL) throws -> Content {
         switch url.pathExtension.lowercased() {
         case "pdf": return try pdf(url)
-        case "csv": return .table(try delimited(url, separator: ","))
-        case "tsv": return .table(try delimited(url, separator: "\t"))
+        case "csv": return .tables([try delimited(url, separator: ",")])
+        case "tsv": return .tables([try delimited(url, separator: "\t")])
+        case "xlsx": return .tables(try SpreadsheetReader.read(url))
+        case "xls":
+            throw Extraction.Failure.unreadable(
+                url.lastPathComponent,
+                "the older .xls format is not xlsx and cannot be read. Save it "
+                + "as .xlsx or export the sheet as CSV.")
         default: return try plain(url)
         }
     }

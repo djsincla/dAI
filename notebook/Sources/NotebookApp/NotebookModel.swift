@@ -143,7 +143,24 @@ final class NotebookModel {
     // ------------------------------------------------------------ ingesting
 
     private(set) var working: String?
+    /// Files dropped before the model finished loading.
+    ///
+    /// Held rather than refused. Loading takes about a minute and dropping a
+    /// document into a new notebook is the first thing anybody does.
+    private(set) var queued: [URL] = []
     private var job: Task<Void, Never>?
+
+    func enqueue(_ urls: [URL]) {
+        queued.append(contentsOf: urls)
+        working = "\(queued.count) waiting for the model…"
+    }
+
+    func startQueued(using embedder: Embedder) {
+        guard !queued.isEmpty, job == nil || working == nil else { return }
+        let urls = queued
+        queued = []
+        add(urls, using: embedder)
+    }
 
     /// Add dropped files, one at a time, reporting as they go.
     ///

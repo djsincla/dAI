@@ -16,6 +16,7 @@ let package = Package(
         .executable(name: "NotebookApp", targets: ["NotebookApp"]),
         .executable(name: "notebook-import", targets: ["notebook-import"]),
         .executable(name: "notebook-verify", targets: ["notebook-verify"]),
+        .executable(name: "notebook-reembed", targets: ["notebook-reembed"]),
     ],
     dependencies: [
         // xlsx is a zip of XML, so reading one means unzipping and parsing
@@ -48,6 +49,9 @@ let package = Package(
         // Checks this embedder against the agent's fixture. See its main.swift
         // for why it is a command and not a test.
         .executableTarget(name: "notebook-verify", dependencies: ["NotebookKit"]),
+        // Re-embeds an existing notebook with a different model, keeping its
+        // chunks and citations. See its main.swift.
+        .executableTarget(name: "notebook-reembed", dependencies: ["NotebookKit"]),
         .testTarget(name: "NotebookKitTests", dependencies: ["NotebookKit"],
                     resources: [.copy("Fixtures")]),
     ]

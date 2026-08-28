@@ -1,0 +1,506 @@
+import NotebookKit
+import SwiftUI
+import UniformTypeIdentifiers
+
+/// The window: sources on the left, the record on the right.
+///
+/// The record is the document, so it gets the space. Sources are the ground and
+/// sit in a sidebar where they can be scanned and toggled without leaving the
+/// thread.
+struct ContentView: View {
+    @Bindable var library: NotebookLibrary
+    @Bindable var model: NotebookModel
+    @State private var selection: URL?
+    @State private var question = ""
+    @State private var isTargeted = false
+    @State private var renaming: NotebookLibrary.Entry?
+    @State private var newName = ""
+    @State private var confirmingDelete: NotebookLibrary.Entry?
+
+    /// Which columns are showing.
+    ///
+    /// `NavigationSplitViewVisibility` has three stages and they are not
+    /// independent: `.all`, `.doubleColumn` which hides the sidebar, and
+    /// `.detailOnly` which hides both. There is no state for "hide the middle
+    /// one and keep the first", which is a reasonable thing to want when
+    /// browsing notebooks without caring about their files.
+    ///
+    /// So the sources column is a separate flag and the layout swaps between a
+    /// three column and a two column split. Swapping rather than animating a
+    /// width to zero, because a zero width column still takes keyboard focus
+    /// and still reports itself to VoiceOver.
+    @State private var columns: NavigationSplitViewVisibility = .all
+    @State private var showSources = true
+
+    var body: some View {
+        Group {
+            if showSources {
+                NavigationSplitView(columnVisibility: $columns) {
+                    notebookColumn
+                } content: {
+                    sourceColumn
+                } detail: {
+                    RecordView(model: model, question: $question)
+                }
+            } else {
+                NavigationSplitView(columnVisibility: $columns) {
+                    notebookColumn
+                } detail: {
+                    RecordView(model: model, question: $question)
+                }
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Menu {
+                    Toggle("Notebooks", isOn: Binding(
+                        get: { columns != .detailOnly },
+                        set: { columns = $0 ? .all : .detailOnly }))
+                        .keyboardShortcut("1")
+                    Toggle("Sources", isOn: $showSources)
+                        .keyboardShortcut("2")
+                } label: {
+                    Label("Columns", systemImage: "sidebar.squares.left")
+                }
+                .help("Show or hide the notebook and source columns")
+            }
+        }
+        .navigationTitle(model.title)
+        .navigationSubtitle(model.subtitle)
+        .onChange(of: selection) { _, url in
+            if let url { model.open(url) }
+        }
+        .task {
+            // Open the most recent, so the window is never empty on a machine
+            // that already has notebooks.
+            if selection == nil { selection = library.notebooks.first?.url }
+        }
+        .alert("Problem", isPresented: .constant(model.problem != nil || library.problem != nil)) {
+            Button("OK") { model.problem = nil; library.problem = nil }
+        } message: {
+            Text(model.problem ?? library.problem ?? "")
+        }
+        // Renaming in a sheet rather than in place: an editable row that commits
+        // on focus loss is easy to change by accident, and a notebook's name is
+        // how somebody finds it again.
+        .sheet(item: $renaming) { entry in
+            RenameSheet(name: $newName, original: entry.name) { name in
+                library.rename(entry, to: name)
+                if selection == entry.url { model.open(entry.url) }
+            }
+        }
+        .confirmationDialog(
+            "Move “\(confirmingDelete?.name ?? "")” to the Trash?",
+            isPresented: .constant(confirmingDelete != nil),
+            titleVisibility: .visible
+        ) {
+            Button("Move to Trash", role: .destructive) {
+                if let entry = confirmingDelete {
+                    let wasOpen = selection == entry.url
+                    library.delete(entry)
+                    if wasOpen { selection = library.notebooks.first?.url }
+                }
+                confirmingDelete = nil
+            }
+            Button("Cancel", role: .cancel) { confirmingDelete = nil }
+        } message: {
+            // Named plainly, because this is the half that cannot be rebuilt.
+            Text("Its sources and its record go with it. The Trash can be "
+                 + "emptied, and then they are gone.")
+        }
+    }
+
+    private var notebookColumn: some View {
+        NotebookList(library: library, selection: $selection,
+                     renaming: $renaming, newName: $newName,
+                     confirmingDelete: $confirmingDelete)
+            .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 320)
+    }
+
+    private var sourceColumn: some View {
+        SourceList(model: model, isTargeted: $isTargeted)
+            .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 340)
+    }
+}
+
+// --------------------------------------------------------------- notebooks
+
+struct NotebookList: View {
+    @Environment(\.openWindow) private var openWindow
+    @Bindable var library: NotebookLibrary
+    @Binding var selection: URL?
+    @Binding var renaming: NotebookLibrary.Entry?
+    @Binding var newName: String
+    @Binding var confirmingDelete: NotebookLibrary.Entry?
+
+    var body: some View {
+        List(selection: $selection) {
+            Section("Notebooks") {
+                ForEach(library.notebooks) { entry in
+                    NotebookRow(entry: entry)
+                        .tag(entry.url)
+                        // Double click opens it in its own window, as a note
+                        // does in Notes. Single click selects, so browsing is
+                        // unchanged and the gesture only adds a way out.
+                        .onTapGesture(count: 2) {
+                            openWindow(id: "notebook", value: entry.url)
+                        }
+                        .contextMenu {
+                            Button("Open in New Window") {
+                                openWindow(id: "notebook", value: entry.url)
+                            }
+                            Divider()
+                            Button("Rename…") {
+                                newName = entry.name
+                                renaming = entry
+                            }
+                            Button("Duplicate") {
+                                if let url = library.duplicate(entry) { selection = url }
+                            }
+                            Divider()
+                            Button("Move to Trash", role: .destructive) {
+                                confirmingDelete = entry
+                            }
+                        }
+                }
+            }
+        }
+        .listStyle(.sidebar)
+        .safeAreaInset(edge: .bottom) {
+            HStack {
+                Button {
+                    if let url = library.create() {
+                        selection = url
+                        if let entry = library.notebooks.first(where: { $0.url == url }) {
+                            newName = entry.name
+                            renaming = entry
+                        }
+                    }
+                } label: {
+                    Label("New Notebook", systemImage: "plus")
+                }
+                .buttonStyle(.borderless)
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.bar)
+        }
+    }
+}
+
+struct NotebookRow: View {
+    let entry: NotebookLibrary.Entry
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(entry.name).lineLimit(1)
+            Text(detail).font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 3)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(entry.name), \(detail)")
+    }
+
+    private var detail: String {
+        let sources = entry.sourceCount == 1 ? "1 source" : "\(entry.sourceCount) sources"
+        let turns = entry.turnCount == 1 ? "1 question" : "\(entry.turnCount) questions"
+        return "\(sources) · \(turns)"
+    }
+}
+
+struct RenameSheet: View {
+    @Binding var name: String
+    let original: String
+    let commit: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Rename Notebook").font(.headline)
+            TextField("Name", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { commit(name); dismiss() }
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Rename") { commit(name); dismiss() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 340)
+    }
+}
+
+// ----------------------------------------------------------------- sources
+
+struct SourceList: View {
+    @Bindable var model: NotebookModel
+    @Binding var isTargeted: Bool
+
+    var body: some View {
+        List {
+            Section("Sources") {
+                if model.sources.isEmpty {
+                    DropHint()
+                } else {
+                    ForEach(model.sources) { source in
+                        SourceRow(source: source)
+                    }
+                }
+            }
+        }
+        .listStyle(.sidebar)
+        .safeAreaInset(edge: .bottom) { DropZone(isTargeted: $isTargeted) }
+    }
+}
+
+struct SourceRow: View {
+    let source: NotebookModel.Source
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: source.kind.symbol)
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(source.name).lineLimit(1)
+                Text(detail).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 2)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(source.name), \(source.kind.rawValue), \(detail)")
+    }
+
+    private var detail: String {
+        switch source.state {
+        case .pending: return "waiting"
+        case .extracting: return "extracting"
+        case let .embedding(done, total): return "embedding \(done) of \(total)"
+        case let .ready(chunks):
+            return chunks > 0 ? "\(chunks) chunks" : ByteCountFormatter
+                .string(fromByteCount: Int64(source.bytes), countStyle: .file)
+        case let .failed(why): return why
+        }
+    }
+}
+
+struct DropHint: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("No sources yet").foregroundStyle(.secondary)
+            Text("Drop text, PDF, CSV or Excel below.")
+                .font(.caption).foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 6)
+    }
+}
+
+struct DropZone: View {
+    @Binding var isTargeted: Bool
+
+    var body: some View {
+        VStack(spacing: 6) {
+            Image(systemName: "square.and.arrow.down")
+                .font(.title2).foregroundStyle(.secondary)
+            Text("Drop documents").font(.callout)
+            Text("text · pdf · csv · xlsx")
+                .font(.caption2).foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 18)
+        .background(.quaternary.opacity(isTargeted ? 0.5 : 0.18),
+                    in: RoundedRectangle(cornerRadius: 10))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                .foregroundStyle(isTargeted ? AnyShapeStyle(.tint)
+                                            : AnyShapeStyle(.quaternary))
+        }
+        .padding(10)
+        .animation(.easeOut(duration: 0.12), value: isTargeted)
+        .accessibilityLabel("Drop documents here")
+        .accessibilityHint("Accepts text, PDF, CSV and Excel files")
+    }
+}
+
+// ------------------------------------------------------------------ record
+
+struct RecordView: View {
+    @Bindable var model: NotebookModel
+    @Binding var question: String
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 28) {
+                if model.turns.isEmpty {
+                    EmptyRecord(isOpen: model.isOpen)
+                        .padding(.top, 60)
+                } else {
+                    ForEach(Array(model.turns.enumerated()), id: \.offset) { _, turn in
+                        TurnView(turn: turn)
+                    }
+                }
+            }
+            .padding(.horizontal, 28)
+            .padding(.vertical, 24)
+            .frame(maxWidth: 760, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
+        }
+        .safeAreaInset(edge: .bottom) { AskBar(model: model, question: $question) }
+    }
+}
+
+struct EmptyRecord: View {
+    let isOpen: Bool
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: isOpen ? "text.bubble" : "book.closed")
+                .font(.system(size: 34)).foregroundStyle(.tertiary)
+            Text(isOpen ? "Nothing asked yet" : "No notebook open")
+                .font(.title3)
+            Text(isOpen
+                 ? "Questions and answers are recorded here, with what was retrieved and the settings in force."
+                 : "Open a .dainotebook to see its sources and record.")
+                .font(.callout).foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 420)
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+/// One exchange: the question, what it retrieved, what came back, and under
+/// what settings. All four, because this is a record rather than a transcript.
+struct TurnView: View {
+    let turn: NotebookPackage.Turn
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(turn.question)
+                .font(.title3.weight(.semibold))
+                .textSelection(.enabled)
+
+            if !turn.citations.isEmpty {
+                CitationStrip(citations: turn.citations)
+            }
+
+            Text(turn.answer)
+                .font(.body)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Provenance(turn: turn)
+        }
+        .padding(18)
+        .background(.quaternary.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+struct CitationStrip: View {
+    let citations: [NotebookPackage.Turn.Citation]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(Array(citations.enumerated()), id: \.offset) { _, c in
+                HStack(spacing: 8) {
+                    // The score is shown, not hidden. Whether the right thing
+                    // was retrieved is the first question about any answer, and
+                    // it is answerable at a glance only if the numbers are here.
+                    Text(String(format: "%.3f", c.score))
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 46, alignment: .trailing)
+                    Text(c.citation).font(.callout).lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("\(c.citation), score \(String(format: "%.3f", c.score))")
+            }
+        }
+        .padding(10)
+        .background(.quaternary.opacity(0.14), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+/// Which machine answered, and under what settings.
+///
+/// Kept on every turn rather than in a details pane: "what was different about
+/// that run" is the question this file exists to answer, and it cannot be
+/// answered later if it is not written down at the time.
+struct Provenance: View {
+    let turn: NotebookPackage.Turn
+
+    var body: some View {
+        HStack(spacing: 14) {
+            ForEach(facts, id: \.self) { fact in
+                Text(fact)
+            }
+            Spacer(minLength: 0)
+        }
+        .font(.caption)
+        .foregroundStyle(.tertiary)
+    }
+
+    private var facts: [String] {
+        var out = ["k \(turn.k)", turn.hybrid ? "hybrid" : "semantic"]
+        if let node = turn.answeredBy {
+            out.append(turn.presenceState.map { "\(node) · \($0)" } ?? node)
+        }
+        if let seconds = turn.seconds { out.append(String(format: "%.1fs", seconds)) }
+        out.append(turn.embeddingModel.split(separator: "/").last.map(String.init) ?? "")
+        return out.filter { !$0.isEmpty }
+    }
+}
+
+// --------------------------------------------------------------------- ask
+
+struct AskBar: View {
+    @Bindable var model: NotebookModel
+    @Binding var question: String
+
+    var body: some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 10) {
+                TextField("Ask this notebook", text: $question, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .lineLimit(1 ... 4)
+                    .font(.body)
+                    .disabled(!model.canAsk)
+                Button {
+                } label: {
+                    Image(systemName: "arrow.up.circle.fill").font(.title2)
+                }
+                .buttonStyle(.plain)
+                .disabled(!model.canAsk || question.isEmpty)
+                .help(model.canAsk ? "Ask" : model.whyNotAsking)
+            }
+            .padding(12)
+            .background(.quaternary.opacity(0.18),
+                        in: RoundedRectangle(cornerRadius: 10))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(.quaternary)
+            }
+
+            if !model.canAsk {
+                // Said plainly rather than left as a greyed out control. A shell
+                // that looks finished is a shell nobody can review honestly.
+                Text(model.whyNotAsking)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(.horizontal, 28)
+        .padding(.vertical, 12)
+        .frame(maxWidth: 760)
+        .frame(maxWidth: .infinity)
+        .background(.bar)
+    }
+}

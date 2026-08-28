@@ -15,10 +15,14 @@ import SwiftUI
 struct NotebookMLXApp: App {
     @State private var library = NotebookLibrary()
     @State private var model = NotebookModel()
+    /// One model in memory, shared by every window. Two notebooks on the same
+    /// model must not load it twice, least of all on a machine that is also
+    /// serving the fleet.
+    @State private var embedding = EmbeddingService()
 
     var body: some Scene {
         WindowGroup {
-            ContentView(library: library, model: model)
+            ContentView(library: library, model: model, embedding: embedding)
                 .frame(minWidth: 1000, minHeight: 620)
         }
         .windowToolbarStyle(.unified)
@@ -27,7 +31,7 @@ struct NotebookMLXApp: App {
         // window forward rather than opening a second onto the same file, which
         // is what stops two models appending to one record.
         WindowGroup(id: "notebook", for: URL.self) { $url in
-            if let url { NotebookWindow(url: url) }
+            if let url { NotebookWindow(url: url, embedding: embedding) }
         }
         .windowToolbarStyle(.unified)
         .commands {

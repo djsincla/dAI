@@ -10,6 +10,7 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @Bindable var library: NotebookLibrary
     @Bindable var model: NotebookModel
+    @Bindable var embedding: EmbeddingService
     @State private var selection: URL?
     @State private var question = ""
     @State private var isTargeted = false
@@ -40,13 +41,13 @@ struct ContentView: View {
                 } content: {
                     sourceColumn
                 } detail: {
-                    RecordView(model: model, question: $question)
+                    RecordView(model: model, question: $question, embedding: embedding)
                 }
             } else {
                 NavigationSplitView(columnVisibility: $columns) {
                     notebookColumn
                 } detail: {
-                    RecordView(model: model, question: $question)
+                    RecordView(model: model, question: $question, embedding: embedding)
                 }
             }
         }
@@ -68,7 +69,9 @@ struct ContentView: View {
         .navigationTitle(model.title)
         .navigationSubtitle(model.subtitle)
         .onChange(of: selection) { _, url in
-            if let url { model.open(url) }
+            guard let url else { return }
+            model.open(url)
+            if let manifest = model.manifest { embedding.warm(for: manifest.embeddingModel) }
         }
         .task {
             // Open the most recent, so the window is never empty on a machine
@@ -118,7 +121,7 @@ struct ContentView: View {
     }
 
     private var sourceColumn: some View {
-        SourceList(model: model, isTargeted: $isTargeted)
+        SourceList(model: model, embedding: embedding, isTargeted: $isTargeted)
             .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 340)
     }
 }
@@ -238,6 +241,7 @@ struct RenameSheet: View {
 
 struct SourceList: View {
     @Bindable var model: NotebookModel
+    @Bindable var embedding: EmbeddingService
     @Binding var isTargeted: Bool
 
     var body: some View {
@@ -253,7 +257,23 @@ struct SourceList: View {
             }
         }
         .listStyle(.sidebar)
-        .safeAreaInset(edge: .bottom) { DropZone(isTargeted: $isTargeted) }
+        .safeAreaInset(edge: .bottom) {
+            DropZone(isTargeted: $isTargeted, working: model.working,
+                     cancel: { model.cancelWork() })
+        }
+        // Dropped onto the whole list rather than only the dashed rectangle: a
+        // target you have to hit is a target people miss.
+        .dropDestination(for: URL.self) { urls, _ in
+            guard let manifest = model.manifest,
+                  let embedder = embedding.ready(for: manifest.embeddingModel)
+            else {
+                model.problem = embedding.detail
+                    ?? "The embedding model is still loading. Try again in a moment."
+                return false
+            }
+            model.add(urls, using: embedder)
+            return true
+        } isTargeted: { isTargeted = $0 }
     }
 }
 
@@ -303,8 +323,29 @@ struct DropHint: View {
 
 struct DropZone: View {
     @Binding var isTargeted: Bool
+    var working: String?
+    var cancel: () -> Void
 
     var body: some View {
+        if let working {
+            // Progress replaces the target while something is running, with a
+            // way to stop it. Embedding a large PDF takes minutes and an app
+            // that cannot be interrupted during it is an app that looks hung.
+            VStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text(working).font(.caption).multilineTextAlignment(.center)
+                Button("Stop", action: cancel).buttonStyle(.borderless)
+                    .controlSize(.small)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 16)
+            .padding(10)
+        } else {
+            target
+        }
+    }
+
+    private var target: some View {
         VStack(spacing: 6) {
             Image(systemName: "square.and.arrow.down")
                 .font(.title2).foregroundStyle(.secondary)
@@ -334,6 +375,7 @@ struct DropZone: View {
 struct RecordView: View {
     @Bindable var model: NotebookModel
     @Binding var question: String
+    @Bindable var embedding: EmbeddingService
 
     var body: some View {
         ScrollView {
@@ -352,7 +394,7 @@ struct RecordView: View {
             .frame(maxWidth: 760, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .center)
         }
-        .safeAreaInset(edge: .bottom) { AskBar(model: model, question: $question) }
+        .safeAreaInset(edge: .bottom) { AskBar(model: model, question: $question, embedding: embedding) }
     }
 }
 
@@ -464,6 +506,21 @@ struct Provenance: View {
 struct AskBar: View {
     @Bindable var model: NotebookModel
     @Binding var question: String
+    @Bindable var embedding: EmbeddingService
+
+    /// Asking needs both a notebook with chunks and a loaded model.
+    private var canAsk: Bool {
+        guard let manifest = model.manifest else { return false }
+        return model.canAsk && embedding.ready(for: manifest.embeddingModel) != nil
+    }
+
+    private func ask() {
+        guard canAsk, let manifest = model.manifest,
+              let embedder = embedding.ready(for: manifest.embeddingModel) else { return }
+        let asked = question
+        question = ""
+        model.ask(asked, using: embedder)
+    }
 
     var body: some View {
         VStack(spacing: 6) {
@@ -472,14 +529,20 @@ struct AskBar: View {
                     .textFieldStyle(.plain)
                     .lineLimit(1 ... 4)
                     .font(.body)
-                    .disabled(!model.canAsk)
+                    .disabled(!canAsk)
+                    .onSubmit(ask)
                 Button {
+                    ask()
                 } label: {
-                    Image(systemName: "arrow.up.circle.fill").font(.title2)
+                    if model.asking {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.up.circle.fill").font(.title2)
+                    }
                 }
                 .buttonStyle(.plain)
-                .disabled(!model.canAsk || question.isEmpty)
-                .help(model.canAsk ? "Ask" : model.whyNotAsking)
+                .disabled(!canAsk || question.isEmpty)
+                .help(canAsk ? "Ask" : model.whyNotAsking)
             }
             .padding(12)
             .background(.quaternary.opacity(0.18),
@@ -489,13 +552,26 @@ struct AskBar: View {
                     .strokeBorder(.quaternary)
             }
 
-            if !model.canAsk {
-                // Said plainly rather than left as a greyed out control. A shell
-                // that looks finished is a shell nobody can review honestly.
-                Text(model.whyNotAsking)
-                    .font(.caption).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            // What the model is doing, said rather than implied by a
+            // disabled control. Warming takes about a minute the first time and
+            // a spinner with no words reads as a hang.
+            HStack(spacing: 6) {
+                if case .warming = embedding.state {
+                    ProgressView().controlSize(.small)
+                }
+                if let summary = embedding.summary {
+                    Text(summary).font(.caption).foregroundStyle(.secondary)
+                }
+                if let detail = embedding.detail {
+                    Text(detail).font(.caption).foregroundStyle(.secondary)
+                        .lineLimit(2)
+                } else if !canAsk, embedding.state.isReady, !model.whyNotAsking.isEmpty {
+                    Text(model.whyNotAsking)
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.horizontal, 28)
         .padding(.vertical, 12)

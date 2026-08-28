@@ -135,17 +135,125 @@ final class NotebookModel {
         return try result!.get()
     }
 
+    // ------------------------------------------------------------ ingesting
+
+    private(set) var working: String?
+    private var job: Task<Void, Never>?
+
+    /// Add dropped files, one at a time, reporting as they go.
+    ///
+    /// Sequential rather than parallel. Embedding is already using the whole
+    /// GPU, so two documents at once finish no sooner and make the progress
+    /// meaningless.
+    func add(_ urls: [URL], using embedder: Embedder) {
+        guard let package else { return }
+        job?.cancel()
+        job = Task { [weak self] in
+            let ingest = Ingest(package: package, embedder: embedder)
+            for url in urls {
+                if Task.isCancelled { break }
+                do {
+                    _ = try await ingest.add(url) { progress in
+                        Task { @MainActor in self?.note(progress) }
+                    }
+                } catch is CancellationError {
+                    break
+                } catch {
+                    await MainActor.run { self?.problem = "\(error)" }
+                }
+            }
+            await MainActor.run {
+                self?.working = nil
+                self?.reload()
+            }
+        }
+    }
+
+    func cancelWork() { job?.cancel(); working = nil }
+
+    private func note(_ progress: Ingest.Progress) {
+        switch progress.stage {
+        case .copying: working = "Copying \(progress.document)…"
+        case .extracting: working = "Reading \(progress.document)…"
+        case .chunking: working = "Chunking \(progress.document)…"
+        case let .embedding(done, total):
+            working = "Embedding \(progress.document): \(done) of \(total)"
+        case let .done(chunks):
+            working = nil
+            problem = nil
+            _ = chunks
+        case let .failed(why):
+            working = nil
+            if why != "cancelled" { problem = "\(progress.document): \(why)" }
+        }
+    }
+
+    /// Re-read what is on disk, after ingesting or deleting.
+    func reload() {
+        guard let package else { return }
+        sources = (try? Self.readSources(package)) ?? []
+        chunkCount = (try? Self.countChunks(package)) ?? 0
+        turns = (try? package.turns()) ?? []
+    }
+
     // ------------------------------------------------------------- asking
 
-    /// Placeholder until the embedder lands.
-    ///
-    /// It refuses rather than inventing an answer, and says which step is
-    /// missing. A shell that returns plausible text would make the rest of the
-    /// app impossible to judge.
-    var canAsk: Bool { false }
+    private(set) var asking = false
+    private(set) var lastHits: [Retrieval.Hit] = []
+
+    var canAsk: Bool { isOpen && chunkCount > 0 && !asking && working == nil }
+
     var whyNotAsking: String {
-        "Asking needs the embedder, which is step 3. Retrieval and generation "
-        + "are wired to nothing yet, so this box would return an invented "
-        + "answer and there would be no way to tell."
+        if !isOpen { return "Open a notebook first." }
+        if chunkCount == 0 { return "Add a document first: this notebook has no chunks." }
+        if working != nil { return "Wait for the current document to finish." }
+        return ""
+    }
+
+    /// Retrieve for a question and record the turn.
+    ///
+    /// Generation is not wired yet, so the answer is the retrieval itself
+    /// rather than prose. Recorded all the same: what was asked, what came
+    /// back, with what scores and under which settings is the useful half, and
+    /// inventing prose to fill the other half would make it impossible to tell
+    /// which half was real.
+    func ask(_ question: String, using embedder: Embedder,
+             settings: Retrieval.Settings = .init()) {
+        guard let package, !asking else { return }
+        asking = true
+        let started = Date()
+        Task { [weak self] in
+            do {
+                let hits = try await Retrieval.search(
+                    question: question, in: package, using: embedder,
+                    settings: settings)
+                let manifest = try package.manifest()
+                let turn = NotebookPackage.Turn(
+                    question: question,
+                    answer: hits.isEmpty
+                        ? "Nothing was retrieved for this question."
+                        : "Retrieval only: \(hits.count) passages found. "
+                          + "Generation is not wired yet, so no answer was "
+                          + "written. The passages below are real.",
+                    citations: hits.map {
+                        .init(citation: $0.chunk.citation, section: $0.chunk.section,
+                              url: $0.chunk.url, score: $0.score)
+                    },
+                    k: settings.k, hybrid: false,
+                    embeddingModel: manifest.embeddingModel,
+                    seconds: Date().timeIntervalSince(started))
+                try package.append(turn)
+                await MainActor.run {
+                    self?.lastHits = hits
+                    self?.turns.append(turn)
+                    self?.asking = false
+                }
+            } catch {
+                await MainActor.run {
+                    self?.problem = "\(error)"
+                    self?.asking = false
+                }
+            }
+        }
     }
 }

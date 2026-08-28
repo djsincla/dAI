@@ -52,30 +52,59 @@ public actor Ingest {
             try Task.checkCancellation()
 
             say(.extracting)
-            let content = try DocumentReader.read(stored)
-            try Task.checkCancellation()
-
-            say(.chunking)
-            let chunks = try chunks(from: content, name: name)
-            guard !chunks.isEmpty else {
-                throw Extraction.Failure.empty(name)
-            }
-            try Task.checkCancellation()
-
-            // Embedded in batches so progress means something and cancelling
-            // costs at most one batch. Writing per batch rather than at the end
-            // also means an interrupted import leaves a shorter notebook rather
-            // than an empty one.
             let store = try VectorStore(path: package.indexURL)
             var written = 0
-            for start in stride(from: 0, to: chunks.count, by: batch) {
+
+            if DocumentReader.isPaged(stored) {
+                // Streamed, so one page of text exists at a time rather than
+                // the whole document plus its pages plus every chunk.
+                //
+                // Read whole, the VCF PDF is 21.7M characters held twice by the
+                // reader and a third time as chunks, which is most of a
+                // gigabyte of strings before anything is embedded and is what
+                // exhausted a machine that was also serving a 30B model.
+                var buffer: [Extraction.Chunk] = []
+                var pagesSeen = 0
+                try DocumentReader.eachPage(of: stored) { number, text in
+                    try Task.checkCancellation()
+                    pagesSeen += 1
+                    let pieces = (try? Extraction.prose(
+                        text, title: "\(name) p\(number)",
+                        locator: "\(name)#page=\(number)",
+                        settings: settings)) ?? []
+                    buffer.append(contentsOf: pieces)
+                    if buffer.count >= batch {
+                        let window = buffer
+                        buffer = []
+                        // Embedding is async and this closure is not, so the
+                        // work is handed to the actor and waited for. Pages are
+                        // read faster than they are embedded, and without this
+                        // the buffer would grow to the whole document again.
+                        written += try Self.flush(window, store: store,
+                                                  embedder: embedder)
+                        say(.embedding(done: written, total: 0))
+                    }
+                }
+                if !buffer.isEmpty {
+                    written += try Self.flush(buffer, store: store,
+                                              embedder: embedder)
+                }
+                guard written > 0 else { throw Extraction.Failure.empty(name) }
+            } else {
+                let content = try DocumentReader.read(stored)
                 try Task.checkCancellation()
-                let window = Array(chunks[start ..< min(start + batch, chunks.count)])
-                say(.embedding(done: written, total: chunks.count))
-                let vectors = try await embedder.embed(window.map(\.text),
-                                                       intent: .document)
-                try await store.add(window.map(Self.stored), vectors: vectors)
-                written += window.count
+                say(.chunking)
+                let chunks = try chunks(from: content, name: name)
+                guard !chunks.isEmpty else { throw Extraction.Failure.empty(name) }
+                for start in stride(from: 0, to: chunks.count, by: batch) {
+                    try Task.checkCancellation()
+                    let window = Array(chunks[start ..< min(start + batch, chunks.count)])
+                    say(.embedding(done: written, total: chunks.count))
+                    let vectors = try await embedder.embed(window.map(\.text),
+                                                           intent: .document)
+                    try await store.add(window.map(Self.stored), vectors: vectors)
+                    written += window.count
+                }
             }
 
             try await store.setMeta("backend", "mlx")
@@ -94,6 +123,30 @@ public actor Ingest {
             say(.failed("\(error)"))
             throw error
         }
+    }
+
+    /// Embed one buffer and write it, synchronously from the page walk.
+    ///
+    /// Blocking here is deliberate: pages are read far faster than they are
+    /// embedded, and letting the walk run ahead would rebuild in the buffer
+    /// exactly the whole-document copy this streaming exists to avoid.
+    private static func flush(_ chunks: [Extraction.Chunk], store: VectorStore,
+                              embedder: Embedder) throws -> Int {
+        let semaphore = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) var outcome: Result<Int, Error>?
+        Task.detached {
+            do {
+                let vectors = try await embedder.embed(chunks.map(\.text),
+                                                       intent: .document)
+                try await store.add(chunks.map(Self.stored), vectors: vectors)
+                outcome = .success(chunks.count)
+            } catch {
+                outcome = .failure(error)
+            }
+            semaphore.signal()
+        }
+        semaphore.wait()
+        return try outcome!.get()
     }
 
     /// The meta rag_ask.py reads to decide how to embed a question.

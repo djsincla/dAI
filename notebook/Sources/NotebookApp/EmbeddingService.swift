@@ -93,6 +93,13 @@ final class EmbeddingService {
         }
 
         loading?.cancel()
+        // The previous model is released before the next is loaded, rather than
+        // after. Holding both briefly is how a machine with enough memory for
+        // one runs out.
+        if let previous = embedder {
+            Task { await previous.unload() }
+            embedder = nil
+        }
         state = .warming(model: model)
         loading = Task { [weak self] in
             let embedder = Embedder(modelId: model)

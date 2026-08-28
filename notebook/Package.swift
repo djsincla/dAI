@@ -13,11 +13,16 @@ let package = Package(
     products: [
         .library(name: "NotebookKit", targets: ["NotebookKit"]),
         .executable(name: "notebook-demo", targets: ["notebook-demo"]),
+        .executable(name: "NotebookApp", targets: ["NotebookApp"]),
     ],
     targets: [
         .target(name: "NotebookKit"),
         // Writes a notebook so the format can be checked against rag_ask.py.
         .executableTarget(name: "notebook-demo", dependencies: ["NotebookKit"]),
+        // The app. Built as an executable and wrapped into a bundle by
+        // packaging/make-app.sh, so it runs from the command line during
+        // development and becomes a document app in Xcode later.
+        .executableTarget(name: "NotebookApp", dependencies: ["NotebookKit"]),
         .testTarget(name: "NotebookKitTests", dependencies: ["NotebookKit"]),
     ]
 )

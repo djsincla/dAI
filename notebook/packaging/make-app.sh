@@ -31,7 +31,13 @@ cp "$BIN" "$APP/Contents/MacOS/NotebookMLX"
 # "Failed to load the default metallib" and this says so now instead.
 CMLX="$ROOT/../agent/.xcbuild/Build/Products/Release/mlx-swift_Cmlx.bundle"
 if [[ -d "$CMLX" ]]; then
+  # Both locations, because the lookup differs by how the binary is launched.
+  # A bare SwiftPM executable finds its package bundles beside itself; inside a
+  # .app, Bundle.module resolves to Contents/Resources. Copying to only one is
+  # how this shipped an app that ran from the command line and crashed on
+  # launch with "Failed to load the default metallib".
   cp -R "$CMLX" "$APP/Contents/MacOS/"
+  cp -R "$CMLX" "$APP/Contents/Resources/"
 else
   echo "warning: no Metal shader bundle found at $CMLX" >&2
   echo "         build the agent first, or embedding will abort at runtime" >&2

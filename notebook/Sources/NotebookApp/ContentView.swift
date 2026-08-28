@@ -244,6 +244,12 @@ struct SourceList: View {
     @Bindable var embedding: EmbeddingService
     @Binding var isTargeted: Bool
 
+    private func drain() {
+        guard let manifest = model.manifest, !model.queued.isEmpty,
+              let embedder = embedding.ready(for: manifest.embeddingModel) else { return }
+        model.startQueued(using: embedder)
+    }
+
     var body: some View {
         List {
             Section("Sources") {
@@ -266,16 +272,22 @@ struct SourceList: View {
         // Dropped onto the whole list rather than only the dashed rectangle: a
         // target you have to hit is a target people miss.
         .dropDestination(for: URL.self) { urls, _ in
-            guard let manifest = model.manifest,
-                  let embedder = embedding.ready(for: manifest.embeddingModel)
-            else {
-                model.problem = embedding.detail
-                    ?? "The embedding model is still loading. Try again in a moment."
+            guard let manifest = model.manifest else { return false }
+            // Accepted while the model is still warming rather than refused.
+            // Making a notebook and immediately dropping a file into it is the
+            // obvious first thing to do, and the model takes a minute to load:
+            // refusing then is refusing exactly when somebody is finding out
+            // whether the app works.
+            if let why = EmbeddingService.support(for: manifest.embeddingModel) {
+                model.problem = why
                 return false
             }
-            model.add(urls, using: embedder)
+            model.enqueue(urls)
             return true
         } isTargeted: { isTargeted = $0 }
+        // Drain the queue once the model is ready, and whenever more arrives.
+        .onChange(of: embedding.state) { _, _ in drain() }
+        .onChange(of: model.queued.count) { _, _ in drain() }
     }
 }
 

@@ -329,6 +329,35 @@ public actor VectorStore {
         return out
     }
 
+    /// Every chunk, without its vector.
+    ///
+    /// For re-embedding: the text is already here beside each vector, so
+    /// changing the model means embedding the same passages again rather than
+    /// re-reading the originals, which keeps the chunking and the citations
+    /// identical and makes the result comparable with what it replaced.
+    public func allChunks() throws -> [Chunk] {
+        var statement: OpaquePointer?
+        defer { sqlite3_finalize(statement) }
+        let sql = """
+        SELECT citation, section, chapter_name, url, part, parts, text
+          FROM chunks ORDER BY id
+        """
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw StoreError.sql(String(cString: sqlite3_errmsg(db)))
+        }
+        var out: [Chunk] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            out.append(Chunk(citation: Self.text(statement, 0),
+                             section: Self.text(statement, 1),
+                             chapterName: Self.text(statement, 2),
+                             url: Self.text(statement, 3),
+                             part: Int(sqlite3_column_int(statement, 4)),
+                             parts: Int(sqlite3_column_int(statement, 5)),
+                             text: Self.text(statement, 6)))
+        }
+        return out
+    }
+
     /// The stored text of one chunk, for showing what a citation named.
     ///
     /// Matched on the locator as well as the citation, because a long document

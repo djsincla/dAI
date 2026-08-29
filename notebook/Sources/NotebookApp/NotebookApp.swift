@@ -25,11 +25,20 @@ struct NotebookMLXApp: App {
     /// It governs allocations made after it, so setting it when the first model
     /// loads leaves the load itself uncapped. Nothing here touches MLX before
     /// this runs.
-    init() { Embedder.configureMemory() }
+    /// What the window is showing, so the toolbar control can reflect it.
+    @State private var appearance = Appearance.current
+
+    init() {
+        Embedder.configureMemory()
+        // Applied before the first window exists, so it opens in the chosen
+        // appearance rather than flashing the system one first.
+        Appearance.current.apply()
+    }
 
     var body: some Scene {
         WindowGroup {
-            ContentView(library: library, model: model, embedding: embedding)
+            ContentView(library: library, model: model, embedding: embedding,
+                        appearance: $appearance)
                 .frame(minWidth: 1000, minHeight: 620)
                 // The app's own accent rather than the system's. Sidebar
                 // selection, switches and buttons all take this, which is most

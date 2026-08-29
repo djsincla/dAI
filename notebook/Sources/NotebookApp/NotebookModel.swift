@@ -80,6 +80,7 @@ final class NotebookModel {
             self.package = package
             self.manifest = try package.manifest()
             self.turns = try package.turns()
+            history.replace(with: self.turns.reversed().map(\.question))
             self.sources = try Self.readSources(package)
             self.chunkCount = (try? Self.countChunks(package)) ?? 0
             self.problem = nil
@@ -251,6 +252,7 @@ final class NotebookModel {
         sources = (try? Self.readSources(package)) ?? []
         chunkCount = (try? Self.countChunks(package)) ?? 0
         turns = (try? package.turns()) ?? []
+        history.replace(with: turns.reversed().map(\.question))
     }
 
     /// Switch a source on or off for future questions.
@@ -280,6 +282,14 @@ final class NotebookModel {
     // ------------------------------------------------------------- asking
 
     private(set) var asking = false
+
+    /// What has been asked here before, newest first.
+    ///
+    /// Rebuilt from the record when a notebook opens rather than kept only for
+    /// the session: the questions worth recalling are usually yesterday's, and
+    /// a history that starts empty every launch is a history nobody learns to
+    /// reach for.
+    var history = QuestionHistory()
     private(set) var lastHits: [Retrieval.Hit] = []
 
     /// The question being worked on, shown in the record before it finishes.
@@ -344,6 +354,7 @@ final class NotebookModel {
              gateway: Gateway?, settings: Retrieval.Settings = .init()) {
         guard let package, !asking else { return }
         asking = true
+        history.remember(question)
         pending = Pending(question: question, stage: "Retrieving…")
         let started = Date()
         asked = Task { [weak self] in

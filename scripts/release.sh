@@ -243,8 +243,31 @@ Approve each machine in the console. Nothing runs on it until you do.
 
 ## Upgrading
 
-Install the newer package over the older one. Both installers are re-runnable
-and the schema is applied every time, so there is no separate migration step.
+Both installers are re-runnable and safe on a machine that is currently working.
+
+**The control plane is two commands, and the second one is not optional.**
+
+    sudo installer -pkg $CONTROL_PKG -target /
+    sudo /usr/local/libexec/dai-control/install.sh
+
+The package puts the new code on disk and does nothing else: it does not apply
+the schema and it does not restart the daemon. Installing it alone leaves the
+old process serving until something restarts it, and if something does, the new
+code meets the old database and refuses every request with a message naming a
+column it expects and cannot find.
+
+\`install.sh\` is what applies the schema and reloads the daemon, which is why
+an upgrade re-runs it. **It needs no arguments on a machine that is already
+installed**: the database URL, the port and the network rules are read back out
+of the installed plist, and the TLS material is left alone because an authority
+already exists here. A flag still wins if one is given, so a value can be
+corrected without reinstalling.
+
+This note used to say that installing the package was enough, because the
+schema was applied every time. That is true of \`install.sh\` and was never
+true of the package: \`server.ts\` calls \`ensureBootstrapAdmin\` on every
+start and deliberately does not call \`migrate\`, so a restart alone will not
+bring a database forward.
 
 Schema changes since ${PREVIOUS:-the beginning}:
 

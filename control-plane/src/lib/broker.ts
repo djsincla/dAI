@@ -71,6 +71,17 @@ export class Broker {
       Number(process.env.DAI_REQUEST_TIMEOUT_MS ?? 600_000),
   ) {}
 
+  /**
+   * Told whenever a node is given work, so somebody else can record it.
+   *
+   * A callback rather than a database handle. This class has never needed one
+   * and giving it one to write a scheduling hint would make every test that
+   * constructs a Broker need a database. The server wires this to a single
+   * fire and forget update; a hint that occasionally misses a write costs one
+   * request's worth of fairness, which is not worth coupling for.
+   */
+  public onDispatch?: (nodeId: string) => void
+
   get inFlightCounts(): Map<string, number> {
     return this.inFlight
   }
@@ -148,6 +159,7 @@ export class Broker {
     clearTimeout(waiter.timer)
     this.waiters.delete(nodeId)
     this.inFlight.set(nodeId, (this.inFlight.get(nodeId) ?? 0) + 1)
+    this.onDispatch?.(nodeId)
 
     return new Promise((resolve) => {
       const timer = setTimeout(() => {

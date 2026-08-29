@@ -29,6 +29,8 @@ export interface Candidate {
   resident_models: Record<string, number>
   capability_profiles: Record<string, number>
   in_flight: number
+  /// When this node was last given work. Null means never.
+  last_dispatch_at?: string | Date | null
 }
 
 export type RefusalReason =
@@ -119,8 +121,38 @@ export function selectNode(
     // Measured throughput for this workload class, never the chip: the same two
     // machines differed 7.5% on a 1.5B model and 26.3% on a 7B, and the newer
     // one is the slower.
-    return rb - ra
+    if (ra !== rb) return rb - ra
+    // **Both of the sorts above tie on a cold fleet, and the tie was decided by
+    // row order.**
+    //
+    // Nothing is in flight anywhere and no machine has a profile for a model
+    // that has never run, so the comparator returned zero and a stable sort left
+    // whichever row the database happened to return first. The same machine was
+    // then chosen every time - and since throughput is only learned by running
+    // work, the machine that was never chosen could never earn the number that
+    // would have got it chosen. A two machine fleet served every request from
+    // one machine, and looked deliberate doing it.
+    //
+    // Least recently given work wins, so the fleet explores. This does not make
+    // it thrash a large model between machines: residency is filtered above, so
+    // once anything is loaded the pool has already narrowed to whoever loaded
+    // it, and this line only decides between equals.
+    return lastDispatch(a) - lastDispatch(b)
   })[0]!
+}
+
+/**
+ * When a node was last given work, as a number that sorts oldest first.
+ *
+ * Never dispatched sorts before everything: a machine that has been given
+ * nothing is the one most worth trying, and it is also the only state from
+ * which a machine can never earn a throughput profile on its own.
+ */
+function lastDispatch(c: Candidate): number {
+  const at = c.last_dispatch_at
+  if (at === null || at === undefined) return 0
+  const ms = at instanceof Date ? at.getTime() : Date.parse(at)
+  return Number.isFinite(ms) ? ms : 0
 }
 
 /**
@@ -241,7 +273,8 @@ export async function candidatesFor(db: Db, inFlight: Map<string, number>,
                                     groupId?: string | null): Promise<Candidate[]> {
   const { rows } = await db.query(
     `SELECT id, hostname, tier, chip, memory_gb,
-            presence_state, resident_models, capability_profiles
+            presence_state, resident_models, capability_profiles,
+            last_dispatch_at
        FROM nodes
       WHERE state = 'active'
         AND NOT user_paused
@@ -268,6 +301,7 @@ export async function candidatesFor(db: Db, inFlight: Map<string, number>,
     .filter((n) => scope === null || scope.has(n.id as string))
     .map((n) => ({
     id: n.id,
+    last_dispatch_at: n.last_dispatch_at,
     hostname: n.hostname,
     tier: n.tier as 'harvest' | 'cluster',
     group_id: (poolsFor(n as never, pools as never)[0]?.id as string | undefined) ?? null,

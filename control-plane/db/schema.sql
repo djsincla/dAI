@@ -419,6 +419,20 @@ CREATE INDEX IF NOT EXISTS pool_models_model_idx ON pool_models(model_id);
 -- weights that were already there.
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS stored_models jsonb NOT NULL DEFAULT '{}'::jsonb;
 
+-- When this node was last given work, for breaking a tie between equals.
+--
+-- The router sorts on how busy a node is, then on measured throughput for the
+-- workload. Both of those are ties on a cold fleet: nothing is in flight
+-- anywhere and no machine has a profile for a model that has never run. A
+-- comparator that returns zero leaves a stable sort holding row order, so the
+-- same machine was chosen every time, and because throughput is only learned by
+-- running work, the machine that was never chosen could never earn a number
+-- that would get it chosen.
+--
+-- Null sorts first: a machine that has never been given anything is the one
+-- most worth trying.
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS last_dispatch_at timestamptz;
+
 -- Imports in flight, and the ones that failed.
 --
 -- Separate from `models` on purpose. A model is registered only once every one

@@ -297,6 +297,32 @@ final class NotebookModel {
     }
     private(set) var pending: Pending?
 
+    /// The question in flight, so it can be stopped.
+    ///
+    /// Held rather than fired and forgotten. A question takes seconds to answer
+    /// and there was no way to take one back, so a typo noticed a moment too
+    /// late meant waiting out an answer to the wrong question before the right
+    /// one could be asked.
+    private var asked: Task<Void, Never>?
+
+    /// Stop the question in flight and hand it back.
+    ///
+    /// Returns the question so the caller can put it back in the field, which
+    /// is the point: somebody stopping a question because they misspelled a
+    /// word wants to fix the word, not retype the sentence.
+    @discardableResult
+    func cancelAsk() -> String? {
+        guard asking else { return nil }
+        let question = pending?.question
+        asked?.cancel()
+        asked = nil
+        pending = nil
+        asking = false
+        // No problem is set. Stopping something on purpose is not a fault, and
+        // reporting it as one is how an app argues with its user.
+        return question
+    }
+
     var canAsk: Bool { isOpen && chunkCount > 0 && !asking && working == nil }
 
     var whyNotAsking: String {
@@ -320,11 +346,12 @@ final class NotebookModel {
         asking = true
         pending = Pending(question: question, stage: "Retrieving…")
         let started = Date()
-        Task { [weak self] in
+        asked = Task { [weak self] in
             do {
                 let hits = try await Retrieval.search(
                     question: question, in: package, using: embedder,
                     settings: settings)
+                try Task.checkCancellation()
                 await MainActor.run {
                     self?.lastHits = hits
                     // The citations are real and already known, so they are
@@ -388,17 +415,26 @@ final class NotebookModel {
                     sources: await MainActor.run { self?.activeSources } ?? [],
                     finishReason: finish, maxTokensApplied: applied,
                     cappedByPolicy: capped)
+                // Checked once more before the record is written. A question
+                // stopped while the answer was already on its way back should
+                // leave no turn behind: a record that contains an exchange the
+                // asker cancelled is a record of something that did not happen.
+                try Task.checkCancellation()
                 try package.append(turn)
                 await MainActor.run {
                     self?.turns.append(turn)
                     self?.pending = nil
                     self?.asking = false
+                    self?.asked = nil
                 }
+            } catch is CancellationError {
+                // Already cleared by cancelAsk, and deliberately silent.
             } catch {
                 await MainActor.run {
                     self?.problem = "\(error)"
                     self?.pending = nil
                     self?.asking = false
+                    self?.asked = nil
                 }
             }
         }

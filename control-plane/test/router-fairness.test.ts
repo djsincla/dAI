@@ -114,3 +114,82 @@ describe('what the tie break must not override', () => {
     expect(chosen(selectNode(pool, 'generate', 'm'))).toBe('rotorua')
   })
 })
+
+/**
+ * Preferring the machine nobody is sitting at.
+ *
+ * Cluster nodes skip the presence gate, which is what lets an interactive
+ * conversation run at all. That exemption also made presence irrelevant to the
+ * choice, so a machine somebody was typing on was as likely to be picked as an
+ * idle one beside it - and the three "somebody is here" states cap completions
+ * at 256 tokens against 2,048 locked and 4,096 logged out. The cost of choosing
+ * wrong is not politeness, it is an answer that stops mid sentence.
+ */
+describe('preferring a machine nobody is using', () => {
+  it('sends work to the idle machine rather than the one in use', () => {
+    const pool = [
+      node('rotorua', { presence_state: 'ACTIVE' }),
+      node('orca', { presence_state: 'ABSENT' }),
+    ]
+    expect(chosen(selectNode(pool, 'generate', 'm'))).toBe('orca')
+  })
+
+  it('ranks the five states by what they actually allow', () => {
+    const order = ['ACTIVE', 'PASSIVE', 'IDLE', 'LOCKED', 'ABSENT'] as const
+    for (let i = 0; i < order.length - 1; i++) {
+      const pool = [
+        node('busier', { presence_state: order[i] }),
+        node('freer', { presence_state: order[i + 1] }),
+      ]
+      expect(chosen(selectNode(pool, 'generate', 'm'))).toBe('freer')
+    }
+  })
+
+  /**
+   * The trade this makes explicit: 256 tokens against 4,096 is a sixteen fold
+   * difference in what can be said, and no measured throughput gap here has
+   * ever been close to that.
+   */
+  it('takes the free machine even when the busy one is measurably faster', () => {
+    const pool = [
+      node('rotorua', { presence_state: 'ACTIVE',
+                        capability_profiles: { m: 200 } }),
+      node('orca', { presence_state: 'ABSENT',
+                     capability_profiles: { m: 50 } }),
+    ]
+    expect(chosen(selectNode(pool, 'generate', 'm'))).toBe('orca')
+  })
+
+  /** Queueing behind a busy machine helps nobody, however free it is. */
+  it('does not queue behind a free machine that is already working', () => {
+    const pool = [
+      node('rotorua', { presence_state: 'ACTIVE', in_flight: 0 }),
+      node('orca', { presence_state: 'ABSENT', in_flight: 3 }),
+    ]
+    expect(chosen(selectNode(pool, 'generate', 'm'))).toBe('rotorua')
+  })
+
+  /** Not knowing whether somebody is there is not a reason to assume nobody is. */
+  it('treats an unreported presence as cautiously as ACTIVE', () => {
+    const pool = [
+      node('unknown', { presence_state: null }),
+      node('idle', { presence_state: 'IDLE' }),
+    ]
+    expect(chosen(selectNode(pool, 'generate', 'm'))).toBe('idle')
+  })
+
+  /** With presence equal, the earlier rules still decide. */
+  it('falls through to fairness when both machines are equally free', () => {
+    const pool = [
+      node('rotorua', { presence_state: 'ABSENT', last_dispatch_at: AGO(1) }),
+      node('orca', { presence_state: 'ABSENT', last_dispatch_at: AGO(30) }),
+    ]
+    expect(chosen(selectNode(pool, 'generate', 'm'))).toBe('orca')
+  })
+
+  /** A machine in use is still better than no machine. */
+  it('uses the machine somebody is on when it is the only one', () => {
+    const pool = [node('rotorua', { presence_state: 'ACTIVE' })]
+    expect(chosen(selectNode(pool, 'generate', 'm'))).toBe('rotorua')
+  })
+})

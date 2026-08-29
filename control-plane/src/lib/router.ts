@@ -115,6 +115,22 @@ export function selectNode(
 
   return [...pool].sort((a, b) => {
     if (a.in_flight !== b.in_flight) return a.in_flight - b.in_flight
+    // **The machine nobody is using goes first.**
+    //
+    // Cluster nodes are exempt from the presence *gate* above, which is what
+    // lets an interactive conversation run at all. That exemption was quietly
+    // doing something else as well: it made presence irrelevant to the choice,
+    // so a machine somebody was typing on was as likely to be picked as an idle
+    // one beside it. The cost is not politeness, it is the answer. ACTIVE,
+    // PASSIVE and IDLE cap completions at 256 tokens; LOCKED allows 2,048 and
+    // ABSENT 4,096. Choosing the busy machine truncates answers that the idle
+    // one would have finished.
+    //
+    // Above throughput deliberately. A faster machine that stops mid sentence
+    // is worse than a slower one that does not, and no measured difference here
+    // has ever been the sixteen fold difference between 256 and 4,096.
+    const fa = freedom(a), fb = freedom(b)
+    if (fa !== fb) return fb - fa
     const key = modelHash ?? kind
     const ra = a.capability_profiles?.[key] ?? 0
     const rb = b.capability_profiles?.[key] ?? 0
@@ -139,6 +155,25 @@ export function selectNode(
     // it, and this line only decides between equals.
     return lastDispatch(a) - lastDispatch(b)
   })[0]!
+}
+
+/**
+ * How free a machine is of the person who owns it, highest first.
+ *
+ * Ordered by what the presence policy actually allows rather than by a feeling
+ * about the words: the three states that cap completions at 256 tokens rank
+ * below the two that do not, and within the capped three the machine somebody
+ * is touching right now ranks last.
+ *
+ * A node that has not reported presence ranks with ACTIVE. Not knowing whether
+ * somebody is at a machine is not a reason to assume nobody is.
+ */
+const FREEDOM: Record<PresenceState, number> = {
+  ACTIVE: 0, PASSIVE: 1, IDLE: 2, LOCKED: 3, ABSENT: 4,
+}
+
+function freedom(c: Candidate): number {
+  return c.presence_state ? FREEDOM[c.presence_state] : 0
 }
 
 /**

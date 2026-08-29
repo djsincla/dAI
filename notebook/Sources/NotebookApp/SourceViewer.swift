@@ -51,7 +51,7 @@ struct SourceViewer: View {
             // Opened at the cited page rather than at page one. Landing on the
             // first page of an 8,894 page document is the same as not opening
             // it.
-            PDFPage(url: url, page: page ?? 1)
+            PDFPageView(url: url, page: page ?? 1)
         } else if let text = storedText {
             ScrollView {
                 Text(text)
@@ -72,17 +72,8 @@ struct SourceViewer: View {
         }
     }
 
-    /// `originals/file.pdf#page=2517` split back into its parts.
-    private var fileName: String {
-        String(citation.url.split(separator: "#").first ?? "")
-            .split(separator: "/").last.map(String.init) ?? citation.url
-    }
-
-    private var page: Int? {
-        guard let fragment = citation.url.split(separator: "#").last,
-              fragment.hasPrefix("page=") else { return nil }
-        return Int(fragment.dropFirst("page=".count))
-    }
+    private var fileName: String { Locator.fileName(of: citation.url) }
+    private var page: Int? { Locator.page(of: citation.url) }
 
     private var originalURL: URL? {
         let url = package.originalsURL.appendingPathComponent(fileName)
@@ -113,26 +104,52 @@ struct SourceViewer: View {
 }
 
 /// A PDF, opened at a page.
-struct PDFPage: NSViewRepresentable {
+///
+/// **Named PDFPageView rather than PDFPage.** PDFKit has a `PDFPage`, and a
+/// view shadowing the type its own code asks the document for is a trap set for
+/// whoever edits this next.
+struct PDFPageView: NSViewRepresentable {
     let url: URL
     let page: Int
+
+    /// Remembers where it has already gone.
+    ///
+    /// `updateNSView` runs on every unrelated SwiftUI change, and navigating
+    /// each time would drag the reader back to the cited page every time
+    /// anything in the window moved. Scrolling away is a thing somebody is
+    /// allowed to do.
+    final class Coordinator {
+        var wentTo: Int?
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> PDFView {
         let view = PDFView()
         view.autoScales = true
         view.displayMode = .singlePageContinuous
         view.document = PDFDocument(url: url)
-        go(view)
+        go(view, context.coordinator)
         return view
     }
 
-    func updateNSView(_ view: PDFView, context: Context) { go(view) }
+    func updateNSView(_ view: PDFView, context: Context) {
+        go(view, context.coordinator)
+    }
 
-    private func go(_ view: PDFView) {
+    private func go(_ view: PDFView, _ coordinator: Coordinator) {
+        guard coordinator.wentTo != page else { return }
         // 1 based on screen, 0 based in PDFKit.
         guard let document = view.document,
               page >= 1, page <= document.pageCount,
               let target = document.page(at: page - 1) else { return }
-        view.go(to: target)
+        coordinator.wentTo = page
+        // **After the next runloop turn, not now.** A PDFView that has not
+        // laid out yet accepts `go(to:)` and then shows page one anyway, which
+        // is indistinguishable from the page never having been found.
+        DispatchQueue.main.async {
+            view.go(to: PDFDestination(page: target, at: .init(
+                x: 0, y: target.bounds(for: .mediaBox).maxY)))
+        }
     }
 }

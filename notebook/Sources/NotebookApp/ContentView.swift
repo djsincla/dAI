@@ -906,9 +906,7 @@ struct CitationStrip: View {
     }
 
     private func page(of c: NotebookPackage.Turn.Citation) -> Int? {
-        guard let fragment = c.url.split(separator: "#").last,
-              fragment.hasPrefix("page=") else { return nil }
-        return Int(fragment.dropFirst("page=".count))
+        Locator.page(of: c.url)
     }
 }
 

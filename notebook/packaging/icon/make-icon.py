@@ -1,0 +1,53 @@
+"""notebookMLX's icon.
+
+A page, and one line on it picked out. That is the whole of what this app does
+that a document reader does not: it finds the passage. So the mark is a sheet of
+prose with a single band lit up in the app's teal and a score dot at its head.
+
+Drawn to survive 16 points, which is the size that decides whether an icon
+works. At that size the prose lines merge into texture and what remains is a
+white sheet with one teal bar across it, which is still the idea.
+"""
+TEAL      = "13,110,104"
+TEAL_DEEP = "6,58,55"
+TEAL_LIT  = "45,212,191"
+INK       = "15,59,56"
+
+svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="ground" x1="0.15" y1="0" x2="0.85" y2="1">
+      <stop offset="0" stop-color="rgb({TEAL})"/>
+      <stop offset="1" stop-color="rgb({TEAL_DEEP})"/>
+    </linearGradient>
+    <filter id="lift" x="-25%" y="-25%" width="150%" height="150%">
+      <feDropShadow dx="0" dy="10" stdDeviation="18"
+                    flood-color="rgb({TEAL_DEEP})" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+
+  <rect x="82" y="82" width="860" height="860" rx="196" fill="url(#ground)"/>
+
+  <g filter="url(#lift)">
+    <!-- Two sheets behind, just enough to say corpus rather than document. -->
+    <rect x="368" y="228" width="418" height="560" rx="24" fill="#ffffff" opacity="0.28"/>
+    <rect x="344" y="242" width="418" height="560" rx="24" fill="#ffffff" opacity="0.55"/>
+    <rect x="292" y="252" width="440" height="560" rx="26" fill="#ffffff"/>
+  </g>
+
+  <!-- Prose, quiet: at small sizes this is texture, not content. -->
+  <g fill="rgb({INK})" opacity="0.16">
+    <rect x="344" y="318" width="336" height="20" rx="10"/>
+    <rect x="344" y="368" width="284" height="20" rx="10"/>
+    <rect x="344" y="418" width="320" height="20" rx="10"/>
+    <rect x="344" y="640" width="336" height="20" rx="10"/>
+    <rect x="344" y="690" width="248" height="20" rx="10"/>
+  </g>
+
+  <!-- The retrieved passage. The one thing that has to survive 16 points. -->
+  <rect x="292" y="486" width="440" height="116" fill="rgb({TEAL})" opacity="0.26"/>
+  <rect x="292" y="486" width="440" height="8" fill="rgb({TEAL})" opacity="0.95"/>
+  <rect x="292" y="594" width="440" height="8" fill="rgb({TEAL})" opacity="0.95"/>
+  <circle cx="362" cy="544" r="26" fill="rgb({TEAL_LIT})"/>
+  <rect x="404" y="532" width="286" height="24" rx="12" fill="rgb({TEAL})" opacity="0.62"/>
+</svg>'''
+open("icon.svg", "w").write(svg)

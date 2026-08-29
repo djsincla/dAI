@@ -295,8 +295,7 @@ public actor VectorStore {
         var scored: [(Chunk, Float)] = []
         while sqlite3_step(statement) == SQLITE_ROW {
             if !excluding.isEmpty {
-                let locator = Self.text(statement, 3)
-                let file = String(locator.split(separator: "#").first ?? "")
+                let file = Locator.fileName(of: Self.text(statement, 3))
                 if excluding.contains(file) { continue }
             }
             guard let raw = sqlite3_column_blob(statement, 7) else { continue }

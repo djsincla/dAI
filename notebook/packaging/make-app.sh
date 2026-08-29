@@ -43,6 +43,16 @@ else
   echo "         build the agent first, or embedding will abort at runtime" >&2
 fi
 
+# The icon, if it has been built. Checked in rather than generated here so a
+# build needs no SVG renderer; packaging/icon/make-icon.py regenerates the SVG
+# and the README beside it says how to turn that back into an icns.
+ICON="$ROOT/packaging/icon/AppIcon.icns"
+if [ -f "$ICON" ]; then
+  cp "$ICON" "$APP/Contents/Resources/AppIcon.icns"
+else
+  echo "warning: no icon at $ICON, the app will use the generic one" >&2
+fi
+
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -52,6 +62,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleDisplayName</key><string>notebookMLX</string>
   <key>CFBundleIdentifier</key><string>com.dai.notebookmlx</string>
   <key>CFBundleExecutable</key><string>NotebookMLX</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.1</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>

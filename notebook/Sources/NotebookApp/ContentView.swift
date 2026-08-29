@@ -148,11 +148,19 @@ struct NotebookList: View {
                     NotebookRow(entry: entry)
                         .tag(entry.url)
                         // Double click opens it in its own window, as a note
-                        // does in Notes. Single click selects, so browsing is
-                        // unchanged and the gesture only adds a way out.
-                        .onTapGesture(count: 2) {
+                        // does in Notes.
+                        //
+                        // **`simultaneousGesture`, not `onTapGesture`.** A tap
+                        // gesture attached to a row competes with the gesture
+                        // List uses for selection and wins, so adding the way
+                        // out took away the way in: clicking a notebook stopped
+                        // switching to it, and the double click was the only
+                        // thing that still worked. Simultaneous recognition
+                        // lets both run, so a click selects and a double click
+                        // selects and then opens.
+                        .simultaneousGesture(TapGesture(count: 2).onEnded {
                             openWindow(id: "notebook", value: entry.url)
-                        }
+                        })
                         .contextMenu {
                             Button("Open in New Window") {
                                 openWindow(id: "notebook", value: entry.url)
@@ -387,13 +395,13 @@ struct DropZone: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 18)
-        .background(.quaternary.opacity(isTargeted ? 0.5 : 0.18),
+        .background(isTargeted ? AnyShapeStyle(Palette.accentSoft)
+                               : AnyShapeStyle(Palette.field),
                     in: RoundedRectangle(cornerRadius: 10))
         .overlay {
             RoundedRectangle(cornerRadius: 10)
                 .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
-                .foregroundStyle(isTargeted ? AnyShapeStyle(.tint)
-                                            : AnyShapeStyle(.quaternary))
+                .foregroundStyle(isTargeted ? Palette.accent : Palette.fieldEdge)
         }
         .padding(10)
         .animation(.easeOut(duration: 0.12), value: isTargeted)
@@ -529,10 +537,10 @@ struct PendingTurnView: View {
             }
         }
         .padding(18)
-        .background(.quaternary.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+        .background(Palette.card, in: RoundedRectangle(cornerRadius: 12))
         .overlay {
             RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(.tint.opacity(0.35))
+                .strokeBorder(Palette.accentEdge)
         }
         .transition(.opacity)
     }
@@ -566,9 +574,13 @@ struct TurnView: View {
             Provenance(turn: turn)
         }
         .padding(18)
-        .background(picked ? AnyShapeStyle(.tint.opacity(0.12))
-                           : AnyShapeStyle(.quaternary.opacity(0.12)),
+        .background(picked ? AnyShapeStyle(Palette.accentSoft)
+                           : AnyShapeStyle(Palette.card),
                     in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(picked ? Palette.accentEdge : Palette.cardEdge)
+        }
         .overlay {
             if picked {
                 RoundedRectangle(cornerRadius: 12).strokeBorder(.tint)
@@ -599,9 +611,17 @@ struct CitationStrip: View {
                         // thing was retrieved is the first question about any
                         // answer, and it is answerable at a glance only if the
                         // numbers are here.
+                        // Coloured and tabular rather than grey.
+                        //
+                        // Whether the right passage was retrieved is the first
+                        // question about any answer, and these numbers are the
+                        // only thing that answers it. They were styled as the
+                        // faintest text on screen. Tabular figures so a column
+                        // of them can be compared by eye without reading.
                         Text(String(format: "%.3f", c.score))
                             .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                            .foregroundStyle(Palette.accent)
                             .frame(width: 46, alignment: .trailing)
                         Text(c.citation).font(.callout).lineLimit(1)
                         if page(of: c) != nil {
@@ -621,7 +641,7 @@ struct CitationStrip: View {
             }
         }
         .padding(10)
-        .background(.quaternary.opacity(0.14), in: RoundedRectangle(cornerRadius: 8))
+        .background(Palette.evidence, in: RoundedRectangle(cornerRadius: 8))
         .sheet(item: $opened) { citation in
             if let package {
                 SourceViewer(citation: citation, package: package)
@@ -658,7 +678,8 @@ struct Truncation: View {
         }
         .font(.callout)
         .padding(10)
-        .background(.orange.opacity(0.14), in: RoundedRectangle(cornerRadius: 8))
+        .foregroundStyle(Palette.warning)
+        .background(Palette.warningSoft, in: RoundedRectangle(cornerRadius: 8))
     }
 
     private var explanation: String {
@@ -692,7 +713,8 @@ struct Provenance: View {
             Spacer(minLength: 0)
         }
         .font(.caption)
-        .foregroundStyle(.tertiary)
+        .monospacedDigit()
+        .foregroundStyle(.secondary)
     }
 
     private var facts: [String] {
@@ -767,8 +789,7 @@ struct AskBar: View {
                 .help(canAsk ? "Ask" : model.whyNotAsking)
             }
             .padding(12)
-            .background(.quaternary.opacity(0.18),
-                        in: RoundedRectangle(cornerRadius: 10))
+            .background(Palette.field, in: RoundedRectangle(cornerRadius: 10))
             .overlay {
                 RoundedRectangle(cornerRadius: 10)
                     .strokeBorder(.quaternary)

@@ -688,6 +688,8 @@ struct TurnView: View {
     /// Whether there is room beside the prose for the evidence.
     var wide: Bool = false
     var compare: (() -> Void)?
+    /// A citation the answer named, opened from inside the sentence.
+    @State private var opened: NotebookPackage.Turn.Citation?
 
     /// The citations go beside the answer only when they both fit and there
     /// are enough of them to be worth a column. One citation in a margin is a
@@ -718,6 +720,11 @@ struct TurnView: View {
         }
         .shadow(color: Palette.cardShadow, radius: 3, x: 0, y: 1)
         .shadow(color: Palette.cardShadowWide, radius: 12, x: 0, y: 4)
+        .sheet(item: $opened) { citation in
+            if let package {
+                SourceViewer(citation: citation, package: package)
+            }
+        }
         .contextMenu {
             if let compare {
                 Button(picked ? "Remove from Comparison" : "Compare With…",
@@ -754,13 +761,14 @@ extension TurnView {
                     .padding(.top, turn.citations.isEmpty || gutter ? 14 : 16)
             }
 
-            Text(turn.answer)
-                .font(Type.answer)
-                .lineSpacing(5)
-                .foregroundStyle(Palette.ink)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.top, turn.wasTruncated ? 16 : 18)
+            AnswerView(answer: turn.answer, citations: turn.citations) { citation in
+                // Only opened when the package is here to open it from. A
+                // record read without its notebook still shows the links; they
+                // simply have nowhere to go, which is better than hiding that
+                // the answer cited anything.
+                if package != nil { opened = citation }
+            }
+            .padding(.top, turn.wasTruncated ? 16 : 18)
 
             Rule()
                 .padding(.top, 16)
@@ -784,6 +792,7 @@ struct CitationStrip: View {
     let package: NotebookPackage?
     var layout: Layout = .band
     @State private var opened: NotebookPackage.Turn.Citation?
+    @State private var hovered: String?
 
     enum Layout { case band, gutter }
 
@@ -803,6 +812,14 @@ struct CitationStrip: View {
                 Button { opened = c } label: { row(c) }
                     .buttonStyle(.plain)
                     .disabled(package == nil)
+                    // These have always opened their page and never looked like
+                    // they would. A hover ground is the whole of the
+                    // affordance, and it costs nothing when nobody is reaching
+                    // for it. `onHover` rather than `pointerStyle`, which needs
+                    // macOS 15 and this targets 14.
+                    .background(hovered == c.id ? Palette.accentSoft : .clear,
+                                in: RoundedRectangle(cornerRadius: 4))
+                    .onHover { hovered = $0 ? c.id : nil }
                     .help("Open the passage this came from")
                     .accessibilityLabel("\(c.citation), score "
                                         + "\(String(format: "%.3f", c.score))")

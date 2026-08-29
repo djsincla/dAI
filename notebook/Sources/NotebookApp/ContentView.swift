@@ -142,23 +142,42 @@ struct NotebookList: View {
     @Binding var confirmingDelete: NotebookLibrary.Entry?
 
     var body: some View {
-        List(selection: $selection) {
+        // **No `selection:` binding, deliberately.**
+        //
+        // `List(selection:)` under `.sidebar` is backed by NSTableRowView, whose
+        // highlight is drawn from the system accent colour, and the SwiftUI tint
+        // does not reach it: a teal app had a blue sidebar and no amount of
+        // `.tint` fixed it. The supported override is an AccentColor asset named
+        // in the main bundle's Info.plist, which a SwiftPM executable does not
+        // have.
+        //
+        // The binding was also already doing nothing else. The rows set the
+        // selection themselves, because the List's own gesture never reliably
+        // fired through the tap recognisers attached for opening a window. So
+        // it was drawing a colour we did not want and providing nothing we
+        // still used.
+        List {
             Section("Notebooks") {
                 ForEach(library.notebooks) { entry in
-                    NotebookRow(entry: entry)
-                        .tag(entry.url)
+                    NotebookRow(entry: entry, selected: selection == entry.url)
+                        .listRowBackground(Color.clear)
+                        .contentShape(Rectangle())
                         // Double click opens it in its own window, as a note
                         // does in Notes.
                         //
-                        // **`simultaneousGesture`, not `onTapGesture`.** A tap
-                        // gesture attached to a row competes with the gesture
-                        // List uses for selection and wins, so adding the way
-                        // out took away the way in: clicking a notebook stopped
-                        // switching to it, and the double click was the only
-                        // thing that still worked. Simultaneous recognition
-                        // lets both run, so a click selects and a double click
-                        // selects and then opens.
+                        // **Selection is set here, not left to the List.**
+                        //
+                        // Any tap gesture on a row competes with the gesture
+                        // List uses for selection, and simultaneousGesture was
+                        // not enough: clicking a notebook still did nothing and
+                        // double click was the only thing that worked. Rather
+                        // than keep guessing which recogniser wins, the single
+                        // click sets the selection itself. The List's own
+                        // handling is then a bonus rather than a dependency,
+                        // and keyboard navigation still drives the same binding.
+                        .onTapGesture { selection = entry.url }
                         .simultaneousGesture(TapGesture(count: 2).onEnded {
+                            selection = entry.url
                             openWindow(id: "notebook", value: entry.url)
                         })
                         .contextMenu {
@@ -182,6 +201,14 @@ struct NotebookList: View {
             }
         }
         .listStyle(.sidebar)
+        // Arrow keys, which the selection binding used to provide.
+        //
+        // Owning the highlight means owning this too. Left out, dropping the
+        // binding would have traded a colour for a way of moving around, which
+        // is not a trade worth making.
+        .focusable()
+        .onKeyPress(.upArrow) { move(-1); return .handled }
+        .onKeyPress(.downArrow) { move(1); return .handled }
         .safeAreaInset(edge: .bottom) {
             HStack {
                 Button {
@@ -205,17 +232,50 @@ struct NotebookList: View {
     }
 }
 
+extension NotebookList {
+    /// Move the selection by one, staying inside the list.
+    ///
+    /// Clamped rather than wrapping: a list that jumps from the last notebook
+    /// to the first looks like it lost the selection.
+    func move(_ by: Int) {
+        let all = library.notebooks
+        guard !all.isEmpty else { return }
+        guard let at = all.firstIndex(where: { $0.url == selection }) else {
+            selection = all.first?.url
+            return
+        }
+        let next = min(max(at + by, 0), all.count - 1)
+        selection = all[next].url
+    }
+}
+
 struct NotebookRow: View {
     let entry: NotebookLibrary.Entry
+    var selected: Bool = false
+    /// Whether this window is the one being used. A selected row in a window
+    /// behind another should recede, which is the behaviour the system
+    /// highlight gave for free and which drawing our own means doing here.
+    @Environment(\.controlActiveState) private var activeState
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(entry.name).lineLimit(1)
-            Text(detail).font(.caption).foregroundStyle(.secondary)
+            Text(entry.name).font(Type.rowTitle).lineLimit(1)
+                .foregroundStyle(selected ? Palette.accent : Palette.ink)
+            Text(detail).font(Type.rowDetail)
+                .foregroundStyle(Palette.inkSecondary)
         }
-        .padding(.vertical, 3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(background, in: RoundedRectangle(cornerRadius: 6))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(entry.name), \(detail)")
+        .accessibilityAddTraits(selected ? [.isSelected] : [])
+    }
+
+    private var background: Color {
+        guard selected else { return .clear }
+        return activeState == .key ? Palette.selection : Palette.selectionIdle
     }
 
     private var detail: String {
@@ -311,13 +371,13 @@ struct SourceRow: View {
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: source.kind.symbol)
-                .foregroundStyle(source.enabled ? .secondary : .tertiary)
+                .foregroundStyle(source.enabled ? Palette.inkSecondary : Palette.inkTertiary)
                 .frame(width: 18)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(source.name).lineLimit(1)
-                    .foregroundStyle(source.enabled ? .primary : .secondary)
-                Text(detail).font(.caption).foregroundStyle(.secondary)
+                    .foregroundStyle(source.enabled ? Palette.ink : Palette.inkSecondary)
+                Text(detail).font(Type.rowDetail).foregroundStyle(Palette.inkSecondary)
             }
             Spacer(minLength: 0)
             // A switch rather than a checkbox: this is a state the source is
@@ -353,9 +413,9 @@ struct SourceRow: View {
 struct DropHint: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("No sources yet").foregroundStyle(.secondary)
+            Text("No sources yet").foregroundStyle(Palette.inkSecondary)
             Text("Drop text, PDF, CSV or Excel below.")
-                .font(.caption).foregroundStyle(.tertiary)
+                .font(.caption).foregroundStyle(Palette.inkTertiary)
         }
         .padding(.vertical, 6)
     }
@@ -388,10 +448,10 @@ struct DropZone: View {
     private var target: some View {
         VStack(spacing: 6) {
             Image(systemName: "square.and.arrow.down")
-                .font(.title2).foregroundStyle(.secondary)
+                .font(.title2).foregroundStyle(Palette.inkSecondary)
             Text("Drop documents").font(.callout)
             Text("text · pdf · csv · xlsx")
-                .font(.caption2).foregroundStyle(.tertiary)
+                .font(.caption2).foregroundStyle(Palette.inkTertiary)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 18)
@@ -422,7 +482,7 @@ struct RecordView: View {
     var body: some View {
         ScrollViewReader { scroll in
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 28) {
+            LazyVStack(alignment: .leading, spacing: 40) {
                 if model.turns.isEmpty && model.pending == nil {
                     EmptyRecord(isOpen: model.isOpen)
                         .padding(.top, 60)
@@ -441,10 +501,19 @@ struct RecordView: View {
                 }
             }
             .padding(.horizontal, 28)
-            .padding(.vertical, 24)
+            .padding(.top, 28)
+            .padding(.bottom, 28)
             .frame(maxWidth: 760, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .center)
+            // Left aligned with a lead, not centred.
+            //
+            // Centring a 760pt column in a 2,000pt window leaves 600pt of dead
+            // ground on each side, symmetrical enough to look deliberate, which
+            // is why it read as the app having nothing to put there. Empty
+            // space to the right of a left aligned document reads as margin.
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, 56)
         }
+        .background(Palette.page)
         // The question is put on screen the moment it is asked, and scrolled
         // to, so submitting does something visible rather than nothing until
         // the answer lands.
@@ -496,13 +565,13 @@ struct EmptyRecord: View {
     var body: some View {
         VStack(spacing: 10) {
             Image(systemName: isOpen ? "text.bubble" : "book.closed")
-                .font(.system(size: 34)).foregroundStyle(.tertiary)
+                .font(.system(size: 34)).foregroundStyle(Palette.inkTertiary)
             Text(isOpen ? "Nothing asked yet" : "No notebook open")
                 .font(.title3)
             Text(isOpen
                  ? "Questions and answers are recorded here, with what was retrieved and the settings in force."
                  : "Open a .dainotebook to see its sources and record.")
-                .font(.callout).foregroundStyle(.secondary)
+                .font(.callout).foregroundStyle(Palette.inkSecondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 420)
         }
@@ -523,7 +592,9 @@ struct PendingTurnView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(pending.question)
-                .font(.title3.weight(.semibold))
+                .font(Type.question)
+                .tracking(-0.2)
+                .foregroundStyle(Palette.ink)
                 .textSelection(.enabled)
 
             if !pending.citations.isEmpty {
@@ -532,16 +603,20 @@ struct PendingTurnView: View {
 
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
-                Text(pending.stage).font(.callout).foregroundStyle(.secondary)
+                Text(pending.stage).font(.callout).foregroundStyle(Palette.inkSecondary)
                 Spacer(minLength: 0)
             }
         }
-        .padding(18)
-        .background(Palette.card, in: RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal, 22)
+        .padding(.top, 18)
+        .padding(.bottom, 14)
+        .background(Palette.card, in: RoundedRectangle(cornerRadius: 10))
         .overlay {
-            RoundedRectangle(cornerRadius: 12)
+            RoundedRectangle(cornerRadius: 10)
                 .strokeBorder(Palette.accentEdge)
         }
+        .shadow(color: Palette.cardShadow, radius: 3, x: 0, y: 1)
+        .shadow(color: Palette.cardShadowWide, radius: 12, x: 0, y: 4)
         .transition(.opacity)
     }
 }
@@ -555,32 +630,56 @@ struct TurnView: View {
     var compare: (() -> Void)?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 0) {
             Text(turn.question)
-                .font(.title3.weight(.semibold))
+                .font(Type.question)
+                .tracking(-0.2)
+                .foregroundStyle(Palette.ink)
                 .textSelection(.enabled)
 
             if !turn.citations.isEmpty {
                 CitationStrip(citations: turn.citations, package: package)
+                    .padding(.top, 14)
+            }
+
+            // **Above the answer, not below it.**
+            //
+            // This was under the prose, which is the one place it cannot do its
+            // job: by the time somebody reads "that was cut off" they have
+            // already read the cut off thing as though it were whole. Its
+            // entire purpose is to change how the next paragraph is read.
+            if turn.wasTruncated {
+                Truncation(turn: turn)
+                    .padding(.top, turn.citations.isEmpty ? 14 : 16)
             }
 
             Text(turn.answer)
-                .font(.body)
+                .font(Type.answer)
+                .lineSpacing(5)
+                .foregroundStyle(Palette.ink)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, turn.wasTruncated ? 16 : 18)
 
-            if turn.wasTruncated { Truncation(turn: turn) }
-
+            Rule()
+                .padding(.top, 16)
             Provenance(turn: turn)
+                .padding(.top, 10)
         }
-        .padding(18)
-        .background(picked ? AnyShapeStyle(Palette.accentSoft)
-                           : AnyShapeStyle(Palette.card),
-                    in: RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal, 22)
+        .padding(.top, 18)
+        .padding(.bottom, 14)
+        .background(Palette.card, in: RoundedRectangle(cornerRadius: 10))
         .overlay {
-            RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(picked ? Palette.accentEdge : Palette.cardEdge)
+            // One stroke, not a fill and two strokes. A 12% teal fill on a
+            // teal grey page was invisible anyway, so the border carries the
+            // whole of the chosen state and carries it clearly.
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(picked ? Palette.accent : Palette.cardEdge,
+                              lineWidth: picked ? 2 : 1)
         }
+        .shadow(color: Palette.cardShadow, radius: 3, x: 0, y: 1)
+        .shadow(color: Palette.cardShadowWide, radius: 12, x: 0, y: 4)
         .overlay {
             if picked {
                 RoundedRectangle(cornerRadius: 12).strokeBorder(.tint)
@@ -619,14 +718,18 @@ struct CitationStrip: View {
                         // faintest text on screen. Tabular figures so a column
                         // of them can be compared by eye without reading.
                         Text(String(format: "%.3f", c.score))
-                            .font(.system(.caption, design: .monospaced))
+                            .font(Type.score)
                             .monospacedDigit()
                             .foregroundStyle(Palette.accent)
                             .frame(width: 46, alignment: .trailing)
-                        Text(c.citation).font(.callout).lineLimit(1)
+                        Text(c.citation)
+                            .font(Type.citation)
+                            .foregroundStyle(Palette.inkSecondary)
+                            .lineLimit(1)
                         if page(of: c) != nil {
                             Image(systemName: "arrow.up.forward.square")
-                                .font(.caption2).foregroundStyle(.tertiary)
+                                .font(.caption2)
+                                .foregroundStyle(Palette.inkTertiary)
                         }
                         Spacer(minLength: 0)
                     }
@@ -640,8 +743,15 @@ struct CitationStrip: View {
                 .accessibilityHint("Opens the passage in its original document")
             }
         }
-        .padding(10)
-        .background(Palette.evidence, in: RoundedRectangle(cornerRadius: 8))
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Palette.evidence)
+        // Rules rather than a rounded fill. A third nested surface, card inside
+        // page inside evidence, is what makes a record read as boxes in boxes;
+        // a band that runs to the text edges reads as part of the turn, which
+        // is what it is.
+        .overlay(alignment: .top) { Rule() }
+        .overlay(alignment: .bottom) { Rule() }
         .sheet(item: $opened) { citation in
             if let package {
                 SourceViewer(citation: citation, package: package)
@@ -697,6 +807,16 @@ struct Truncation: View {
     }
 }
 
+/// A hairline, at the weight an edge should be.
+///
+/// One point at the palette's rule alpha rather than a Divider, whose colour is
+/// the system's and lands neutral grey on a tinted ground.
+struct Rule: View {
+    var body: some View {
+        Rectangle().fill(Palette.evidenceRule).frame(height: 1)
+    }
+}
+
 /// Which machine answered, and under what settings.
 ///
 /// Kept on every turn rather than in a details pane: "what was different about
@@ -706,28 +826,59 @@ struct Provenance: View {
     let turn: NotebookPackage.Turn
 
     var body: some View {
-        HStack(spacing: 14) {
-            ForEach(facts, id: \.self) { fact in
-                Text(fact)
+        HStack(spacing: 12) {
+            Text(retrieval)
+            if let machine = turn.answeredBy {
+                Text(machine)
+                if let state = turn.presenceState {
+                    // **A badge, because this one is not a fact like the
+                    // others.** A presence state that caps completions decides
+                    // whether the answer above is whole, and rendering it in
+                    // the same grey as the elapsed time said it was the same
+                    // kind of thing. It is not.
+                    Text(state.uppercased())
+                        .font(Type.stateBadge)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(caps(state) ? Palette.warningSoft
+                                                : Palette.accentSoft,
+                                    in: Capsule())
+                        .foregroundStyle(caps(state) ? Palette.warning
+                                                     : Palette.accent)
+                }
+            }
+            if let seconds = turn.seconds {
+                Text(String(format: "%.1fs", seconds))
+            }
+            if turn.wasTruncated, let applied = turn.maxTokensApplied {
+                Text("cut at \(applied)").foregroundStyle(Palette.warning)
             }
             Spacer(minLength: 0)
+            // The embedding model is the least urgent of these and is the one
+            // that never changes within a notebook, so it sits at the far end
+            // in the quietest ink rather than in the reading order.
+            Text(model).foregroundStyle(Palette.inkTertiary)
         }
-        .font(.caption)
-        .monospacedDigit()
-        .foregroundStyle(.secondary)
+        .font(Type.provenance)
+        .tracking(0.2)
+        .foregroundStyle(Palette.inkSecondary)
     }
 
-    private var facts: [String] {
-        var out = ["k \(turn.k)", turn.hybrid ? "hybrid" : "semantic"]
-        if let node = turn.answeredBy {
-            out.append(turn.presenceState.map { "\(node) · \($0)" } ?? node)
-        }
-        if let seconds = turn.seconds { out.append(String(format: "%.1fs", seconds)) }
-        if turn.wasTruncated, let applied = turn.maxTokensApplied {
-            out.append("cut at \(applied)")
-        }
-        out.append(turn.embeddingModel.split(separator: "/").last.map(String.init) ?? "")
-        return out.filter { !$0.isEmpty }
+    private var retrieval: String {
+        "k \(turn.k) · \(turn.hybrid ? "hybrid" : "semantic")"
+    }
+
+    private var model: String {
+        turn.embeddingModel.split(separator: "/").last.map(String.init) ?? ""
+    }
+
+    /// Presence states under which a harvested machine limits completions.
+    ///
+    /// Named here rather than inferred from the truncation, because the cap
+    /// applies whether or not this particular answer hit it, and knowing the
+    /// next one might is worth as much as knowing this one did.
+    private func caps(_ state: String) -> Bool {
+        ["ACTIVE", "PASSIVE", "IDLE"].contains(state.uppercased())
     }
 }
 
@@ -803,14 +954,14 @@ struct AskBar: View {
                     ProgressView().controlSize(.small)
                 }
                 if let summary = embedding.summary {
-                    Text(summary).font(.caption).foregroundStyle(.secondary)
+                    Text(summary).font(Type.provenance).foregroundStyle(Palette.inkSecondary)
                 }
                 if let detail = embedding.detail {
-                    Text(detail).font(.caption).foregroundStyle(.secondary)
+                    Text(detail).font(Type.rowDetail).foregroundStyle(Palette.inkSecondary)
                         .lineLimit(2)
                 } else if !canAsk, embedding.state.isReady, !model.whyNotAsking.isEmpty {
                     Text(model.whyNotAsking)
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(Palette.inkSecondary)
                 }
                 Spacer(minLength: 0)
             }

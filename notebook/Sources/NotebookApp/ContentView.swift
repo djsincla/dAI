@@ -561,6 +561,8 @@ struct TurnView: View {
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
+            if turn.wasTruncated { Truncation(turn: turn) }
+
             Provenance(turn: turn)
         }
         .padding(18)
@@ -634,6 +636,46 @@ struct CitationStrip: View {
     }
 }
 
+/// Said plainly when an answer stopped before it was finished.
+///
+/// **Not a caption.** An answer cut off mid sentence reads as a complete one,
+/// and the reader has no way to tell: this is the one piece of provenance that
+/// changes what the words in front of them mean, so it sits with the answer
+/// rather than in the grey line underneath it.
+///
+/// It names the cause too, because the cause is almost never the setting in
+/// this app. A harvested machine allows 256 completion tokens while its owner
+/// is using it, and somebody who is not told that will raise a limit here and
+/// watch nothing change.
+struct Truncation: View {
+    let turn: NotebookPackage.Turn
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: "scissors")
+            Text(explanation)
+            Spacer(minLength: 0)
+        }
+        .font(.callout)
+        .padding(10)
+        .background(.orange.opacity(0.14), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var explanation: String {
+        let limit = turn.maxTokensApplied.map { "\($0) tokens" } ?? "its limit"
+        guard turn.cappedByPolicy == true else {
+            return "This answer was cut off at \(limit). Raise Longest answer "
+                 + "in Settings to let it finish."
+        }
+        let machine = turn.answeredBy ?? "the machine that answered"
+        let state = turn.presenceState.map { " (\($0))" } ?? ""
+        return "This answer was cut off at \(limit), which is less than was "
+             + "asked for: \(machine)\(state) is being harvested and limits "
+             + "completions while it is in use. Raising Longest answer will not "
+             + "change this; the answer has to land on an idle machine."
+    }
+}
+
 /// Which machine answered, and under what settings.
 ///
 /// Kept on every turn rather than in a details pane: "what was different about
@@ -659,6 +701,9 @@ struct Provenance: View {
             out.append(turn.presenceState.map { "\(node) · \($0)" } ?? node)
         }
         if let seconds = turn.seconds { out.append(String(format: "%.1fs", seconds)) }
+        if turn.wasTruncated, let applied = turn.maxTokensApplied {
+            out.append("cut at \(applied)")
+        }
         out.append(turn.embeddingModel.split(separator: "/").last.map(String.init) ?? "")
         return out.filter { !$0.isEmpty }
     }

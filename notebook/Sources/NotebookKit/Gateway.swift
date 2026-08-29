@@ -55,6 +55,29 @@ public actor Gateway {
         public let node: String?
         public let presenceState: String?
         public let seconds: Double
+
+        /// Why the model stopped. `length` means it did not finish.
+        ///
+        /// **An answer cut off mid sentence must never be presented as a whole
+        /// one.** The reader cannot tell the difference, and the difference is
+        /// the model having more to say against the model being done. Three of
+        /// the first eleven answers this app recorded end mid sentence and none
+        /// of them said so, because the gateway sent this and nothing read it.
+        public let finishReason: String?
+
+        /// What the fleet actually allowed, against what was asked for.
+        ///
+        /// A harvested machine caps completions by presence: 256 tokens while
+        /// somebody is using it, against 2,048 when it is locked and 4,096 when
+        /// they have gone. So a truncated answer is usually a statement about
+        /// where the work landed and what that machine's owner was doing, not
+        /// about the setting in this app, and reporting the request alone would
+        /// send somebody to change the wrong number.
+        public let maxTokensApplied: Int?
+        public let cappedByPolicy: Bool
+
+        /// Whether the model stopped because it ran out of room.
+        public var wasTruncated: Bool { finishReason == "length" }
     }
 
     private let configuration: Configuration
@@ -123,11 +146,15 @@ public actor Gateway {
             throw Failure.malformed("no choices[0].message.content")
         }
         let dai = object["dai"] as? [String: Any]
+        let finish = (choices.first?["finish_reason"] as? String)
         return Answer(text: text,
                       model: object["model"] as? String,
                       node: dai?["node"] as? String,
                       presenceState: dai?["presenceState"] as? String,
-                      seconds: seconds)
+                      seconds: seconds,
+                      finishReason: finish,
+                      maxTokensApplied: dai?["maxTokensApplied"] as? Int,
+                      cappedByPolicy: (dai?["cappedByPolicy"] as? Bool) ?? false)
     }
 
     /// What the model is told, once, for the life of the conversation.

@@ -89,4 +89,31 @@ enum GatewaySettings {
         get { UserDefaults.standard.string(forKey: "gateway.model") ?? "" }
         set { UserDefaults.standard.set(newValue, forKey: "gateway.model") }
     }
+
+    /// The longest answer the fleet is asked for, in tokens.
+    ///
+    /// **This is a ceiling, not a target**: the model stops when it has finished
+    /// and the limit only decides where it is cut off if it has not. It was 800
+    /// and not adjustable, which is roughly 600 words, and a long answer from a
+    /// technical manual reached it and stopped mid sentence. A truncated answer
+    /// is worse than a short one, because it looks like the model had nothing
+    /// further to say.
+    ///
+    /// The cost of raising it is waiting: nothing streams here, a completion is
+    /// dispatched to a node as one unit, so a longer answer is a longer silence
+    /// rather than a longer scroll. 2,000 tokens is about 1,500 words, which
+    /// covers a procedure with its caveats without making a one line answer
+    /// slower, since a model that finishes early is not charged for the rest.
+    static let defaultMaxTokens = 2000
+
+    static var maxTokens: Int {
+        get {
+            let stored = UserDefaults.standard.integer(forKey: "gateway.maxTokens")
+            // `integer(forKey:)` returns 0 for a key that was never set, which
+            // is indistinguishable from a stored 0 and would ask for an empty
+            // answer. Anything unset or nonsensical falls back.
+            return stored >= 256 ? min(stored, 32000) : defaultMaxTokens
+        }
+        set { UserDefaults.standard.set(newValue, forKey: "gateway.maxTokens") }
+    }
 }

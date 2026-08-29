@@ -472,6 +472,36 @@ struct DropZone: View {
 
 // ------------------------------------------------------------------ record
 
+/// How wide the record is, and when it grows a margin.
+///
+/// **The measure never changes; the layout around it does.** 700 points of 15
+/// point serif is already about 95 characters, which is at the limit of what
+/// can be read comfortably, so a wider window must not produce a wider
+/// paragraph. What it produces instead is somewhere to put the evidence.
+enum Measure {
+    /// The reading column. Fixed, in both layouts.
+    static let prose: CGFloat = 700
+    /// The evidence rail, when there is room for one.
+    static let rail: CGFloat = 240
+    static let gutter: CGFloat = 24
+    /// The card's own horizontal padding, both sides.
+    static let cardPadding: CGFloat = 44
+    /// The record's padding inside its width, both sides.
+    static let pagePadding: CGFloat = 56
+    /// The document's left margin.
+    static let lead: CGFloat = 56
+
+    static let narrow = prose + cardPadding + pagePadding
+    static let wide = prose + gutter + rail + cardPadding + pagePadding
+
+    /// Below this, the rail folds back into the card.
+    ///
+    /// Set from the width the wide layout actually needs plus its lead, with a
+    /// little room, rather than chosen as a round number: the breakpoint should
+    /// be the point at which the thing fits.
+    static let threshold = wide + lead + 60
+}
+
 struct RecordView: View {
     @Bindable var model: NotebookModel
     @Binding var question: String
@@ -480,38 +510,11 @@ struct RecordView: View {
     @State private var picked: [Int] = []
 
     var body: some View {
+        GeometryReader { geometry in
+        let wide = geometry.size.width >= Measure.threshold
         ScrollViewReader { scroll in
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 40) {
-                if model.turns.isEmpty && model.pending == nil {
-                    EmptyRecord(isOpen: model.isOpen)
-                        .padding(.top, 60)
-                } else {
-                    ForEach(Array(model.turns.enumerated()), id: \.offset) { index, turn in
-                        TurnView(turn: turn, package: model.package,
-                                 picked: picked.contains(index)) {
-                            pick(index)
-                        }
-                        .id(index)
-                    }
-                    if let pending = model.pending {
-                        PendingTurnView(pending: pending, package: model.package)
-                            .id("pending")
-                    }
-                }
-            }
-            .padding(.horizontal, 28)
-            .padding(.top, 28)
-            .padding(.bottom, 28)
-            .frame(maxWidth: 760, alignment: .leading)
-            // Left aligned with a lead, not centred.
-            //
-            // Centring a 760pt column in a 2,000pt window leaves 600pt of dead
-            // ground on each side, symmetrical enough to look deliberate, which
-            // is why it read as the app having nothing to put there. Empty
-            // space to the right of a left aligned document reads as margin.
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.leading, 56)
+            document(wide: wide)
         }
         .background(Palette.page)
         // The question is put on screen the moment it is asked, and scrolled
@@ -527,7 +530,10 @@ struct RecordView: View {
             }
         }
         }
-        .safeAreaInset(edge: .bottom) { AskBar(model: model, question: $question, embedding: embedding) }
+        .safeAreaInset(edge: .bottom) {
+            AskBar(model: model, question: $question, embedding: embedding,
+                   wide: wide)
+        }
         .safeAreaInset(edge: .top) {
             if picked.count == 1 {
                 // Said rather than left to be guessed. One turn chosen is a
@@ -550,6 +556,46 @@ struct RecordView: View {
                             package: model.package)
             }
         }
+        }
+    }
+
+    /// The record itself, at whichever width it was given.
+    ///
+    /// Extracted from `body` because the whole view in one expression stopped
+    /// type checking in reasonable time once the width became a variable, which
+    /// is SwiftUI's way of asking for a smaller function.
+    @ViewBuilder
+    private func document(wide: Bool) -> some View {
+        LazyVStack(alignment: .leading, spacing: 40) {
+            if model.turns.isEmpty && model.pending == nil {
+                EmptyRecord(isOpen: model.isOpen)
+                    .padding(.top, 60)
+            } else {
+                ForEach(Array(model.turns.enumerated()), id: \.offset) { index, turn in
+                    TurnView(turn: turn, package: model.package,
+                             picked: picked.contains(index), wide: wide) {
+                        pick(index)
+                    }
+                    .id(index)
+                }
+                if let pending = model.pending {
+                    PendingTurnView(pending: pending, package: model.package,
+                                    wide: wide)
+                        .id("pending")
+                }
+            }
+        }
+        .padding(.horizontal, Measure.pagePadding / 2)
+        .padding(.vertical, 28)
+        .frame(maxWidth: wide ? Measure.wide : Measure.narrow, alignment: .leading)
+        // Left aligned with a lead, not centred.
+        //
+        // Centring a 760pt column in a 2,000pt window leaves 600pt of dead
+        // ground on each side, symmetrical enough to look deliberate, which is
+        // why it read as the app having nothing to put there. Empty space to
+        // the right of a left aligned document reads as margin.
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.leading, Measure.lead)
     }
 
     /// Choosing turns to compare: first, then second, then the sheet.
@@ -588,23 +634,35 @@ struct EmptyRecord: View {
 struct PendingTurnView: View {
     let pending: NotebookModel.Pending
     let package: NotebookPackage?
+    var wide: Bool = false
+
+    private var gutter: Bool { wide && pending.citations.count > 1 }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(pending.question)
-                .font(Type.question)
-                .tracking(-0.2)
-                .foregroundStyle(Palette.ink)
-                .textSelection(.enabled)
+        HStack(alignment: .top, spacing: Measure.gutter) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(pending.question)
+                    .font(Type.question)
+                    .tracking(-0.2)
+                    .foregroundStyle(Palette.ink)
+                    .textSelection(.enabled)
 
-            if !pending.citations.isEmpty {
-                CitationStrip(citations: pending.citations, package: package)
+                if !pending.citations.isEmpty && !gutter {
+                    CitationStrip(citations: pending.citations, package: package)
+                }
+
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(pending.stage).font(.callout)
+                        .foregroundStyle(Palette.inkSecondary)
+                    Spacer(minLength: 0)
+                }
             }
-
-            HStack(spacing: 8) {
-                ProgressView().controlSize(.small)
-                Text(pending.stage).font(.callout).foregroundStyle(Palette.inkSecondary)
-                Spacer(minLength: 0)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if gutter {
+                CitationStrip(citations: pending.citations, package: package,
+                              layout: .gutter)
+                    .frame(width: Measure.rail, alignment: .leading)
             }
         }
         .padding(.horizontal, 22)
@@ -627,44 +685,24 @@ struct TurnView: View {
     let turn: NotebookPackage.Turn
     let package: NotebookPackage?
     var picked: Bool = false
+    /// Whether there is room beside the prose for the evidence.
+    var wide: Bool = false
     var compare: (() -> Void)?
 
+    /// The citations go beside the answer only when they both fit and there
+    /// are enough of them to be worth a column. One citation in a margin is a
+    /// stray number; below that threshold it stays in the band.
+    private var gutter: Bool { wide && turn.citations.count > 1 }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text(turn.question)
-                .font(Type.question)
-                .tracking(-0.2)
-                .foregroundStyle(Palette.ink)
-                .textSelection(.enabled)
-
-            if !turn.citations.isEmpty {
-                CitationStrip(citations: turn.citations, package: package)
-                    .padding(.top, 14)
-            }
-
-            // **Above the answer, not below it.**
-            //
-            // This was under the prose, which is the one place it cannot do its
-            // job: by the time somebody reads "that was cut off" they have
-            // already read the cut off thing as though it were whole. Its
-            // entire purpose is to change how the next paragraph is read.
-            if turn.wasTruncated {
-                Truncation(turn: turn)
-                    .padding(.top, turn.citations.isEmpty ? 14 : 16)
-            }
-
-            Text(turn.answer)
-                .font(Type.answer)
-                .lineSpacing(5)
-                .foregroundStyle(Palette.ink)
-                .textSelection(.enabled)
+        HStack(alignment: .top, spacing: Measure.gutter) {
+            prose
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.top, turn.wasTruncated ? 16 : 18)
-
-            Rule()
-                .padding(.top, 16)
-            Provenance(turn: turn)
-                .padding(.top, 10)
+            if gutter {
+                CitationStrip(citations: turn.citations, package: package,
+                              layout: .gutter)
+                    .frame(width: Measure.rail, alignment: .leading)
+            }
         }
         .padding(.horizontal, 22)
         .padding(.top, 18)
@@ -680,11 +718,6 @@ struct TurnView: View {
         }
         .shadow(color: Palette.cardShadow, radius: 3, x: 0, y: 1)
         .shadow(color: Palette.cardShadowWide, radius: 12, x: 0, y: 4)
-        .overlay {
-            if picked {
-                RoundedRectangle(cornerRadius: 12).strokeBorder(.tint)
-            }
-        }
         .contextMenu {
             if let compare {
                 Button(picked ? "Remove from Comparison" : "Compare With…",
@@ -694,67 +727,163 @@ struct TurnView: View {
     }
 }
 
+extension TurnView {
+    /// The reading column: what was asked, what came back, and where from.
+    @ViewBuilder
+    var prose: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(turn.question)
+                .font(Type.question)
+                .tracking(-0.2)
+                .foregroundStyle(Palette.ink)
+                .textSelection(.enabled)
+
+            if !turn.citations.isEmpty && !gutter {
+                CitationStrip(citations: turn.citations, package: package)
+                    .padding(.top, 14)
+            }
+
+            // **Above the answer, not below it.**
+            //
+            // This was under the prose, which is the one place it cannot do its
+            // job: by the time somebody reads "that was cut off" they have
+            // already read the cut off thing as though it were whole. Its
+            // entire purpose is to change how the next paragraph is read.
+            if turn.wasTruncated {
+                Truncation(turn: turn)
+                    .padding(.top, turn.citations.isEmpty || gutter ? 14 : 16)
+            }
+
+            Text(turn.answer)
+                .font(Type.answer)
+                .lineSpacing(5)
+                .foregroundStyle(Palette.ink)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, turn.wasTruncated ? 16 : 18)
+
+            Rule()
+                .padding(.top, 16)
+            Provenance(turn: turn)
+                .padding(.top, 10)
+        }
+    }
+}
+
+/// Retrieved passages, in one of two places.
+///
+/// **The same evidence, laid out for two different jobs.** Inline it is a band
+/// between the question and the answer, which is the right sequence for
+/// auditing: the passages come before the prose they produced. In the gutter it
+/// is a sidenote column beside the answer, which is the right shape for
+/// reading: the evidence stays visible without interrupting the sentence.
+///
+/// Which one is used is decided by the width of the window and nothing else.
 struct CitationStrip: View {
     let citations: [NotebookPackage.Turn.Citation]
     let package: NotebookPackage?
+    var layout: Layout = .band
     @State private var opened: NotebookPackage.Turn.Citation?
 
+    enum Layout { case band, gutter }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: layout == .gutter ? 8 : 2) {
+            if layout == .gutter {
+                // Labelled only in the gutter. Inline, its position between the
+                // question and the answer says what it is; in a margin it is
+                // a column of numbers with no context.
+                Text("Retrieved")
+                    .font(Type.stateBadge)
+                    .tracking(0.6)
+                    .foregroundStyle(Palette.inkTertiary)
+                    .padding(.bottom, 2)
+            }
             ForEach(Array(citations.enumerated()), id: \.offset) { _, c in
-                Button {
-                    opened = c
-                } label: {
-                    HStack(spacing: 8) {
-                        // The score is shown, not hidden. Whether the right
-                        // thing was retrieved is the first question about any
-                        // answer, and it is answerable at a glance only if the
-                        // numbers are here.
-                        // Coloured and tabular rather than grey.
-                        //
-                        // Whether the right passage was retrieved is the first
-                        // question about any answer, and these numbers are the
-                        // only thing that answers it. They were styled as the
-                        // faintest text on screen. Tabular figures so a column
-                        // of them can be compared by eye without reading.
-                        Text(String(format: "%.3f", c.score))
-                            .font(Type.score)
-                            .monospacedDigit()
-                            .foregroundStyle(Palette.accent)
-                            .frame(width: 46, alignment: .trailing)
-                        Text(c.citation)
-                            .font(Type.citation)
-                            .foregroundStyle(Palette.inkSecondary)
-                            .lineLimit(1)
-                        if page(of: c) != nil {
-                            Image(systemName: "arrow.up.forward.square")
-                                .font(.caption2)
-                                .foregroundStyle(Palette.inkTertiary)
-                        }
-                        Spacer(minLength: 0)
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .disabled(package == nil)
-                .help("Open the passage this came from")
-                .accessibilityLabel("\(c.citation), score "
-                                    + "\(String(format: "%.3f", c.score))")
-                .accessibilityHint("Opens the passage in its original document")
+                Button { opened = c } label: { row(c) }
+                    .buttonStyle(.plain)
+                    .disabled(package == nil)
+                    .help("Open the passage this came from")
+                    .accessibilityLabel("\(c.citation), score "
+                                        + "\(String(format: "%.3f", c.score))")
+                    .accessibilityHint("Opens the passage in its original document")
             }
         }
-        .padding(.vertical, 8)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Palette.evidence)
-        // Rules rather than a rounded fill. A third nested surface, card inside
-        // page inside evidence, is what makes a record read as boxes in boxes;
-        // a band that runs to the text edges reads as part of the turn, which
-        // is what it is.
-        .overlay(alignment: .top) { Rule() }
-        .overlay(alignment: .bottom) { Rule() }
+        .modifier(Ground(layout: layout))
         .sheet(item: $opened) { citation in
             if let package {
                 SourceViewer(citation: citation, package: package)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func row(_ c: NotebookPackage.Turn.Citation) -> some View {
+        // The score is shown, not hidden, and it is coloured and tabular.
+        //
+        // Whether the right passage was retrieved is the first question about
+        // any answer, and these numbers are the only thing that answers it.
+        // They were once the faintest text on screen.
+        let score = Text(String(format: "%.3f", c.score))
+            .font(Type.score)
+            .monospacedDigit()
+            .foregroundStyle(Palette.accent)
+
+        switch layout {
+        case .band:
+            HStack(spacing: 8) {
+                score.frame(width: 46, alignment: .trailing)
+                Text(c.citation)
+                    .font(Type.citation)
+                    .foregroundStyle(Palette.inkSecondary)
+                    .lineLimit(1)
+                if page(of: c) != nil {
+                    Image(systemName: "arrow.up.forward.square")
+                        .font(.caption2)
+                        .foregroundStyle(Palette.inkTertiary)
+                }
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+
+        case .gutter:
+            // Stacked, because 240 points is not enough for a score, a file
+            // name and a page number on one line, and truncating the name to
+            // fit would remove the part that identifies it.
+            VStack(alignment: .leading, spacing: 1) {
+                score
+                Text(c.citation)
+                    .font(Type.citation)
+                    .foregroundStyle(Palette.inkSecondary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+    }
+
+    /// What the strip sits on, which differs by where it sits.
+    ///
+    /// A band runs to the card's text edges with a rule above and below, so it
+    /// reads as part of the turn rather than as a panel inside it. A gutter
+    /// column needs no ground at all: the space around it already separates it,
+    /// and a fill there would make the margin look like a second card.
+    private struct Ground: ViewModifier {
+        let layout: Layout
+
+        func body(content: Content) -> some View {
+            switch layout {
+            case .band:
+                content
+                    .padding(.vertical, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Palette.evidence)
+                    .overlay(alignment: .top) { Rule() }
+                    .overlay(alignment: .bottom) { Rule() }
+            case .gutter:
+                content
             }
         }
     }
@@ -888,6 +1017,7 @@ struct AskBar: View {
     @Bindable var model: NotebookModel
     @Binding var question: String
     @Bindable var embedding: EmbeddingService
+    var wide: Bool = false
 
     /// Asking needs both a notebook with chunks and a loaded model.
     private var canAsk: Bool {
@@ -943,7 +1073,7 @@ struct AskBar: View {
             .background(Palette.field, in: RoundedRectangle(cornerRadius: 10))
             .overlay {
                 RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(.quaternary)
+                    .strokeBorder(Palette.fieldEdge)
             }
 
             // What the model is doing, said rather than implied by a
@@ -967,10 +1097,14 @@ struct AskBar: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.horizontal, 28)
+        .padding(.horizontal, Measure.pagePadding / 2)
         .padding(.vertical, 12)
-        .frame(maxWidth: 760)
-        .frame(maxWidth: .infinity)
+        // The same column as the record above it, left aligned to the same
+        // lead. Centred under a left aligned document, the field's text edge
+        // would land somewhere the answers never start.
+        .frame(maxWidth: wide ? Measure.wide : Measure.narrow, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.leading, Measure.lead)
         .background(.bar)
     }
 }

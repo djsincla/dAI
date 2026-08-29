@@ -50,6 +50,7 @@ export type Surface = 'agent' | 'admin' | 'both'
  */
 export const broker = new Broker()
 
+
 /**
  * Node identity issuer. Its private key is read from disk rather than the
  * database, so a database compromise cannot mint fleet members.
@@ -76,6 +77,17 @@ let groupListeners: GroupListeners | undefined
 
 export function createApp(db: Db, surface: Surface = 'both',
                           listeners?: () => GroupListeners | undefined): Express {
+  // Record which machine was last given work, for the router's tie break.
+  //
+  // Fire and forget: this is a scheduling hint, not a fact anything depends on,
+  // and making a dispatch wait on a write to record that the dispatch happened
+  // would put a database round trip in front of every completion. A missed
+  // write costs one request's worth of fairness.
+  broker.onDispatch = (nodeId: string) => {
+    void db.query(`UPDATE nodes SET last_dispatch_at = now() WHERE id = $1`,
+                  [nodeId]).catch(() => {})
+  }
+
   const app = express()
 
   // Which group this request is addressed to, read from the socket it arrived

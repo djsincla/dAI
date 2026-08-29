@@ -11,6 +11,7 @@ struct SettingsView: View {
     @State private var caPath = GatewaySettings.caPath
     @State private var model = GatewaySettings.model
     @State private var maxTokens = GatewaySettings.maxTokens
+    @State private var appearance = Appearance.current
     @State private var key = Credentials.read() ?? ""
     @State private var result: String?
     @State private var testing = false
@@ -26,6 +27,19 @@ struct SettingsView: View {
                 }
                 TextField("Model", text: $model,
                           prompt: Text("leave empty to let the fleet choose"))
+            }
+            Section("Appearance") {
+                // A segmented picker rather than a toggle, because there are
+                // three states and "system" is not a halfway house between the
+                // other two: it is a decision to keep following the machine.
+                Picker("Theme", selection: $appearance) {
+                    ForEach(Appearance.allCases) { option in
+                        Label(option.label, systemImage: option.symbol)
+                            .tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: appearance) { _, new in Appearance.current = new }
             }
             Section("Answers") {
                 // A stepper rather than a text field: this is a number with a

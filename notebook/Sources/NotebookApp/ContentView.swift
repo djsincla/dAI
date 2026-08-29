@@ -12,6 +12,8 @@ struct ContentView: View {
     @Bindable var model: NotebookModel
     @Bindable var embedding: EmbeddingService
     @State private var selection: URL?
+    /// Light, dark or system, shown in the toolbar.
+    @Binding var appearance: Appearance
     @State private var question = ""
     @State private var isTargeted = false
     @State private var renaming: NotebookLibrary.Entry?
@@ -51,21 +53,7 @@ struct ContentView: View {
                 }
             }
         }
-        .toolbar {
-            ToolbarItem(placement: .navigation) {
-                Menu {
-                    Toggle("Notebooks", isOn: Binding(
-                        get: { columns != .detailOnly },
-                        set: { columns = $0 ? .all : .detailOnly }))
-                        .keyboardShortcut("1")
-                    Toggle("Sources", isOn: $showSources)
-                        .keyboardShortcut("2")
-                } label: {
-                    Label("Columns", systemImage: "sidebar.squares.left")
-                }
-                .help("Show or hide the notebook and source columns")
-            }
-        }
+        .toolbar { toolbar }
         .navigationTitle(model.title)
         .navigationSubtitle(model.subtitle)
         // The list counts sources and questions, and both change while a
@@ -115,6 +103,67 @@ struct ContentView: View {
             // Named plainly, because this is the half that cannot be rebuilt.
             Text("Its sources and its record go with it. The Trash can be "
                  + "emptied, and then they are gone.")
+        }
+    }
+
+    /// Kept out of `body` because the whole view in one expression stops type
+    /// checking in reasonable time, which is SwiftUI's way of asking for a
+    /// smaller function.
+    @ToolbarContentBuilder
+    private var toolbar: some ToolbarContent {
+        ToolbarItem(placement: .navigation) {
+            Menu {
+                Toggle("Notebooks", isOn: Binding(
+                    get: { columns != .detailOnly },
+                    set: { columns = $0 ? .all : .detailOnly }))
+                    .keyboardShortcut("1")
+                Toggle("Sources", isOn: $showSources)
+                    .keyboardShortcut("2")
+            } label: {
+                Label("Columns", systemImage: "sidebar.squares.left")
+            }
+            .help("Show or hide the notebook and source columns")
+        }
+        ToolbarItem(placement: .primaryAction) {
+            AppearanceButton(appearance: $appearance)
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button(action: export) {
+                Image(systemName: "square.and.arrow.up")
+            }
+            .disabled(model.turns.isEmpty)
+            .keyboardShortcut("e", modifiers: .command)
+            .help(model.turns.isEmpty
+                  ? "Nothing to export yet"
+                  : "Export this notebook's record as Markdown")
+        }
+    }
+
+    /// Write the record out as Markdown, somewhere the person chooses.
+    ///
+    /// A save panel rather than a fixed location: an export exists to be sent
+    /// to somebody, and the place it should land is wherever they are already
+    /// keeping the thing they are going to send.
+    private func export() {
+        guard let package = model.package,
+              let manifest = try? package.manifest() else { return }
+        let markdown = Transcript.markdown(
+            model.turns, manifest: manifest,
+            sources: model.sources.map(\.name),
+            chunks: model.chunkCount)
+
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = Transcript.fileName(for: manifest)
+        panel.allowedContentTypes = [.init(filenameExtension: "md")].compactMap { $0 }
+        panel.canCreateDirectories = true
+        panel.message = "Export this notebook's questions, answers and citations."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try markdown.write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            // Said rather than swallowed: a save that silently did nothing is
+            // indistinguishable from one that worked until somebody looks.
+            model.problem = "Could not export: \(error.localizedDescription)"
         }
     }
 
@@ -571,12 +620,15 @@ struct RecordView: View {
     private func document(wide: Bool) -> some View {
         LazyVStack(alignment: .leading, spacing: 40) {
             if model.turns.isEmpty && model.pending == nil {
-                EmptyRecord(isOpen: model.isOpen)
-                    .padding(.top, 60)
+                EmptyRecord(isOpen: model.isOpen, sources: model.sources,
+                            chunks: model.chunkCount,
+                            model: model.manifest?.embeddingModel ?? "")
+                    .padding(.top, 56)
             } else {
                 ForEach(Array(model.turns.enumerated()), id: \.offset) { index, turn in
                     TurnView(turn: turn, package: model.package,
-                             picked: picked.contains(index), wide: wide) {
+                             picked: picked.contains(index),
+                             number: index + 1, wide: wide) {
                         pick(index)
                     }
                     .id(index)
@@ -618,23 +670,87 @@ struct RecordView: View {
     }
 }
 
+/// What is on screen before the first question.
+///
+/// **It used to apologise.** "Nothing asked yet" states the one thing already
+/// obvious from the empty page, and then explained what the app would do later.
+/// Meanwhile the notebook it was standing in front of held thirty five thousand
+/// passages from an eight thousand page manual and the window said none of it.
+///
+/// So this says what the notebook knows. That is a real answer to "what can I
+/// ask", it is true, and it needs no invented example questions, which would be
+/// this app guessing at somebody's work.
 struct EmptyRecord: View {
     let isOpen: Bool
+    var sources: [NotebookModel.Source] = []
+    var chunks: Int = 0
+    var model: String = ""
 
     var body: some View {
-        VStack(spacing: 10) {
-            Image(systemName: isOpen ? "text.bubble" : "book.closed")
-                .font(.system(size: 34)).foregroundStyle(Palette.inkTertiary)
-            Text(isOpen ? "Nothing asked yet" : "No notebook open")
-                .font(.title3)
-            Text(isOpen
-                 ? "Questions and answers are recorded here, with what was retrieved and the settings in force."
-                 : "Open a .dainotebook to see its sources and record.")
-                .font(.callout).foregroundStyle(Palette.inkSecondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 420)
+        VStack(alignment: .leading, spacing: 0) {
+            Image(systemName: isOpen ? "text.magnifyingglass" : "book.closed")
+                .font(.system(size: 30, weight: .light))
+                .foregroundStyle(Palette.accent)
+                .padding(.bottom, 16)
+
+            Text(isOpen ? "Ready" : "No notebook open")
+                .font(Type.question)
+                .foregroundStyle(Palette.ink)
+                .padding(.bottom, 6)
+
+            if isOpen {
+                Text(summary)
+                    .font(.callout)
+                    .foregroundStyle(Palette.inkSecondary)
+                    .padding(.bottom, sources.isEmpty ? 0 : 18)
+
+                if !sources.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(sources) { source in
+                            HStack(spacing: 8) {
+                                Image(systemName: source.kind.symbol)
+                                    .font(.caption)
+                                    .foregroundStyle(Palette.accent)
+                                    .frame(width: 14)
+                                Text(source.name)
+                                    .font(Type.citation)
+                                    .foregroundStyle(
+                                        source.enabled ? Palette.inkSecondary
+                                                       : Palette.inkTertiary)
+                                    .lineLimit(1)
+                                if !source.enabled {
+                                    Text("excluded")
+                                        .font(Type.stateBadge)
+                                        .foregroundStyle(Palette.warning)
+                                }
+                            }
+                        }
+                    }
+                    .padding(.vertical, 10)
+                    .padding(.horizontal, 12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Palette.evidence)
+                    .overlay(alignment: .top) { Rule() }
+                    .overlay(alignment: .bottom) { Rule() }
+                }
+            } else {
+                Text("Open a .dainotebook to see its sources and record.")
+                    .font(.callout)
+                    .foregroundStyle(Palette.inkSecondary)
+            }
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: 520, alignment: .leading)
+    }
+
+    private var summary: String {
+        guard chunks > 0 else {
+            return "Drop a document into the Sources column to begin."
+        }
+        let passages = chunks.formatted(.number.grouping(.automatic))
+        let from = sources.count == 1 ? "one source" : "\(sources.count) sources"
+        let embedded = model.isEmpty ? "" : ", embedded with \(EmbeddingService.short(model))"
+        return "\(passages) passages from \(from)\(embedded). "
+             + "Ask anything they cover."
     }
 }
 
@@ -706,6 +822,12 @@ struct TurnView: View {
     let turn: NotebookPackage.Turn
     let package: NotebookPackage?
     var picked: Bool = false
+    /// Which turn this is, counting from the first question ever asked here.
+    ///
+    /// Shown rather than implied by position. Comparing turn three against turn
+    /// seven is the ordinary way to talk about a record, and until this existed
+    /// there was no way to name a turn at all.
+    var number: Int = 0
     /// Whether there is room beside the prose for the evidence.
     var wide: Bool = false
     var compare: (() -> Void)?
@@ -747,7 +869,16 @@ struct TurnView: View {
             }
         }
         .contextMenu {
+            // Copying one answer is the common case by a distance: somebody has
+            // found the thing they were looking for and wants it in a message.
+            Button("Copy Answer") {
+                write(turn.answer)
+            }
+            Button("Copy with Citations") {
+                write(Transcript.markdown(turn))
+            }
             if let compare {
+                Divider()
                 Button(picked ? "Remove from Comparison" : "Compare With…",
                        action: compare)
             }
@@ -756,10 +887,57 @@ struct TurnView: View {
 }
 
 extension TurnView {
+    /// When a turn was asked, at the precision that is actually useful.
+    ///
+    /// The time for today, the weekday for this week, the date beyond that.
+    /// A full timestamp on every card is six characters nobody reads and two
+    /// they need.
+    static func when(_ date: Date) -> String {
+        let calendar = Calendar.current
+        let formatter = DateFormatter()
+        if calendar.isDateInToday(date) {
+            formatter.dateFormat = "HH:mm"
+        } else if let week = calendar.date(byAdding: .day, value: -6, to: Date()),
+                  date > week {
+            formatter.dateFormat = "EEE HH:mm"
+        } else {
+            formatter.dateFormat = "d MMM"
+        }
+        return formatter.string(from: date)
+    }
+
+    /// Put text on the pasteboard.
+    ///
+    /// Cleared first, which `NSPasteboard` requires: writing without declaring
+    /// leaves whatever was there before and pastes the wrong thing.
+    func write(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
     /// The reading column: what was asked, what came back, and where from.
     @ViewBuilder
     var prose: some View {
         VStack(alignment: .leading, spacing: 0) {
+            // A thin line above the question that says which turn this is and
+            // when. Fifty turns of identical cards is a wall; two small facts
+            // at a fixed place on each one is a document you can navigate.
+            HStack(spacing: 8) {
+                if number > 0 {
+                    Text(String(format: "%02d", number))
+                        .foregroundStyle(picked ? Palette.accent : Palette.inkTertiary)
+                }
+                Text(Self.when(turn.askedAt))
+                    .foregroundStyle(Palette.inkTertiary)
+                Spacer(minLength: 0)
+                if picked {
+                    Text("comparing")
+                        .foregroundStyle(Palette.accent)
+                }
+            }
+            .font(Type.ordinal)
+            .padding(.bottom, 8)
+
             Text(turn.question)
                 .font(Type.question)
                 .tracking(-0.2)
@@ -1055,6 +1233,8 @@ struct AskBar: View {
     @Bindable var embedding: EmbeddingService
     var wide: Bool = false
     var cancel: (() -> Void)?
+    /// Focus lives here so ⌘K can put the cursor in the field from anywhere.
+    @FocusState private var writing: Bool
 
     /// Asking needs both a notebook with chunks and a loaded model.
     private var canAsk: Bool {
@@ -1093,6 +1273,25 @@ struct AskBar: View {
                     .font(.body)
                     .disabled(!canAsk)
                     .onSubmit(ask)
+                    .focused($writing)
+                    // Up and down walk back through what was asked before, the
+                    // way a shell does. `QuestionHistory` decides whether the
+                    // press is a recall or a cursor move, and `.ignored` is the
+                    // answer that hands it back to the text view rather than
+                    // swallowing it: an arrow that quietly does nothing in a
+                    // four line field is worse than no history at all.
+                    .onKeyPress(.upArrow) {
+                        guard let recalled = model.history.older(from: question)
+                        else { return .ignored }
+                        question = recalled
+                        return .handled
+                    }
+                    .onKeyPress(.downArrow) {
+                        guard let recalled = model.history.newer(from: question)
+                        else { return .ignored }
+                        question = recalled
+                        return .handled
+                    }
                 if model.asking {
                     // The same control, doing the opposite thing. A spinner
                     // here said "wait" and offered nothing; the only place
@@ -1142,6 +1341,17 @@ struct AskBar: View {
                 Spacer(minLength: 0)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        // ⌘K puts the cursor in the field from anywhere in the window.
+        //
+        // A zero sized button rather than a menu command: the focus state lives
+        // here, and threading it up to the scene to be reachable from a
+        // CommandGroup would be more machinery than the shortcut is worth.
+        .background {
+            Button("") { writing = true }
+                .keyboardShortcut("k", modifiers: .command)
+                .opacity(0)
+                .accessibilityHidden(true)
         }
         .padding(.horizontal, Measure.pagePadding / 2)
         .padding(.vertical, 12)

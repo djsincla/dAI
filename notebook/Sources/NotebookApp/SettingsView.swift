@@ -61,7 +61,7 @@ struct SettingsView: View {
                     if testing { ProgressView().controlSize(.small) }
                     if let result {
                         Text(result).font(.caption)
-                            .foregroundStyle(result.hasPrefix("Reached") ? .green : .red)
+                            .foregroundStyle(result.hasPrefix("Reached") ? Palette.ok : Palette.danger)
                     }
                     Spacer()
                 }

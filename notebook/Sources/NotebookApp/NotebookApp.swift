@@ -31,6 +31,10 @@ struct NotebookMLXApp: App {
         WindowGroup {
             ContentView(library: library, model: model, embedding: embedding)
                 .frame(minWidth: 1000, minHeight: 620)
+                // The app's own accent rather than the system's. Sidebar
+                // selection, switches and buttons all take this, which is most
+                // of what makes the window look like one thing.
+                .tint(Palette.accent)
         }
         .windowToolbarStyle(.unified)
 
@@ -40,7 +44,10 @@ struct NotebookMLXApp: App {
         // window forward rather than opening a second onto the same file, which
         // is what stops two models appending to one record.
         WindowGroup(id: "notebook", for: URL.self) { $url in
-            if let url { NotebookWindow(url: url, embedding: embedding) }
+            if let url {
+                NotebookWindow(url: url, embedding: embedding)
+                    .tint(Palette.accent)
+            }
         }
         .windowToolbarStyle(.unified)
         .commands {

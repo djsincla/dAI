@@ -343,6 +343,9 @@ final class NotebookModel {
                 var node: String?
                 var presence: String?
                 var generation: String?
+                var finish: String?
+                var applied: Int?
+                var capped: Bool?
 
                 if let gateway {
                     await MainActor.run { self?.pending?.stage = "Asking the fleet…" }
@@ -360,11 +363,15 @@ final class NotebookModel {
                         passages: hits.map { ($0.chunk.citation, $0.chunk.text) },
                         history: Array(history),
                         model: GatewaySettings.model.isEmpty
-                            ? nil : GatewaySettings.model)
+                            ? nil : GatewaySettings.model,
+                        maxTokens: GatewaySettings.maxTokens)
                     answer = reply.text
                     node = reply.node
                     presence = reply.presenceState
                     generation = reply.model
+                    finish = reply.finishReason
+                    applied = reply.maxTokensApplied
+                    capped = reply.cappedByPolicy
                 }
 
                 let turn = NotebookPackage.Turn(
@@ -378,7 +385,9 @@ final class NotebookModel {
                     answeredBy: node, presenceState: presence,
                     generationModel: generation,
                     seconds: Date().timeIntervalSince(started),
-                    sources: await MainActor.run { self?.activeSources } ?? [])
+                    sources: await MainActor.run { self?.activeSources } ?? [],
+                    finishReason: finish, maxTokensApplied: applied,
+                    cappedByPolicy: capped)
                 try package.append(turn)
                 await MainActor.run {
                     self?.turns.append(turn)

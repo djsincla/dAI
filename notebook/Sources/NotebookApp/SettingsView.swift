@@ -10,6 +10,7 @@ struct SettingsView: View {
     @State private var baseURL = GatewaySettings.baseURL
     @State private var caPath = GatewaySettings.caPath
     @State private var model = GatewaySettings.model
+    @State private var maxTokens = GatewaySettings.maxTokens
     @State private var key = Credentials.read() ?? ""
     @State private var result: String?
     @State private var testing = false
@@ -25,6 +26,24 @@ struct SettingsView: View {
                 }
                 TextField("Model", text: $model,
                           prompt: Text("leave empty to let the fleet choose"))
+            }
+            Section("Answers") {
+                // A stepper rather than a text field: this is a number with a
+                // sensible range and no reason to allow typing 3 into it.
+                Stepper(value: $maxTokens, in: 500 ... 8000, step: 500) {
+                    HStack {
+                        Text("Longest answer")
+                        Spacer()
+                        Text("\(maxTokens) tokens")
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                }
+                Text("Where an answer is cut off if the model has not finished. "
+                     + "Nothing streams here, so a longer answer is a longer "
+                     + "wait rather than a longer scroll, and a model that "
+                     + "finishes early costs nothing extra.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("Credential") {
                 // Secure, and stored in the Keychain rather than in defaults: a
@@ -58,6 +77,7 @@ struct SettingsView: View {
         GatewaySettings.baseURL = baseURL
         GatewaySettings.caPath = caPath
         GatewaySettings.model = model
+        GatewaySettings.maxTokens = maxTokens
         Credentials.write(key)
     }
 

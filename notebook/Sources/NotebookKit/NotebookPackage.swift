@@ -166,6 +166,19 @@ public struct NotebookPackage: Sendable {
         public var presenceState: String?
         public var generationModel: String?
         public var seconds: Double?
+        /// Why the model stopped, and what ceiling it stopped against.
+        ///
+        /// Optional so records written before this existed still decode, and
+        /// recorded rather than derived because it cannot be recovered later:
+        /// an answer that ends mid sentence looks exactly like one that ended
+        /// there on purpose, and only the gateway knew which it was.
+        public var finishReason: String?
+        public var maxTokensApplied: Int?
+        public var cappedByPolicy: Bool?
+
+        /// Whether this answer was cut off rather than finished.
+        public var wasTruncated: Bool { finishReason == "length" }
+
         /// Which sources were switched on when this was asked.
         ///
         /// Optional so records written before toggles existed still decode. Two
@@ -178,7 +191,9 @@ public struct NotebookPackage: Sendable {
                     citations: [Citation], k: Int, hybrid: Bool,
                     embeddingModel: String, answeredBy: String? = nil,
                     presenceState: String? = nil, generationModel: String? = nil,
-                    seconds: Double? = nil, sources: [String]? = nil) {
+                    seconds: Double? = nil, sources: [String]? = nil,
+                    finishReason: String? = nil, maxTokensApplied: Int? = nil,
+                    cappedByPolicy: Bool? = nil) {
             self.askedAt = askedAt
             self.question = question
             self.answer = answer
@@ -191,6 +206,9 @@ public struct NotebookPackage: Sendable {
             self.generationModel = generationModel
             self.seconds = seconds
             self.sources = sources
+            self.finishReason = finishReason
+            self.maxTokensApplied = maxTokensApplied
+            self.cappedByPolicy = cappedByPolicy
         }
     }
 

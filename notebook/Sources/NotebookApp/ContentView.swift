@@ -532,8 +532,11 @@ struct RecordView: View {
         }
         .safeAreaInset(edge: .bottom) {
             AskBar(model: model, question: $question, embedding: embedding,
-                   wide: wide)
+                   wide: wide, cancel: { stopAsking() })
         }
+        // Escape, which is what somebody reaches for before they look for a
+        // button.
+        .onExitCommand { stopAsking() }
         .safeAreaInset(edge: .top) {
             if picked.count == 1 {
                 // Said rather than left to be guessed. One turn chosen is a
@@ -580,7 +583,7 @@ struct RecordView: View {
                 }
                 if let pending = model.pending {
                     PendingTurnView(pending: pending, package: model.package,
-                                    wide: wide)
+                                    wide: wide) { stopAsking() }
                         .id("pending")
                 }
             }
@@ -596,6 +599,16 @@ struct RecordView: View {
         // the right of a left aligned document reads as margin.
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.leading, Measure.lead)
+    }
+
+    /// Stop the question in flight and put it back in the field.
+    ///
+    /// Putting it back is the whole point. The reason somebody stops a question
+    /// is almost always that they have just seen a mistake in it, and making
+    /// them retype the sentence to fix one word is the sort of thing that
+    /// teaches people not to use the stop button.
+    private func stopAsking() {
+        if let restored = model.cancelAsk() { question = restored }
     }
 
     /// Choosing turns to compare: first, then second, then the sheet.
@@ -635,6 +648,9 @@ struct PendingTurnView: View {
     let pending: NotebookModel.Pending
     let package: NotebookPackage?
     var wide: Bool = false
+    /// Take the question back. Beside the stage rather than in the toolbar,
+    /// because the thing being stopped is the thing on screen.
+    var cancel: (() -> Void)?
 
     private var gutter: Bool { wide && pending.citations.count > 1 }
 
@@ -655,6 +671,11 @@ struct PendingTurnView: View {
                     ProgressView().controlSize(.small)
                     Text(pending.stage).font(.callout)
                         .foregroundStyle(Palette.inkSecondary)
+                    if let cancel {
+                        Button("Stop", action: cancel)
+                            .buttonStyle(.borderless)
+                            .controlSize(.small)
+                    }
                     Spacer(minLength: 0)
                 }
             }
@@ -1033,6 +1054,7 @@ struct AskBar: View {
     @Binding var question: String
     @Bindable var embedding: EmbeddingService
     var wide: Bool = false
+    var cancel: (() -> Void)?
 
     /// Asking needs both a notebook with chunks and a loaded model.
     private var canAsk: Bool {
@@ -1071,18 +1093,27 @@ struct AskBar: View {
                     .font(.body)
                     .disabled(!canAsk)
                     .onSubmit(ask)
-                Button {
-                    ask()
-                } label: {
-                    if model.asking {
-                        ProgressView().controlSize(.small)
-                    } else {
+                if model.asking {
+                    // The same control, doing the opposite thing. A spinner
+                    // here said "wait" and offered nothing; the only place
+                    // somebody looks to take a question back is where they sent
+                    // it from.
+                    Button { cancel?() } label: {
+                        Image(systemName: "stop.circle.fill")
+                            .font(.title2)
+                            .foregroundStyle(Palette.warning)
+                    }
+                    .buttonStyle(.plain)
+                    .keyboardShortcut(.cancelAction)
+                    .help("Stop this question and put it back")
+                } else {
+                    Button { ask() } label: {
                         Image(systemName: "arrow.up.circle.fill").font(.title2)
                     }
+                    .buttonStyle(.plain)
+                    .disabled(!canAsk || question.isEmpty)
+                    .help(canAsk ? "Ask" : model.whyNotAsking)
                 }
-                .buttonStyle(.plain)
-                .disabled(!canAsk || question.isEmpty)
-                .help(canAsk ? "Ask" : model.whyNotAsking)
             }
             .padding(12)
             .background(Palette.field, in: RoundedRectangle(cornerRadius: 10))

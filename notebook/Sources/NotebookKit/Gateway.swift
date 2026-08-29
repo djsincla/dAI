@@ -210,6 +210,16 @@ public actor Gateway {
             return (data, http)
         } catch let failure as Failure {
             throw failure
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as URLError where error.code == .cancelled {
+            // **A stopped request is not an unreachable fleet.**
+            //
+            // URLSession reports cancellation as a URLError rather than as a
+            // CancellationError, so without this a question somebody stopped on
+            // purpose would surface as "Could not reach the gateway", sending
+            // them to look at a network that is working.
+            throw CancellationError()
         } catch {
             throw Failure.unreachable("\(error.localizedDescription)")
         }

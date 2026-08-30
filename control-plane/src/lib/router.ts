@@ -106,14 +106,24 @@ export function selectNode(
       : { refused: 'no-capacity-for-kind', detail: `no node can currently run ${kind}` }
   }
 
-  // Residency is a strong preference rather than a filter: a node without the
-  // model is still better than refusing, it just pays the load once.
-  const resident = modelHash
-    ? eligible.filter((c) => modelHash in (c.resident_models ?? {}))
-    : eligible
-  const pool = resident.length > 0 ? resident : eligible
+  // **Residency is a sort key, not a filter, and that distinction was a bug.**
+  //
+  // Filtering first meant that whichever machine happened to load the model
+  // became the only candidate, and everything below this line stopped running.
+  // Presence in particular: a machine somebody was typing on kept every request
+  // because it held the weights, while an idle machine beside it was excluded
+  // before its presence was ever looked at. The fix for that was already
+  // written, deployed, and doing nothing, because it sorted a pool of one.
+  //
+  // As a sort key it still does its job. Where presence is equal it decides,
+  // which is what stops a 17 GB model moving between machines for no reason.
+  // Where presence is not equal it loses, and the fleet pays one cold load to
+  // put the work on the machine nobody is using - once, because that machine is
+  // then both resident and free.
+  const holds = (c: Candidate) =>
+    modelHash === null || modelHash in (c.resident_models ?? {}) ? 1 : 0
 
-  return [...pool].sort((a, b) => {
+  return [...eligible].sort((a, b) => {
     if (a.in_flight !== b.in_flight) return a.in_flight - b.in_flight
     // **The machine nobody is using goes first.**
     //
@@ -131,6 +141,10 @@ export function selectNode(
     // has ever been the sixteen fold difference between 256 and 4,096.
     const fa = freedom(a), fb = freedom(b)
     if (fa !== fb) return fb - fa
+    // Below presence, above throughput: a cold load costs seconds once, and
+    // being on the wrong machine costs every answer after it.
+    const ha = holds(a), hb = holds(b)
+    if (ha !== hb) return hb - ha
     const key = modelHash ?? kind
     const ra = a.capability_profiles?.[key] ?? 0
     const rb = b.capability_profiles?.[key] ?? 0

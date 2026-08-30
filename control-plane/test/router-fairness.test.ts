@@ -193,3 +193,64 @@ describe('preferring a machine nobody is using', () => {
     expect(chosen(selectNode(pool, 'generate', 'm'))).toBe('rotorua')
   })
 })
+
+/**
+ * Residency against presence.
+ *
+ * This is the case the first presence fix shipped without. Every presence test
+ * above used machines with nothing loaded, so all of them passed against a
+ * router that filtered by residency before it ever sorted - and on the real
+ * fleet, where one machine held the model, the fix did nothing at all. The
+ * deployed behaviour was unchanged and the tests were green.
+ */
+describe('residency against presence', () => {
+  /** The live failure, as a test. */
+  it('moves to the free machine even though the busy one holds the model', () => {
+    const pool = [
+      node('rotorua', { presence_state: 'ACTIVE',
+                        resident_models: { m: 1 } }),
+      node('orca', { presence_state: 'LOCKED' }),
+    ]
+    expect(chosen(selectNode(pool, 'generate', 'm'))).toBe('orca')
+  })
+
+  /**
+   * And the property that has to survive it: with nobody at either machine,
+   * the model does not wander.
+   */
+  it('leaves a loaded model where it is when presence is equal', () => {
+    const pool = [
+      node('rotorua', { presence_state: 'ABSENT', resident_models: { m: 1 },
+                        last_dispatch_at: AGO(1) }),
+      node('orca', { presence_state: 'ABSENT', last_dispatch_at: AGO(240) }),
+    ]
+    expect(chosen(selectNode(pool, 'generate', 'm'))).toBe('rotorua')
+  })
+
+  /** Residency still beats raw throughput, which is the cheap outcome. */
+  it('prefers the machine holding the model over a faster empty one', () => {
+    const pool = [
+      node('rotorua', { resident_models: { m: 1 }, capability_profiles: { m: 40 } }),
+      node('orca', { capability_profiles: { m: 400 } }),
+    ]
+    expect(chosen(selectNode(pool, 'generate', 'm'))).toBe('rotorua')
+  })
+
+  /** A request naming no model has no residency to weigh. */
+  it('ignores residency when no model was named', () => {
+    const pool = [
+      node('rotorua', { presence_state: 'ACTIVE', resident_models: { m: 1 } }),
+      node('orca', { presence_state: 'LOCKED' }),
+    ]
+    expect(chosen(selectNode(pool, 'generate', null))).toBe('orca')
+  })
+
+  /** Nobody holds it: the choice falls through to the rules below. */
+  it('falls through when neither machine holds the model', () => {
+    const pool = [
+      node('rotorua', { last_dispatch_at: AGO(1) }),
+      node('orca', { last_dispatch_at: AGO(90) }),
+    ]
+    expect(chosen(selectNode(pool, 'generate', 'm'))).toBe('orca')
+  })
+})

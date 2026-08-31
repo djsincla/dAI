@@ -513,6 +513,90 @@ psql -h localhost -p 5433 -d postgres -c "create database dai owner dai"</pre>
     different actions.</p>
   </div>
 
+  <h3>Authenticating a script</h3>
+  <p>
+    The console covers everything below. The API is shown because it is what a
+    script uses and what can be pasted into a ticket.
+  </p>
+  <pre class="cmd">TOK=$(curl -sk https://<span class="v">host</span>:8452/admin/v1/auth/login \
+    -H 'content-type: application/json' \
+    -d '{"username":"admin","password":"<span class="v">…</span>"}' | jq -r .token)
+
+curl -sk https://<span class="v">host</span>:8452/admin/v1/nodes -H "authorization: Bearer $TOK" | jq
+curl -sk https://<span class="v">host</span>:8452/monitor/v1/health   <span class="c"># from a permitted range</span></pre>
+  <p>
+    <code>/monitor/v1/health</code> answers 503 when a group has a socket that
+    nothing is listening on, naming the group and the port. That case is
+    otherwise invisible: the group exists, its models are assigned, its machines
+    hold them, and nothing answers.
+  </p>
+
+  <h3>Machines</h3>
+  <p>
+    A newly enrolled machine is <code>pending</code> and runs nothing until
+    approved.
+  </p>
+  <pre class="cmd">curl -sk -X POST https://<span class="v">host</span>:8452/admin/v1/nodes/<span class="v">{id}</span>/approve \
+    -H "authorization: Bearer $TOK" -d '{}'</pre>
+  <p>
+    An operator's pause is administrative and liftable. The machine owner's pause
+    is not: there is no administrative control for it, and the console shows a
+    disabled label rather than a button that would not work.
+  </p>
+  <div class="warn">
+    <p><strong>A machine offering both tiers reads as cluster everywhere</strong>,
+    including for the presence exemption when serving. An interactive request can
+    therefore land on it while somebody is using it. Give a workstation only the
+    harvest tier if that matters.</p>
+  </div>
+
+  <h3>Groups</h3>
+  <p>
+    A new group is allocated a socket immediately, bound before the response is
+    sent. The port is in the response and on the group's card. Applications
+    select a group by connecting to that port; nothing else selects one.
+  </p>
+  <pre class="cmd">curl -sk -X POST https://<span class="v">host</span>:8452/admin/v1/pools \
+    -H "authorization: Bearer $TOK" -H 'content-type: application/json' \
+    -d '{"name":"<span class="v">split-cluster</span>","tier":"cluster"}'
+<span class="c">{"id":"…","name":"split-cluster","tier":"cluster","servingPort":8461}</span></pre>
+  <p>
+    Creating a cluster group sets <code>schedule = gang</code> and
+    <code>preempt = never</code> automatically. A cluster group admits only
+    cluster-tier machines; a harvest group admits any machine.
+  </p>
+  <p>
+    Groups created before sockets existed are not given one during an upgrade.
+    Request it once:
+  </p>
+  <pre class="cmd">curl -sk -X PUT https://<span class="v">host</span>:8452/admin/v1/pools/<span class="v">{id}</span>/socket \
+    -H "authorization: Bearer $TOK"
+<span class="c">{"servingPort":8460,"allocated":true}</span></pre>
+
+  <h4>Standing a group down — reversible</h4>
+  <p>
+    A disabled group keeps its machines, model, socket and roles and asserts none
+    of them. It decides nothing about what its machines serve, suspends nobody,
+    hands out no work, forms no gangs, and refuses on its own socket with
+    <code>group-disabled</code>. The response lists the affected machines and what
+    each will serve instead. This is how a cluster group's machines are returned
+    to their harvest group without dismantling anything.
+  </p>
+  <pre class="cmd">curl -sk -X PUT https://<span class="v">host</span>:8452/admin/v1/pools/<span class="v">{id}</span>/enabled \
+    -H "authorization: Bearer $TOK" -H 'content-type: application/json' \
+    -d '{"enabled":false}'</pre>
+
+  <h4>Deleting a group — not reversible</h4>
+  <div class="danger">
+    <p>Its jobs and their work, its model assignments and every role on it are
+    deleted with it. Its machines are freed. Its socket is retired rather than
+    reused, so a client left pointing at the old port cannot reach a different
+    group. Without <code>confirm=true</code> the call refuses and reports what
+    would be lost; read that before repeating it.</p>
+  </div>
+  <pre class="cmd">curl -sk -X DELETE "https://<span class="v">host</span>:8452/admin/v1/pools/<span class="v">{id}</span>?confirm=true" \
+    -H "authorization: Bearer $TOK"</pre>
+
   <h3>Serving a model</h3>
   <p>
     Assign the model to a pool, then point the pool at it. The agents transfer
@@ -522,7 +606,104 @@ psql -h localhost -p 5433 -d postgres -c "create database dai owner dai"</pre>
 PUT  /admin/v1/pools/<span class="v">{poolId}</span>/serving-model            <span class="c"># serve it</span>
 GET  /admin/v1/pools/<span class="v">{poolId}</span>/models                   <span class="c"># heldBy / loadedOn</span></pre>
 
+  <h4>Holding is not loading</h4>
+  <p>
+    <code>PUT /pools/{id}/models/{modelId}</code> declares that every machine in
+    the group should <em>hold</em> these weights. A machine holds many models and
+    serves one. <code>PUT /pools/{id}/serving-model</code> is the call that
+    reaches the machines: each learns it on its next heartbeat and swaps its
+    runtime, releasing the previous model's weights.
+  </p>
+  <p>
+    Setting <code>serving-model</code> to <code>null</code> means nobody has
+    said, which is not an instruction to unload. Machines keep serving what they
+    have.
+  </p>
+
+  <h4>Declaring a model's shape</h4>
+  <p>
+    How many machines it runs across. Checked at assignment, so a two-machine
+    model assigned to a one-machine group is refused with a message rather than
+    discovered at dispatch as a hang.
+  </p>
+  <pre class="cmd">curl -sk -X PUT https://<span class="v">host</span>:8452/admin/v1/models/<span class="v">{id}</span>/shape \
+    -H "authorization: Bearer $TOK" -H 'content-type: application/json' \
+    -d '{"machines":2}'</pre>
+
   <h3>Splitting a model across machines</h3>
+  <p>Four conditions must hold. The fleet reports which one does not.</p>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Condition</th><th>How</th></tr></thead>
+      <tbody>
+        <tr><td>The model declares more than one machine</td>
+            <td class="mono">PUT /models/{id}/shape {"machines":2}</td></tr>
+        <tr><td>A cluster group is serving it</td>
+            <td class="mono">PUT /pools/{id}/serving-model, confirm: true</td></tr>
+        <tr><td>The machines can reach each other</td>
+            <td><code>DAI_PIPELINE_INTERFACE</code> in the agent's plist. The
+                split link is deliberately not the one used to reach the control
+                plane. A node whose link is down reports no address, and a gang
+                with nowhere to dial is refused in milliseconds.</td></tr>
+        <tr><td>All of them are connected at once</td>
+            <td>A gang is admitted whole or not at all. A model using every
+                machine in its group leaves no spare rank, so any other request
+                in flight — including a token count — blocks it.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    The confirmation on <code>serving-model</code> is not a formality: it names
+    the machines that stop being available to their harvest group for as long as
+    this stands. Ask on the group's own socket, and both machines log their
+    share:
+  </p>
+  <pre class="cmd">curl -sk https://<span class="v">host</span>:<span class="v">8461</span>/v1/chat/completions \
+    -H "authorization: Bearer $TOK" -H 'content-type: application/json' \
+    -d '{"max_tokens":40,"messages":[{"role":"user","content":"hello"}]}'
+
+<span class="c">rank 0 (layers 24..&lt;48) finished 205 tokens in 15.4s</span></pre>
+  <p>The answer comes from rank 0, which holds the output head.</p>
+
+  <h3>Agent versions</h3>
+  <p>
+    A pool is either <strong>managed</strong>, where the control plane hands out
+    the binary and machines self-update, or <strong>external</strong>, where it
+    records what it expects and never acts. External is what makes it safe to run
+    beside an MDM: two systems racing to own one executable is worse than either
+    owning it alone.
+  </p>
+  <pre class="cmd"><span class="c"># register a build from a file on the control plane's disk</span>
+curl -sk -X POST https://<span class="v">host</span>:8452/admin/v1/agent/builds \
+    -H "authorization: Bearer $TOK" -H 'content-type: application/json' \
+    -d '{"version":"<span class="v">0.8.11</span>","path":"<span class="v">/path/to/dai-agent</span>"}'
+
+<span class="c"># tell a pool which one to run</span>
+curl -sk -X PUT https://<span class="v">host</span>:8452/admin/v1/pools/<span class="v">{id}</span>/agent \
+    -H "authorization: Bearer $TOK" -H 'content-type: application/json' \
+    -d '{"channel":"managed","version":"<span class="v">0.8.11</span>"}'
+
+<span class="c"># watch it converge; upToDate compares hashes, not version strings</span>
+curl -sk https://<span class="v">host</span>:8452/admin/v1/agent/rollout -H "authorization: Bearer $TOK" | jq</pre>
+  <div class="note">
+    <p><strong>Read the fingerprint, not the version.</strong> The version a node
+    reports comes from its plist and can remain stale after a self-update. The
+    fingerprint is the hash of the running executable. Machines pick up a new
+    build within 120 seconds.</p>
+  </div>
+
+  <h3>Certificates</h3>
+  <p>
+    Certificates last thirty days and renew automatically at two thirds of life.
+    A certificate cannot be renewed for a node from elsewhere: the key lives in
+    the Secure Enclave and signs only inside that machine's daemon, so
+    <code>dai-agent renew</code> over ssh fails even as root. The control plane
+    can ask the machine to renew.
+  </p>
+  <pre class="cmd">curl -sk -X POST https://<span class="v">host</span>:8452/admin/v1/nodes/<span class="v">{id}</span>/renew \
+    -H "authorization: Bearer $TOK" -d '{}'</pre>
+
+
   <pre class="cmd">./scripts/dai-split prepare <span class="v">mlx-community/Qwen2.5-Coder-32B-Instruct-4bit</span> --machines 2
 ./scripts/dai-split up
 ./scripts/dai-split status
@@ -654,6 +835,180 @@ sudo /usr/local/libexec/dai-control/install.sh</pre>
     wrong component.</strong>
   </p>
 
+  <h3>A request was refused</h3>
+  <p>
+    All of these are 503 with a code. On the OpenAI surface it is
+    <code>error.code</code>; on the Anthropic surface, whose error shape has no
+    such field, it is <code>error.dai.code</code>.
+  </p>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Code</th><th>Means</th><th>Action</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">no-nodes</td>
+            <td>No active node is holding the reverse channel.</td>
+            <td>Check the machines are up and approved. If they heartbeat but do
+                not serve, the agent is reconnecting — read the node log.</td></tr>
+        <tr><td class="mono">all-in-use</td>
+            <td>Every node has a user present, so GPU work is not permitted.</td>
+            <td>Nothing. This is the policy working. It resolves when somebody
+                locks their screen.</td></tr>
+        <tr><td class="mono">no-capacity-for-kind</td>
+            <td>No node can run this kind of work at all.</td>
+            <td>Usually a machine with no GPU model configured being asked to
+                generate.</td></tr>
+        <tr><td class="mono">not-offered</td>
+            <td>The model runs across machines and no cluster group serves it.</td>
+            <td><code>PUT /pools/{id}/serving-model</code> with
+                <code>confirm: true</code>. What is missing is a decision, not a
+                component.</td></tr>
+        <tr><td class="mono">gang-not-cluster</td>
+            <td>A split needs cluster-tier machines and none connected is one.</td>
+            <td>Give the machines the cluster tier. A split rank cannot be
+                preempted, so this model cannot run on harvest hardware.</td></tr>
+        <tr><td class="mono">gang-short</td>
+            <td>The group cannot field the machines the model needs, or they
+                cannot reach each other.</td>
+            <td>Check they are all connected, then that each has said where peers
+                should dial it (<code>DAI_PIPELINE_INTERFACE</code>). A node whose
+                link is down reports no address.</td></tr>
+        <tr><td class="mono">group-disabled</td>
+            <td>The group whose socket you are using has been stood down.</td>
+            <td><code>PUT /pools/{id}/enabled</code>, or use another group's port.
+                The listener stays bound deliberately: a refused connection would
+                be indistinguishable from a control plane that had fallen
+                over.</td></tr>
+        <tr><td class="mono">node-unreachable</td>
+            <td>A gang formed and broke. The message names every rank and what
+                each said.</td>
+            <td>Read the ranks. The one that stayed silent usually caused it.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>A machine is not taking work</h3>
+  <p>
+    The node's log reads <code>asked for embed, generate, got none: &lt;reason&gt;</code>.
+  </p>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Reason</th><th>Means</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">empty</td><td>There is no work. The fleet is idle.</td></tr>
+        <tr><td class="mono">none-of-these-kinds</td>
+            <td>There is work, but not of a kind this machine may run now —
+                almost always GPU work while somebody is at the keyboard.</td></tr>
+        <tr><td class="mono">no-pool</td>
+            <td>There is work, and this machine is in no group that can be given
+                it.</td></tr>
+        <tr><td class="mono">node-paused</td><td>An operator paused it. Liftable in the console.</td></tr>
+        <tr><td class="mono">user-paused</td>
+            <td>The machine's owner paused it. Not liftable by anyone else,
+                deliberately.</td></tr>
+        <tr><td class="mono">holding-a-split</td>
+            <td>This machine's cluster group is serving a model that runs across
+                machines, so it is unavailable to its harvest group. It returns on
+                its own when that group stops serving the model.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="note">
+    <p><strong><code>holding-a-split</code> is reported separately from
+    <code>no-pool</code></strong> because the machine <em>is</em> in that harvest
+    group. An operator sent to check membership would find nothing wrong and no
+    explanation.</p>
+  </div>
+
+  <h3>A machine cannot talk to the control plane</h3>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Message</th><th>Means</th><th>Action</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">no client certificate</td>
+            <td>The request arrived without one.</td>
+            <td>Usually something other than an agent talking to the agent
+                surface.</td></tr>
+        <tr><td class="mono">unknown certificate</td>
+            <td>The fingerprint is not in the fleet.</td>
+            <td>If it follows a renewal, a loop in the daemon is still presenting
+                the old certificate. Restart the daemon and report it; this is a
+                bug and has occurred twice.</td></tr>
+        <tr><td class="mono">node not approved</td><td>Enrolled and waiting.</td>
+            <td>Approve it.</td></tr>
+        <tr><td class="mono">superseded</td>
+            <td>The machine re-enrolled and this is the older identity. It
+                verifies correctly, which is why it is refused.</td>
+            <td>Re-enrol, or point the daemon at the current identity.</td></tr>
+        <tr><td class="mono">certificate revoked</td><td>Withdrawn deliberately.</td>
+            <td>Re-enrol if that was not intended.</td></tr>
+        <tr><td class="mono">certificate expired</td>
+            <td>Past thirty days with no renewal.</td>
+            <td>Re-enrol. An expired certificate cannot authenticate, so the
+                machine cannot be asked to renew and the console offers no
+                control.</td></tr>
+        <tr><td class="mono">node cordoned</td><td>Held out of the fleet by an operator.</td>
+            <td>Uncordon it.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>A split will not run</h3>
+  <p>Read both machines' logs; the two halves usually report different things.</p>
+  <pre class="cmd"><span class="c"># a working split, on both machines</span>
+rank 0 listening on 7710
+pipeline: a peer connected from 192.168.99.2
+pipeline: handshake completed with 192.168.99.2
+rank 0 (layers 24..&lt;48) finished 205 tokens in 15.4s</pre>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>In the log</th><th>Means</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">no handshake with … after 10s</td>
+            <td>TCP connected and TLS never proceeded. Almost always the peer
+                going away mid-handshake.</td></tr>
+        <tr><td class="mono">bind: Address already in use</td>
+            <td>A previous split left its listener bound. Fixed in 2026.08.13-6;
+                if seen, the machine is running something older.</td></tr>
+        <tr><td class="mono">the other machine did not answer within 120s</td>
+            <td>The ranks paired and one never produced its tensor. Usually a
+                machine loading its half under load.</td></tr>
+        <tr><td class="mono">rank N could not hand its hidden state on</td>
+            <td>The link broke mid-generation. The other rank's message says from
+                which end.</td></tr>
+        <tr><td class="mono">did not report before the gang was released</td>
+            <td>This rank said nothing within two seconds of another rank
+                failing. Usually the machine that caused the failure.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="warn">
+    <p><strong>The split link is not the control plane's link.</strong> A split
+    runs over whatever the machines share — a Thunderbolt bridge, for example —
+    while both reach the control plane over the LAN. A bridge goes inactive when
+    its peer sleeps or is unplugged, the advertised address stops being
+    reachable, and the node clears it on the next heartbeat.</p>
+  </div>
+
+  <h3>Nothing is wrong and nothing is happening</h3>
+  <ul>
+    <li><strong>A machine reads as suspended.</strong> Its cluster group is
+      serving a split model; the capacity is deliberately withdrawn.</li>
+    <li><strong>A model is listed but every request is refused.</strong> The
+      catalogue says a node holds it; routing says no node is free this instant. A
+      node reading a large prompt is occupied for minutes and is not parked on the
+      channel.</li>
+    <li><strong>A group shows "not serving this group's model".</strong> The
+      machines are running something else — either they have not taken the
+      group's model yet, or a cluster group is overriding this one. The card
+      names which.</li>
+    <li><strong>A node is not holding what it was assigned.</strong> The drawer
+      shows the reason under "Not holding", reported on every beat, so it is
+      current rather than stale.</li>
+    <li><strong>Health says 503 with a group name.</strong> That group has a
+      socket nothing is listening on. This is the dangerous case, because the
+      group otherwise looks healthy.</li>
+  </ul>
+
   <h3><code>no active nodes are connected</code></h3>
   <p>
     No machine is holding a dispatch channel. Check <code>serving</code> in the
@@ -749,10 +1104,22 @@ ps -o user= -p $(pgrep -f "bin/postgres" | head -1)</pre>
     In each case the control plane is running but cannot serve requests.
   </p>
 
-  <h3>Reading the agent log</h3>
-  <pre class="cmd">tail -f /var/log/dai/agent.log
-tail -f /var/log/dai/updater.log     <span class="c"># self-update decisions</span>
-tail -f /var/log/dai-control         <span class="c"># control plane</span></pre>
+  <h3>Where to look</h3>
+  <pre class="cmd"><span class="c"># on a machine that lends capacity</span>
+/var/log/dai/agent.log              <span class="c"># heartbeats, work, serving, splits</span>
+/var/log/dai/updater.log            <span class="c"># self-update, every 120s</span>
+
+<span class="c"># on the control plane</span>
+/var/log/dai-control/               <span class="c"># when installed as a daemon</span>
+GET /admin/v1/agent/upgrades        <span class="c"># what each machine tried, and how it ended</span>
+GET /monitor/v1/metrics             <span class="c"># Prometheus exposition</span></pre>
+  <p>
+    The node drawer in the console carries the same facts: chip, working set,
+    headroom, presence, agent version and fingerprint, certificate expiry, why it
+    is not holding something, and recent activity. It is readable by that
+    machine's owner whatever their role, so an unrelated slowdown can be checked
+    rather than assumed to be the agent.
+  </p>
 </section>
 
 <!-- ============================================================= PART 6 -->

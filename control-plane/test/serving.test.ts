@@ -185,9 +185,37 @@ describe('serving over HTTP', () => {
     const wide = listed.data.find((m: any) => m.id === 'org/wide')
     const narrow = listed.data.find((m: any) => m.id === 'org/narrow')
 
-    expect(wide.dai).toEqual({ machines: 2, split: true, shape: 'runs across 2 machines' })
+    // Both are resident here, which is the other half of what the block says.
+    expect(wide.dai).toEqual({
+      machines: 2, split: true, shape: 'runs across 2 machines', loaded: true })
     // And a model nobody has declared a shape for is one machine, not unknown.
-    expect(narrow.dai).toEqual({ machines: 1, split: false, shape: 'runs on one machine' })
+    expect(narrow.dai).toEqual({
+      machines: 1, split: false, shape: 'runs on one machine', loaded: true })
+  })
+
+  /**
+   * A model on disk is offered too, and says it is not loaded.
+   *
+   * The catalogue listed `resident_models || model_context` and so described
+   * only what happened to be loaded at that moment - the smaller and more
+   * volatile half of what the fleet can serve, since residency changes when a
+   * group is repointed or a model idles out and possession does not. A client
+   * choosing a model could not pick one the fleet plainly had.
+   */
+  it('offers a model held on disk, and says it is not loaded yet', async () => {
+    await db.query(
+      `INSERT INTO models (id, runtime, kind, size_bytes, machines)
+       VALUES ('org/onDisk','mlx','generate',1000,1) ON CONFLICT DO NOTHING`)
+    await db.query(
+      `UPDATE nodes SET resident_models = '{}'::jsonb,
+                        stored_models = '{"org/onDisk": 1000}'::jsonb,
+                        last_heartbeat = now() WHERE id = $1`, [fx.nodeId])
+
+    const listed = await (await fetch(`${base}/v1/models`,
+                                      { headers: asUser(fx.operatorToken) })).json() as any
+    const held = listed.data.find((m: any) => m.id === 'org/onDisk')
+    expect(held, 'a model on disk should be offered').toBeTruthy()
+    expect(held.dai.loaded).toBe(false)
   })
 
   it('refuses a split model no operator has assigned, rather than assembling one', async () => {

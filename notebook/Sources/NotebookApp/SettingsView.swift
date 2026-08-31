@@ -36,10 +36,11 @@ struct SettingsView: View {
                 // setting being wrong.
                 Picker("Model", selection: $model) {
                     Text("Whatever the fleet is serving").tag("")
+                    // Loaded first, then the rest. Both can be served; the
+                    // ones already in memory answer immediately, and the others
+                    // pay a cold load on the first question.
                     ForEach(available) { m in
-                        Text(m.machines > 1
-                             ? "\(m.shortName) · across \(m.machines) machines"
-                             : m.shortName).tag(m.id)
+                        Text(label(for: m)).tag(m.id)
                     }
                     // A model chosen earlier that the fleet is no longer
                     // serving stays selectable rather than silently reverting,
@@ -125,6 +126,18 @@ struct SettingsView: View {
         .onDisappear(perform: save)
     }
 
+    /// How a model reads in the list.
+    ///
+    /// The name, then only what changes the decision: whether it will answer at
+    /// once or has to be loaded, and whether asking for it engages more than one
+    /// machine.
+    private func label(for m: Gateway.Model) -> String {
+        var out = m.shortName
+        if m.machines > 1 { out += " · across \(m.machines) machines" }
+        if !m.loaded { out += " · not loaded" }
+        return out
+    }
+
     /// Ask the fleet what it can serve.
     ///
     /// Failure is reported beside the control rather than thrown away: a picker
@@ -140,7 +153,11 @@ struct SettingsView: View {
                 return
             }
             do {
+                // Loaded models first: the ones that answer without a wait.
                 available = try await gateway.models()
+                    .sorted { a, b in
+                        a.loaded == b.loaded ? a.shortName < b.shortName : a.loaded
+                    }
                 if available.isEmpty { modelsProblem = "The fleet offers no models." }
             } catch {
                 modelsProblem = "\(error)"

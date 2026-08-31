@@ -40,11 +40,25 @@ const EMBED_BATCH_MAX = 256
 
 async function servableModels(db: Db, broker: Broker, groupId?: string | null) {
     const { rows } = await db.query(
+      // **Stored as well as resident.**
+      //
+      // This listed `resident_models || model_context`, so a model a machine
+      // held on disk and had not been asked to load was not offered at all. A
+      // client choosing a model could therefore only pick from what happened to
+      // be loaded at that moment, which is the smaller and more volatile half of
+      // what the fleet can actually serve: residency changes when a group is
+      // repointed or a model idles out, and possession does not.
+      //
+      // `resident` stays a separate column rather than the filter it used to be,
+      // so a caller can still tell a model that will answer immediately from one
+      // that has to be loaded first - a difference of about half a minute on a
+      // large model, and worth saying rather than hiding.
       `SELECT id AS node_id, name,
               COALESCE((model_context ->> name)::int, 0) AS context,
               (resident_models ? name) AS resident
          FROM nodes,
-              LATERAL jsonb_object_keys(resident_models || model_context) AS name
+              LATERAL jsonb_object_keys(
+                resident_models || model_context || stored_models) AS name
         WHERE state = 'active'
           AND NOT user_paused
           AND (paused_until IS NULL OR paused_until < now())
@@ -434,7 +448,14 @@ export function servingRoutes(db: Db, broker: Broker): Router {
         // OpenAI never had. A client that ignores it is unaffected; one that
         // reads it learns that asking for this model engages more than one
         // machine, which is not something the name says.
-        dai: shapeNote(m.machines),
+        dai: {
+          ...shapeNote(m.machines),
+          // Whether a machine has this loaded right now, as against merely
+          // holding the weights. Both are offered, because both can be served;
+          // the difference is about half a minute of cold load on a large model,
+          // which a caller may want to know before choosing.
+          loaded: m.resident,
+        },
       })),
     })
   })

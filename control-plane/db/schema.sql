@@ -433,6 +433,32 @@ ALTER TABLE nodes ADD COLUMN IF NOT EXISTS stored_models jsonb NOT NULL DEFAULT 
 -- most worth trying.
 ALTER TABLE nodes ADD COLUMN IF NOT EXISTS last_dispatch_at timestamptz;
 
+-- How wide this group runs the model it serves.
+--
+-- **`models.machines` and this column are different facts and were one.** The
+-- model's figure is a minimum: the fewest machines its weights can physically
+-- run on. This is a deployment: how many this group chooses to use, at or above
+-- that minimum.
+--
+-- Conflating them meant a model had exactly one shape fleet-wide, so declaring a
+-- split for one group declared it for every caller. A 8.3 GB model that fits on
+-- either machine here spent weeks requiring two of them because a split was
+-- tested with it once, and every request for it assembled a gang and refused
+-- when either machine was busy.
+--
+-- Null means "however many the model says it needs", which is what every group
+-- meant before this column existed.
+ALTER TABLE pools ADD COLUMN IF NOT EXISTS serving_machines integer;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                  WHERE conname = 'pools_serving_machines_check')
+  THEN
+    ALTER TABLE pools ADD CONSTRAINT pools_serving_machines_check
+      CHECK (serving_machines IS NULL OR serving_machines >= 1);
+  END IF;
+END $$;
+
 -- Imports in flight, and the ones that failed.
 --
 -- Separate from `models` on purpose. A model is registered only once every one

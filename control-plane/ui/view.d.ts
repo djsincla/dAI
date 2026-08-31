@@ -185,3 +185,9 @@ export function idleWindowApplies(pool: any): { applies: boolean; why: string }
 export function knobLabel(
   value: number | null | undefined, fallback: number, unit: string,
 ): string
+
+/** What a model's own figure means: the fewest machines it can run on. */
+export function minimumNote(machines: number | null | undefined): string
+
+/** How wide a group actually runs what it serves. */
+export function deploymentNote(pool: any, model: any): string

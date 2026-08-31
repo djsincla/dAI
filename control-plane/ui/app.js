@@ -15,7 +15,7 @@
 import {
   attentionItems, capacityOf, copyState, distributionOf, humanBytes, importCost,
   bucketFor, certificateStanding, clampWindow, describeTier, describeWindow,
-  effectiveModelFor, splitNote, suspensionNote,
+  deploymentNote, effectiveModelFor, minimumNote, splitNote, suspensionNote,
   groupMachines, groupMismatches,
   TIERS, tiersOf, tierToggle, needsTierFor, bothTiersNote,
   groupMode, groupWarning, importProgress, isSynthetic, kindsFor,
@@ -815,7 +815,7 @@ function renderModels(models, pools) {
       <td class="mono">${escape(m.id)}</td>
       <td>${escape(m.runtime)} &middot; ${escape(m.kind)}</td>
       <td class="num">${humanBytes(m.sizeBytes)}${
-        splitNote(m.machines) ? `<div class="split-badge">${escape(splitNote(m.machines))}</div>` : ''}</td>
+        minimumNote(m.machines) ? `<div class="split-badge">${escape(minimumNote(m.machines))}</div>` : ''}</td>
       <td class="num">${m.contextLength ? m.contextLength.toLocaleString() : '—'}</td>
       <td>${assigned.length ? assigned.map(escape).join(', ') : '<span class="dim">nowhere</span>'}</td>
       <td><span class="pill ${d.state}">${escape(d.label)}</span></td>
@@ -1358,7 +1358,7 @@ function renderGroups(nodes, pools, models) {
     // is. A split model is a different proposition from a whole one and the
     // name does not say so.
     const model = models.find((m) => m.id === g.pool.servingModelId)
-    const wide = model ? splitNote(model.machines) : ''
+    const wide = model ? deploymentNote(g.pool, model) : ''
     // A cluster group naming no model rendered as nothing at all here, which
     // read as one nobody had finished setting up. It serves whichever staged
     // model is asked for, and that is a thing it does.

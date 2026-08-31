@@ -642,7 +642,7 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
     const { rows } = await db.query(
       `SELECT id, name, tier, schedule, preempt, priority,
               agent_channel, desired_agent_version, serving_model_id, serving_port,
-              enabled, idle_unload_seconds, prompt_cache_gb
+              enabled, idle_unload_seconds, prompt_cache_gb, serving_machines
          FROM pools ORDER BY name`,
     )
     res.json(rows.map((p) => ({
@@ -668,6 +668,10 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
         ? null : Number(p.idle_unload_seconds),
       promptCacheGb: p.prompt_cache_gb === null || p.prompt_cache_gb === undefined
         ? null : Number(p.prompt_cache_gb),
+      // How wide this group runs what it serves, which is not the same as how
+      // wide the model can run. Null means it takes the model's minimum.
+      servingMachines: p.serving_machines === null || p.serving_machines === undefined
+        ? null : Number(p.serving_machines),
     })))
   })
 
@@ -1238,7 +1242,11 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
         })
         return
       }
-      await db.query(`UPDATE pools SET serving_model_id = NULL WHERE id = $1`, [poolId])
+      // The width goes with the model: a group that names none has no shape to
+      // keep, and leaving one behind would apply it to whatever is staged next.
+      await db.query(
+        `UPDATE pools SET serving_model_id = NULL, serving_machines = NULL
+          WHERE id = $1`, [poolId])
       await audit(db, req.user!.id, 'pool.serve', poolId, { modelId: null })
       const { rows: staged } = await db.query(
         `SELECT model_id FROM pool_models WHERE pool_id = $1 ORDER BY model_id`, [poolId])
@@ -1310,12 +1318,21 @@ export function adminRoutes(db: Db, ca: Ca, broker: Broker,
       }
     }
 
-    await db.query(`UPDATE models SET machines = $2 WHERE id = $1`, [modelId, machines])
+    // **Written to the group, not to the model.**
+    //
+    // This was `UPDATE models SET machines`, so serving a model wide here made it
+    // wide for every group and every caller. One test of a split left an 8.3 GB
+    // model requiring two machines fleet-wide for weeks afterwards.
+    //
+    // The model's own figure is a minimum and is set deliberately through
+    // `/models/{id}/shape`; a group asking for fewer than it is refused before
+    // reaching here.
     await db.query(
       `INSERT INTO pool_models (pool_id, model_id, assigned_by) VALUES ($1,$2,$3)
        ON CONFLICT DO NOTHING`, [poolId, modelId, req.user!.id])
     await db.query(
-      `UPDATE pools SET serving_model_id = $2 WHERE id = $1`, [poolId, modelId])
+      `UPDATE pools SET serving_model_id = $2, serving_machines = $3 WHERE id = $1`,
+      [poolId, modelId, machines])
     await audit(db, req.user!.id, 'pool.serve', poolId, { modelId, machines })
 
     res.json({

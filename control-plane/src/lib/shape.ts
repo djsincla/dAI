@@ -137,3 +137,39 @@ export function whyGroupCannotHost(machines: Machine[], shape: Shape): string | 
   }
   return null
 }
+
+/**
+ * How wide a group runs a model, against how wide the model can run at all.
+ *
+ * **These are different facts and used to be one column.** A model's `machines`
+ * is a minimum: the fewest its weights can physically run on. A group's
+ * `serving_machines` is a deployment: how many it chooses to use. Storing only
+ * the first meant a model had one shape for the whole fleet, so testing a split
+ * with an 8.3 GB model left it requiring two machines for every caller,
+ * assembling a gang for a model that fits on either machine alone.
+ *
+ * The group may go wider than the minimum and never narrower. Wider is a choice
+ * an operator is entitled to make - more machines, smaller share each, and the
+ * memory is easier to find. Narrower is not a choice, it is a model that will
+ * not fit, and it is refused here rather than discovered at load.
+ */
+export function servingWidth(
+  { modelMinimum, groupWants }: { modelMinimum: number; groupWants: number | null },
+): { machines: number; refused: string | null } {
+  const minimum = Math.max(1, Math.trunc(modelMinimum || 1))
+  if (groupWants === null || groupWants === undefined) {
+    return { machines: minimum, refused: null }
+  }
+  const wants = Math.trunc(groupWants)
+  if (!Number.isFinite(wants) || wants < 1) {
+    return { machines: minimum, refused: null }
+  }
+  if (wants < minimum) {
+    return {
+      machines: minimum,
+      refused: `this model needs at least ${minimum} machines and the group `
+             + `asks for ${wants}`,
+    }
+  }
+  return { machines: wants, refused: null }
+}

@@ -1,0 +1,858 @@
+<title>dAI — Installation and Operations Manual</title>
+<style>
+  :root {
+    --page:#FFFFFF; --card:#F4F8F7; --edge:rgba(15,59,56,.14);
+    --band:rgba(15,59,56,.04); --rule:rgba(15,59,56,.16);
+    --accent:#0D6E68; --accent-soft:rgba(13,110,104,.09);
+    --ink:#101A19; --ink2:#3D4E4C; --ink3:#637472;
+    --warn:#8A5200; --warn-soft:rgba(138,82,0,.09);
+    --danger:#A3231B; --danger-soft:rgba(163,35,27,.08);
+    --ok:#136B3A;
+    --term-bg:#0F1A19; --term-ink:#D7E4E1;
+    --sans:ui-sans-serif,-apple-system,"SF Pro Text",system-ui,sans-serif;
+    --serif:ui-serif,"New York",Georgia,serif;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --page:#0C1211; --card:#182220; --edge:rgba(255,255,255,.10);
+      --band:rgba(255,255,255,.04); --rule:rgba(255,255,255,.12);
+      --accent:#2DD4BF; --accent-soft:rgba(45,212,191,.13);
+      --ink:#E8F0EE; --ink2:#9DB0AD; --ink3:#7A8C89;
+      --warn:#F5B851; --warn-soft:rgba(245,184,81,.13);
+      --danger:#FF6B5E; --danger-soft:rgba(255,107,94,.12);
+      --ok:#54D98C; --term-bg:#080D0C; --term-ink:#D7E4E1;
+    }
+  }
+  :root[data-theme="dark"] {
+    --page:#0C1211; --card:#182220; --edge:rgba(255,255,255,.10);
+    --band:rgba(255,255,255,.04); --rule:rgba(255,255,255,.12);
+    --accent:#2DD4BF; --accent-soft:rgba(45,212,191,.13);
+    --ink:#E8F0EE; --ink2:#9DB0AD; --ink3:#7A8C89;
+    --warn:#F5B851; --warn-soft:rgba(245,184,81,.13);
+    --danger:#FF6B5E; --danger-soft:rgba(255,107,94,.12);
+    --ok:#54D98C; --term-bg:#080D0C; --term-ink:#D7E4E1;
+  }
+
+  body{background:var(--page);color:var(--ink);font-family:var(--serif);
+       font-size:16px;line-height:1.62;margin:0;padding:3rem 1.5rem 5rem;
+       -webkit-font-smoothing:antialiased}
+  .doc{max-width:48rem;margin:0 auto}
+
+  h1,h2,h3,h4{font-family:var(--sans);text-wrap:balance;margin:0}
+  h1{font-size:2.6rem;font-weight:660;letter-spacing:-.024em;line-height:1.08}
+  h2{font-size:1.6rem;font-weight:630;letter-spacing:-.015em;
+     margin:0 0 .2rem;padding-top:.4rem}
+  h3{font-size:1.06rem;font-weight:620;margin:2rem 0 .5rem}
+  h4{font-size:.78rem;font-weight:660;letter-spacing:.06em;text-transform:uppercase;
+     color:var(--ink3);margin:1.6rem 0 .5rem}
+  p{margin:0 0 1rem}
+  .lede{font-size:1.12rem;color:var(--ink2)}
+  .eyebrow{font-family:var(--mono);font-size:.72rem;letter-spacing:.1em;
+           text-transform:uppercase;color:var(--accent);margin:0 0 .7rem}
+  a{color:var(--accent)}
+  strong{font-weight:660}
+
+  section{margin-bottom:2.8rem}
+  section.part{break-before:page}
+  .part-head{border-top:3px solid var(--accent);padding-top:.9rem;margin-bottom:1.4rem}
+  .part-num{font-family:var(--mono);font-size:.75rem;letter-spacing:.1em;
+            text-transform:uppercase;color:var(--accent);display:block;margin-bottom:.3rem}
+
+  code{font-family:var(--mono);font-size:.86em}
+  p code,li code,td code{background:var(--band);padding:.1em .34em;border-radius:4px;
+      border:1px solid var(--edge)}
+
+  pre.cmd{background:var(--term-bg);color:var(--term-ink);font-family:var(--mono);
+    font-size:.8rem;line-height:1.62;padding:.9rem 1.05rem;border-radius:8px;
+    overflow-x:auto;margin:0 0 1rem;white-space:pre}
+  pre.cmd .c{color:#7A9C97}
+  pre.cmd .v{color:#F5B851}
+
+  ol,ul{margin:0 0 1rem;padding-left:1.35rem}
+  li{margin-bottom:.42rem}
+  ol.steps{counter-reset:s;list-style:none;padding-left:0}
+  ol.steps>li{counter-increment:s;position:relative;padding-left:2.4rem;
+              margin-bottom:1.5rem}
+  ol.steps>li::before{content:counter(s);position:absolute;left:0;top:.05rem;
+    width:1.65rem;height:1.65rem;border-radius:50%;background:var(--accent-soft);
+    color:var(--accent);font-family:var(--mono);font-size:.8rem;font-weight:700;
+    display:flex;align-items:center;justify-content:center}
+
+  .scroll{overflow-x:auto;margin:0 0 1rem}
+  table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:.85rem;
+        font-variant-numeric:tabular-nums}
+  th,td{text-align:left;padding:.46rem .8rem .46rem 0;
+        border-bottom:1px solid var(--rule);vertical-align:top}
+  th{font-weight:630;font-size:.71rem;letter-spacing:.05em;text-transform:uppercase;
+     color:var(--ink3);border-bottom-color:var(--accent)}
+  td.mono{font-family:var(--mono);font-size:.79rem;white-space:nowrap}
+  td.num{font-family:var(--mono);color:var(--accent);white-space:nowrap}
+
+  .note,.warn,.danger{padding:.85rem 1.05rem;border-radius:0 8px 8px 0;margin:0 0 1.1rem;
+       font-size:.95rem;break-inside:avoid}
+  .note{border-left:3px solid var(--accent);background:var(--accent-soft)}
+  .warn{border-left:3px solid var(--warn);background:var(--warn-soft)}
+  .danger{border-left:3px solid var(--danger);background:var(--danger-soft)}
+  .note strong{color:var(--accent)} .warn strong{color:var(--warn)}
+  .danger strong{color:var(--danger)}
+  .note p:last-child,.warn p:last-child,.danger p:last-child{margin-bottom:0}
+
+  .toc{background:var(--card);border:1px solid var(--edge);border-radius:10px;
+       padding:1.2rem 1.4rem;margin-bottom:2.5rem}
+  .toc h4{margin-top:0}
+  .toc ol{font-family:var(--sans);font-size:.9rem;padding-left:1.2rem}
+  .toc li{margin-bottom:.28rem}
+  .toc a{text-decoration:none} .toc a:hover{text-decoration:underline}
+
+  hr.rule{border:0;border-top:1px solid var(--rule);margin:2.2rem 0}
+  dl.gloss dt{font-family:var(--mono);font-size:.84rem;color:var(--accent);
+     font-weight:600;margin-top:.9rem}
+  dl.gloss dd{margin:.15rem 0 0;font-size:.95rem;color:var(--ink2)}
+
+  /* ------------------------------------------------------------- printing */
+  @media print {
+    /* Print is paper: one light palette, no shadows, no dark mode, and colour
+       kept only where it carries meaning. */
+    :root{--page:#fff;--card:#f6f9f8;--ink:#000;--ink2:#333;--ink3:#555;
+          --term-bg:#f2f5f4;--term-ink:#111;--edge:#bbb;--rule:#ccc}
+    body{padding:0;font-size:10.5pt;line-height:1.5}
+    .doc{max-width:none}
+    @page{margin:18mm 16mm}
+    pre.cmd{border:1px solid #ccc;font-size:8.6pt}
+    pre.cmd .c{color:#4a6a66} pre.cmd .v{color:#7a4f00}
+    h1{font-size:24pt} h2{font-size:15pt} h3{font-size:11.5pt}
+    h2,h3,h4{break-after:avoid}
+    pre.cmd,table,.note,.warn,.danger,ol.steps>li{break-inside:avoid}
+    section.part{break-before:page}
+    .toc{break-after:page}
+    a{color:inherit;text-decoration:none}
+    .no-print{display:none}
+  }
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+</style>
+
+<div class="doc">
+
+<header style="margin-bottom:2rem">
+  <p class="eyebrow">dAI · version 0.8.11</p>
+  <h1>Installation and Operations</h1>
+  <p class="lede">
+    Installing, configuring and operating a fleet of Apple Silicon machines that
+    contribute idle capacity for inference.
+  </p>
+</header>
+
+<div class="toc">
+  <h4>Contents</h4>
+  <ol>
+    <li><a href="#before">Before you begin</a></li>
+    <li><a href="#control">Part 1 — Install the control plane</a></li>
+    <li><a href="#agent">Part 2 — Add a machine</a></li>
+    <li><a href="#operate">Part 3 — Everyday operations</a></li>
+    <li><a href="#upgrade">Part 4 — Upgrading</a></li>
+    <li><a href="#trouble">Part 5 — When it goes wrong</a></li>
+    <li><a href="#remove">Part 6 — Giving a machine back</a></li>
+    <li><a href="#reference">Reference — ports, policy, glossary</a></li>
+  </ol>
+</div>
+
+<!-- ============================================================== BEFORE -->
+<section id="before">
+  <h2>Before you begin</h2>
+
+  <h4>What you need</h4>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Thing</th><th>Where</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>macOS 14 or later</td><td>every machine</td><td>Apple Silicon only</td></tr>
+        <tr><td>PostgreSQL 14+</td><td>control plane host</td>
+            <td>the one prerequisite the installer cannot supply; see Part 1 step 1</td></tr>
+        <tr><td>Homebrew</td><td>control plane host</td>
+            <td>to install and supervise PostgreSQL; not needed by the
+                packages themselves</td></tr>
+        <tr><td>Command line tools</td><td>control plane host</td>
+            <td>a Homebrew prerequisite; already present if Xcode is</td></tr>
+        <tr><td>Docker Desktop</td><td>control plane host</td>
+            <td>only if you choose the container route instead, and separately
+                licensed</td></tr>
+        <tr><td>An always-on Mac</td><td>control plane host</td>
+            <td>may also be a fleet machine; ours is</td></tr>
+        <tr><td>Network reachability</td><td>agents → control plane</td>
+            <td>outbound only; nothing dials in to a fleet machine</td></tr>
+        <tr><td>~18 GB free</td><td>per fleet machine</td>
+            <td>per large model held</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h4>What you get</h4>
+  <p>
+    Two packages. <code>dai-control-<em>version</em>.pkg</code> installs the
+    control plane as a system daemon on one machine.
+    <code>dai-agent-<em>version</em>.pkg</code> installs the agent as a system
+    daemon on every machine that lends capacity. Both are re-runnable and safe on
+    a machine that is currently working.
+  </p>
+</section>
+
+<!-- ============================================================= PART 1 -->
+<section class="part" id="control">
+  <div class="part-head">
+    <span class="part-num">Part 1</span>
+    <h2>Install the control plane</h2>
+  </div>
+  <p>One machine. Do this first: an agent with nothing to enrol against waits.</p>
+
+  <ol class="steps">
+    <li>
+      <h3>Install PostgreSQL</h3>
+      <p>
+        The one dependency the installer cannot supply. Everything else — the
+        Node runtime, the TLS material, the schema — is in the package or made by
+        it. Version 14 or later.
+      </p>
+
+      <h4>First, Homebrew and the command line tools</h4>
+      <p>
+        On a machine that has never had developer tools, both are needed. The
+        Homebrew installer will offer to fetch the command line tools itself; on
+        a machine with Xcode already installed there is nothing to do.
+      </p>
+      <pre class="cmd"><span class="c"># only if `xcode-select -p` prints nothing</span>
+xcode-select --install
+
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"</pre>
+      <p>
+        On Apple Silicon Homebrew installs to <code>/opt/homebrew</code>, which is
+        not on the default <code>PATH</code>. The installer prints the two lines
+        to fix that; they are repeated here because skipping them is the usual
+        reason <code>brew: command not found</code> appears in a new shell.
+      </p>
+      <pre class="cmd">echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' &gt;&gt; ~/.zprofile
+eval "$(/opt/homebrew/bin/brew shellenv)"
+brew --version                       <span class="c"># prove it before going on</span></pre>
+      <div class="note">
+        <p><strong>The control plane package does not need Homebrew.</strong> It
+        carries its own Node runtime. Homebrew is here only to install and
+        supervise PostgreSQL, so a site that already runs Postgres another way
+        can skip all of this.</p>
+      </div>
+
+      <h4>Then PostgreSQL, native under launchd — the recommended way</h4>
+      <p>
+        No container runtime, no licensing question, and the same start-at-boot
+        mechanism the control plane itself uses.
+      </p>
+      <pre class="cmd">brew install postgresql@17
+sudo brew services start postgresql@17</pre>
+
+      <div class="danger">
+        <p><strong>Plain <code>brew services start</code> is not enough, and the
+        difference is invisible until you reboot.</strong> Run as your user it
+        installs a Launch<em>Agent</em>, which starts when you log in. The
+        control plane is a Launch<em>Daemon</em> and starts at boot. A machine
+        that reboots unattended comes up with a control plane that cannot reach
+        its database, and the failure looks like the fleet rather than the
+        database.</p>
+      </div>
+
+      <p>
+        <code>sudo brew services start</code> puts it in
+        <code>/Library/LaunchDaemons</code>, which is right, and then two things
+        go wrong that are worth knowing before they happen rather than after.
+      </p>
+
+      <h4>Fixing what sudo brew services leaves behind</h4>
+      <p>
+        <strong>It writes the plist without a <code>UserName</code>,</strong> so
+        launchd runs the server as root and PostgreSQL refuses:
+        <code>"root" execution of the PostgreSQL server is not permitted</code>.
+        With <code>KeepAlive</code> set it then retries forever, filling the log.
+      </p>
+      <p>
+        <strong>And it writes the plist <code>root:admin</code></strong>, where
+        launchd requires <code>root:wheel</code> for anything in
+        <code>/Library/LaunchDaemons</code>. The symptom is
+        <code>Bootstrap failed: 5: Input/output error</code>, which says nothing
+        about ownership.
+      </p>
+      <pre class="cmd">sudo plutil -insert UserName -string <span class="v">$(whoami)</span> \
+  /Library/LaunchDaemons/homebrew.mxcl.postgresql@17.plist
+sudo chown root:wheel /Library/LaunchDaemons/homebrew.mxcl.postgresql@17.plist</pre>
+
+      <div class="warn">
+        <p><strong>Then reload it with a bootout that waits.</strong>
+        <code>launchctl bootout</code> is asynchronous: it returns when the job
+        has been asked to stop, not when it has stopped, and bootstrapping into a
+        label that still exists fails with the same
+        <code>5: Input/output error</code>. Until the old job is really gone,
+        launchd keeps running the definition it cached — so a corrected plist on
+        disk changes nothing and every symptom stays identical.</p>
+      </div>
+      <pre class="cmd">sudo /usr/local/libexec/dai-control/reload-daemon.sh \
+  system homebrew.mxcl.postgresql@17 \
+  /Library/LaunchDaemons/homebrew.mxcl.postgresql@17.plist</pre>
+      <p>
+        The helper ships with the control plane and is not specific to it.
+      </p>
+
+      <h4>Prove it, twice</h4>
+      <pre class="cmd">psql -h localhost -p <span class="v">5433</span> -d postgres -c 'select 1'
+ps -o user= -p $(pgrep -f "bin/postgres" | head -1)   <span class="c"># must not be root</span>
+
+<span class="c"># the property that actually matters: launchd restarts it</span>
+sudo kill -9 $(pgrep -f "bin/postgres" | head -1)
+sleep 5 &amp;&amp; pg_isready -h localhost -p <span class="v">5433</span></pre>
+      <div class="note">
+        <p>Verify that launchd restarts the server, not merely that a process is
+        present. A server that runs until something stops it does not satisfy the
+        requirement.</p>
+      </div>
+
+      <h4>Choosing the port</h4>
+      <p>
+        The fleet's URL names <strong>5433</strong>. Set
+        <code>port = 5433</code> in
+        <code>/opt/homebrew/var/postgresql@17/postgresql.conf</code> rather than
+        changing the URL, and nothing else — plist, scripts, notes — has to
+        change. If you are migrating from an existing database, run the new
+        server on a spare port first, prove it, and move it to 5433 only when the
+        old one is stopped.
+      </p>
+
+      <h4>Creating the role and database</h4>
+      <p>
+        Only needed if you are restoring a dump. For a new fleet the installer
+        creates both.
+      </p>
+      <pre class="cmd">psql -h localhost -p 5433 -d postgres -c "create role dai login password 'dai' superuser"
+psql -h localhost -p 5433 -d postgres -c "create database dai owner dai"</pre>
+
+      <h4>If you would rather use a container</h4>
+      <p>
+        <code>control-plane/docker-compose.yml</code> brings up
+        <code>postgres:17-alpine</code> on 5433. It carries a named volume and
+        <code>restart: unless-stopped</code>; both are required for production use. Note that a restart policy
+        only acts once the container runtime is running, so the runtime itself
+        must start at login or boot — which is the fragility the native install
+        avoids.
+      </p>
+      <div class="warn">
+        <p><strong>Docker Desktop is separately licensed</strong> above a
+        small-business threshold, while the Engine and CLI are Apache-2.0.
+        Apple's <code>container</code> is a native alternative but has no compose
+        support. For the database holding fleet state, the native install has fewer dependencies.</p>
+      </div>
+
+    <li>
+      <h3>Install the package</h3>
+      <pre class="cmd">sudo installer -pkg <span class="v">dai-control-0.8.11.pkg</span> -target /</pre>
+      <p>This lays down a bundled Node runtime, the server, the schema and the
+      helper scripts under <code>/usr/local/libexec/dai-control</code>. It starts
+      nothing.</p>
+    </li>
+
+    <li>
+      <h3>Configure and start it</h3>
+      <pre class="cmd">sudo /usr/local/libexec/dai-control/install.sh \
+    --db <span class="v">postgres://dai:dai@localhost:5433/dai</span> \
+    --hostname <span class="v">control.example.com</span></pre>
+      <p>This generates TLS material if absent, applies the schema, writes the
+      launch daemon and starts it. It prints the console address and the CA
+      certificate path the agents will need.</p>
+      <div class="note">
+        <p><strong>Keep the CA path it prints.</strong> Every agent needs that
+        file. The fleet issues its own certificates, so the system trust store
+        does not know them, and the alternative to distributing the CA is
+        disabling validation — which would also accept anything else on that
+        address.</p>
+      </div>
+    </li>
+
+    <li>
+      <h3>Sign in and change the password</h3>
+      <p>Open <code>https://<em>hostname</em>:8452/ui/</code> and sign in as
+      <code>admin</code> / <code>admin</code>. It will make you choose a password
+      before anything else works.</p>
+      <p>The bootstrap account is created on every start, but only when no
+      account has a password. It cannot resurrect itself on an established fleet
+      and cannot undo a password change.</p>
+    </li>
+  </ol>
+
+  <h3>Restricting who can reach what</h3>
+  <p>
+    Four surfaces share port 8452 and each takes its own CIDR allow-list, set in
+    the daemon's environment. <code>/monitor/v1</code> is closed entirely unless
+    a CIDR is configured — the alternative is a long-lived secret in a scraper
+    config that nobody rotates.
+  </p>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Variable</th><th>Guards</th><th>Empty means</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">DAI_AGENT_CIDRS</td><td class="mono">/agent/v1</td><td>any address (mTLS still required)</td></tr>
+        <tr><td class="mono">DAI_ADMIN_CIDRS</td><td class="mono">/admin/v1</td><td>any address (credential still required)</td></tr>
+        <tr><td class="mono">DAI_MONITOR_CIDRS</td><td class="mono">/monitor/v1</td><td><strong>closed</strong></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ============================================================= PART 2 -->
+<section class="part" id="agent">
+  <div class="part-head">
+    <span class="part-num">Part 2</span>
+    <h2>Add a machine</h2>
+  </div>
+  <p>
+    One package for every site. What differs between machines is a single
+    configuration file.
+  </p>
+
+  <ol class="steps">
+    <li>
+      <h3>Mint a join token, on the control plane</h3>
+      <pre class="cmd">./scripts/dai-fleet token --hours <span class="v">24</span></pre>
+      <p>Tokens expire, and are best minted per machine. The same command is
+      available as <code>POST /admin/v1/join-tokens</code>.</p>
+    </li>
+
+    <li>
+      <h3>Write the config on the new machine</h3>
+      <p>At <code>/Library/Application Support/dAI/config.json</code>, with the
+      CA certificate beside it:</p>
+      <pre class="cmd">{
+  "url": "https://<span class="v">control.example.com</span>:8452",
+  "joinToken": "<span class="v">…</span>",
+  "caPath": "/Library/Application Support/dAI/server-ca.crt"
+}</pre>
+      <p>Optional keys worth knowing: <code>model</code> pins what this machine
+      serves, <code>aneModel</code> points at a Core ML embedder, and
+      <code>pipelineInterface</code> names the interface used for split traffic.</p>
+    </li>
+
+    <li>
+      <h3>Install the package</h3>
+      <pre class="cmd">sudo installer -pkg <span class="v">dai-agent-0.8.11.pkg</span> -target /</pre>
+      <p>The daemon starts, generates a key inside the Secure Enclave, signs a
+      certificate request with it and enrols. The private key never leaves the
+      Enclave, so copying the disk does not copy the identity.</p>
+      <p>
+        Enrolment happens in the daemon rather than the command line tool,
+        because the Secure Enclave requires an unlocked keybag.
+        <code>dai enroll</code> run as a signed-in user cannot do it and reports
+        so.
+      </p>
+    </li>
+
+    <li>
+      <h3>Approve it</h3>
+      <pre class="cmd">./scripts/dai-fleet pending
+./scripts/dai-fleet approve <span class="v">studio-01</span></pre>
+      <p>Or from the console's Machines page. Until approved, a machine is
+      enrolled and idle.</p>
+    </li>
+
+    <li>
+      <h3>Give it tiers, a group, and weights</h3>
+      <p>A correctly added machine looks idle for a long time. It needs to be in
+      a pool, and it needs the model files, which are transferred by the agent
+      and take as long as ~18 GB takes on your network.</p>
+      <pre class="cmd">./scripts/dai-fleet versions   <span class="c"># what each machine runs</span></pre>
+    </li>
+  </ol>
+
+  <div class="note">
+    <p><strong>Harvest or cluster.</strong> A harvest machine is somebody's
+    workstation and is handed back the moment they touch it. A cluster machine is
+    dedicated and never preempted, which is what interactive serving needs: a
+    conversation needs a model that is still resident a minute from now, and the
+    harvest tier cannot promise that by design. A machine may be in both.</p>
+  </div>
+</section>
+
+<!-- ============================================================= PART 3 -->
+<section class="part" id="operate">
+  <div class="part-head">
+    <span class="part-num">Part 3</span>
+    <h2>Everyday operations</h2>
+  </div>
+
+  <h3>Is it working?</h3>
+  <pre class="cmd">curl -sk https://localhost:8452/healthz
+<span class="c">{"ok":true,"surface":"both","version":"0.8.11"}</span></pre>
+
+  <p>Then the machines. The three fields that matter are on one line:</p>
+  <pre class="cmd">curl -sk https://localhost:8452/admin/v1/nodes \
+  -H "authorization: Bearer <span class="v">daik_…</span>" | python3 -m json.tool</pre>
+
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Field</th><th>Means</th><th>Watch for</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">serving</td><td>holding the dispatch channel open</td>
+            <td><code>false</code> = cannot be routed to, whatever else is true</td></tr>
+        <tr><td class="mono">presenceState</td><td>whether somebody is at it</td>
+            <td>drives the completion cap</td></tr>
+        <tr><td class="mono">residentModels</td><td>loaded in memory now</td>
+            <td>not the same as on disk</td></tr>
+        <tr><td class="mono">lastHeartbeat</td><td>seconds since it spoke</td>
+            <td>&gt;120s and it drops out of routing</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="warn">
+    <p><strong><code>residentModels</code> and stored models are different
+    facts.</strong> Resident is what a runtime holds in memory; stored is what is
+    on disk. Reading one for the other has cost this project an afternoon more
+    than once. "Nobody is serving this" and "nobody has the weights" need
+    different actions.</p>
+  </div>
+
+  <h3>Serving a model</h3>
+  <p>
+    Assign the model to a pool, then point the pool at it. The agents transfer
+    the weights themselves and report holding them.
+  </p>
+  <pre class="cmd">PUT  /admin/v1/pools/<span class="v">{poolId}</span>/models/<span class="v">{modelId}</span>   <span class="c"># stage it</span>
+PUT  /admin/v1/pools/<span class="v">{poolId}</span>/serving-model            <span class="c"># serve it</span>
+GET  /admin/v1/pools/<span class="v">{poolId}</span>/models                   <span class="c"># heldBy / loadedOn</span></pre>
+
+  <h3>Splitting a model across machines</h3>
+  <pre class="cmd">./scripts/dai-split prepare <span class="v">mlx-community/Qwen2.5-Coder-32B-Instruct-4bit</span> --machines 2
+./scripts/dai-split up
+./scripts/dai-split status
+./scripts/dai-split down</pre>
+  <p>
+    A split runs as a gang: every rank is admitted together or none is. Half a
+    pipeline is not a slower answer, it is a request that hangs while holding
+    memory on machines that could have been doing something else.
+  </p>
+
+  <h3>Giving a machine back temporarily</h3>
+  <pre class="cmd">POST /admin/v1/nodes/<span class="v">{nodeId}</span>/pause
+POST /admin/v1/nodes/<span class="v">{nodeId}</span>/resume</pre>
+  <p>
+    The owner's pause applies on every tier and has no override. A dedicated box
+    is still somebody's machine.
+  </p>
+
+  <h3>Proving the backup, and the empty-server path</h3>
+  <p>
+    Both procedures below have been tested against a throwaway PostgreSQL instance
+    on a spare port, leaving production untouched.
+  </p>
+  <pre class="cmd"><span class="c"># a server with no dai database at all, which is the real starting state</span>
+docker run -d --name dai-restore-test \
+  -e POSTGRES_USER=dai -e POSTGRES_PASSWORD=dai -e POSTGRES_DB=postgres \
+  -p <span class="v">5439</span>:5432 postgres:17-alpine
+
+<span class="c"># what the installer does: creates the database, applies the schema</span>
+DATABASE_URL='postgres://dai:dai@localhost:<span class="v">5439</span>/dai' \
+  /usr/local/libexec/dai-control/node /usr/local/libexec/dai-control/dist/migrate.js
+<span class="c"># created database dai
+# schema applied; 25 tables</span>
+
+<span class="c"># then restore a dump over it and count what came back</span>
+gzcat <span class="v">dai-20260830.sql.gz</span> | docker exec -i dai-restore-test psql -U dai -d dai
+docker exec dai-restore-test psql -U dai -d dai -tAc \
+  "select count(*) from nodes"
+
+docker rm -f dai-restore-test</pre>
+  <div class="note">
+    <p><strong>The empty-server path needs nothing but the URL.</strong>
+    <code>migrate.js</code> creates the database if it is missing, applies all 25
+    tables, and seeds the <code>admin</code> account with a forced password
+    change. So a brand new deployment needs a reachable Postgres <em>server</em>
+    and nothing prepared inside it.</p>
+  </div>
+
+  <h3>Backing up</h3>
+  <p>
+    The database holds node identities, the certificate authority, every
+    machine's certificate, pools, models and work records. If it is lost,
+    agents present certificates the control plane no longer recognises and
+    every machine must be enrolled again.
+  </p>
+  <pre class="cmd">pg_dump postgres://dai:dai@localhost:5433/dai \
+  | gzip &gt; dai-$(date +%Y%m%d).sql.gz</pre>
+  <p>
+    Run this on a schedule. If PostgreSQL runs in a container without a named
+    volume, this dump is the only copy of the fleet's state.
+  </p>
+  <p>
+    The uninstaller never touches the database, with or without
+    <code>--purge</code>. Removing it is a decision made deliberately, with a
+    database tool.
+  </p>
+</section>
+
+<!-- ============================================================= PART 4 -->
+<section class="part" id="upgrade">
+  <div class="part-head">
+    <span class="part-num">Part 4</span>
+    <h2>Upgrading</h2>
+  </div>
+
+  <h3>The control plane: two commands</h3>
+  <pre class="cmd">sudo installer -pkg <span class="v">dai-control-0.8.12.pkg</span> -target /
+sudo /usr/local/libexec/dai-control/install.sh</pre>
+
+  <div class="danger">
+    <p><strong>The second command is not optional.</strong> The package puts new
+    code on disk and does nothing else: it does not apply the schema and it does
+    not restart the daemon. Install it alone and the old process keeps serving
+    until something restarts it — and when something does, the new code meets the
+    old database and refuses every request with a message naming a column it
+    expects and cannot find. This failure has occurred in practice.</p>
+  </div>
+
+  <p>
+    <code>install.sh</code> needs no arguments on a machine that is already
+    installed. The database URL, port and network rules are read back out of the
+    installed plist, and the TLS material is left alone because an authority
+    already exists. A flag still wins if you give one, so a value can be
+    corrected without reinstalling.
+  </p>
+  <p>
+    Expect a few seconds of downtime: agents' channels drop and reconnect, and
+    any in-flight question fails.
+  </p>
+
+  <h3>The agents: register, then repoint</h3>
+  <pre class="cmd">./scripts/dai-fleet release <span class="v">0.8.12</span> --binary <span class="v">dist/0.8.12/dai-agent-0.8.12.pkg</span></pre>
+  <p>
+    Then point every pool at the new version, <strong>including stood-down
+    ones</strong>. A pool left on the old build will pull machines back to it.
+  </p>
+
+  <div class="danger">
+    <p><strong>Do not install the agent package by hand.</strong> The updater
+    reverts it to whatever the pool asks for, in about a second. An agent log
+    once read <code>upgrading to 0.7.0</code> one second after a 0.8.0 install.
+    Deploying an agent means registering a build.</p>
+  </div>
+
+  <h3>Verifying</h3>
+  <pre class="cmd">curl -sk https://localhost:8452/healthz          <span class="c"># control plane version</span>
+./scripts/dai-fleet versions                     <span class="c"># each machine, against target</span></pre>
+</section>
+
+<!-- ============================================================= PART 5 -->
+<section class="part" id="trouble">
+  <div class="part-head">
+    <span class="part-num">Part 5</span>
+    <h2>When it goes wrong</h2>
+  </div>
+  <p>
+    Every failure seen on this fleet so far, and what it actually was. The
+    pattern is worth naming: <strong>each one failed quietly and blamed the
+    wrong component.</strong>
+  </p>
+
+  <h3><code>no active nodes are connected</code></h3>
+  <p>
+    No machine is holding a dispatch channel. Check <code>serving</code> in the
+    node list, not <code>state</code> or <code>lastHeartbeat</code>.
+  </p>
+  <ul>
+    <li><strong>Asleep.</strong> The commonest cause by far. Wake it, or stop it
+      sleeping.</li>
+    <li><strong>Busy.</strong> A machine mid-generation is not polling. A 30s
+      cold load plus a 45s answer is 75 seconds of looking absent.</li>
+    <li><strong>Paused.</strong> The owner's pause, which has no override.</li>
+  </ul>
+
+  <h3><code>column "…" does not exist</code></h3>
+  <p>
+    New code, old database. You installed the package without running
+    <code>install.sh</code>. Run it now; it is safe on a running machine.
+  </p>
+
+  <h3>Every request goes to the same machine</h3>
+  <p>
+    Expected, if the others are busier, less free, or lack the model. The router
+    orders candidates: least busy, then freest of its owner, then holds the
+    model, then measured throughput, then longest since it was last given work.
+  </p>
+  <p>
+    If it is the <em>wrong</em> machine — the one somebody is sitting at — check
+    that the others are <code>serving=true</code>. A machine that is asleep or
+    paused is not a candidate at all, and no preference can pick it.
+  </p>
+
+  <h3>Answers stop mid-sentence</h3>
+  <p>
+    Presence policy, not <code>max_tokens</code>. Read
+    <code>dai.maxTokensApplied</code> and <code>dai.cappedByPolicy</code> in the
+    response. A machine somebody is using allows 256 tokens; locked allows 2,048
+    and logged out 4,096. Raising the request limit changes nothing — the answer
+    has to land on a freer machine.
+  </p>
+
+  <h3>The first answer takes 30 seconds, the rest are instant</h3>
+  <p>
+    A cold model load, or a prompt-cache miss. Both are normal. The cache keys on
+    longest common prefix, measured at 34.6s cold against 0.8s warm, which is why
+    a repeated question is fast and a changed one is not.
+  </p>
+  <p>
+    If it happens repeatedly, the model is being unloaded between questions:
+    look at the pool's idle-unload window.
+  </p>
+
+  <h3>A machine holds the model and never loads it</h3>
+  <p>
+    Residency follows dispatch. Until the machine is given work, it holds weights
+    and loads nothing. Check <code>heldBy</code> against <code>loadedOn</code> in
+    <code>GET /admin/v1/pools/{poolId}/models</code>.
+  </p>
+
+  <h3>brew upgrade postgresql@17 refuses</h3>
+  <p>
+    <code>sudo brew services start</code> takes root ownership of several
+    Homebrew paths, and warns as it does so. Later upgrades and reinstalls of
+    that formula then fail until those paths are removed by hand.
+  </p>
+  <pre class="cmd">sudo rm -rf /opt/homebrew/opt/postgresql@17 \
+            /opt/homebrew/var/homebrew/linked/postgresql@17
+brew upgrade postgresql@17</pre>
+  <p>
+    This is a consequence of supervising PostgreSQL as a system daemon rather
+    than a per-user service, which is required for it to start at boot.
+  </p>
+
+  <h3>Nothing works after a reboot</h3>
+  <p>
+    Check the database first. The control plane is a launch daemon and starts
+    itself at boot; whether its database does depends entirely on how Postgres
+    was installed.
+  </p>
+  <pre class="cmd">psql postgres://dai:dai@localhost:5433/dai -c 'select 1'
+ps -o user= -p $(pgrep -f "bin/postgres" | head -1)</pre>
+  <ul>
+    <li><strong>Native, as a LaunchDaemon</strong> in
+      <code>/Library/LaunchDaemons</code>: starts at boot, no login needed. This
+      is the arrangement to want.</li>
+    <li><strong>Native, as a LaunchAgent</strong> in
+      <code>~/Library/LaunchAgents</code>: starts only when that user logs in. A
+      machine that reboots unattended comes up with no database.</li>
+    <li><strong>In a container</strong>: needs the runtime to start on its own
+      <em>and</em> a restart policy on the container. A restart policy alone does
+      nothing if the runtime is not running.</li>
+  </ul>
+  <p>
+    In each case the control plane is running but cannot serve requests.
+  </p>
+
+  <h3>Reading the agent log</h3>
+  <pre class="cmd">tail -f /var/log/dai/agent.log
+tail -f /var/log/dai/updater.log     <span class="c"># self-update decisions</span>
+tail -f /var/log/dai-control         <span class="c"># control plane</span></pre>
+</section>
+
+<!-- ============================================================= PART 6 -->
+<section class="part" id="remove">
+  <div class="part-head">
+    <span class="part-num">Part 6</span>
+    <h2>Giving a machine back</h2>
+  </div>
+  <pre class="cmd">sudo /usr/local/libexec/dai/uninstall.sh            <span class="c"># keeps the identity</span>
+sudo /usr/local/libexec/dai/uninstall.sh --purge    <span class="c"># enrol it again later</span></pre>
+  <p>
+    Without <code>--purge</code>, the machine keeps its Secure Enclave key and
+    certificate, so reinstalling rejoins the same fleet as the same node. With
+    it, the identity is destroyed and the machine must be enrolled and approved
+    again.
+  </p>
+  <p>
+    Revoke from the control plane too, or the fleet will keep a certificate it
+    should not honour:
+  </p>
+  <pre class="cmd">POST /admin/v1/nodes/<span class="v">{nodeId}</span>/revoke</pre>
+</section>
+
+<!-- =========================================================== REFERENCE -->
+<section class="part" id="reference">
+  <div class="part-head">
+    <span class="part-num">Reference</span>
+    <h2>Ports, policy and words</h2>
+  </div>
+
+  <h3>Ports</h3>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Port</th><th>On</th><th>Opened by</th><th>Carries</th></tr></thead>
+      <tbody>
+        <tr><td class="num">8452</td><td>control plane</td><td>callers and agents</td>
+            <td>serving, admin, agent, monitor, console</td></tr>
+        <tr><td class="num">8460–8499</td><td>control plane</td><td>callers</td>
+            <td>one socket per group; the port is the routing</td></tr>
+        <tr><td class="num">7710</td><td>fleet machine</td><td>peer rank</td>
+            <td>pipeline tensors, only while a split runs</td></tr>
+        <tr><td class="num">5433</td><td>control plane</td><td>itself</td>
+            <td>Postgres</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>
+    Agents open every connection outward. No fleet machine listens for work, so
+    there is no inbound port on a workstation to firewall or get wrong.
+  </p>
+
+  <h3 id="policy">The presence policy</h3>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>State</th><th>Means</th><th>GPU</th><th>Memory</th><th>Max completion</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">ACTIVE</td><td>somebody is typing</td><td>no</td><td class="num">0%</td><td class="num">256</td></tr>
+        <tr><td class="mono">PASSIVE</td><td>logged in, not touching it</td><td>no</td><td class="num">15%</td><td class="num">256</td></tr>
+        <tr><td class="mono">IDLE</td><td>idle a while</td><td>no</td><td class="num">35%</td><td class="num">256</td></tr>
+        <tr><td class="mono">LOCKED</td><td>screen locked</td><td>yes</td><td class="num">70%</td><td class="num">2 048</td></tr>
+        <tr><td class="mono">ABSENT</td><td>logged out</td><td>yes</td><td class="num">85%</td><td class="num">4 096</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="note">
+    <p><strong>Cluster machines are exempt from the gate, not from the
+    preference.</strong> A cluster machine serves whatever its presence, because
+    interactive work needs it to. But the router still prefers the freest machine
+    available, so work moves to the one nobody is using — and the completion cap
+    still follows the presence of whichever machine answers.</p>
+  </div>
+
+  <h3>Words that mean something specific</h3>
+  <dl class="gloss">
+    <dt>harvest</dt>
+    <dd>A tier. Somebody's workstation, handed back the moment they touch it.</dd>
+    <dt>cluster</dt>
+    <dd>A tier. Dedicated, never preempted. What interactive serving needs.</dd>
+    <dt>presence</dt>
+    <dd>Whether somebody is at a machine, derived from input idle time, screen
+        lock and console ownership. Drives what the machine may do.</dd>
+    <dt>resident</dt>
+    <dd>Loaded in a runtime, in memory, now. Not the same as stored.</dd>
+    <dt>stored</dt>
+    <dd>On disk. A machine can hold 18 GB of weights and be serving none of it.</dd>
+    <dt>gang</dt>
+    <dd>The set of machines running one split model. Admitted whole or not at all.</dd>
+    <dt>group / pool</dt>
+    <dd>A set of machines with a socket of their own and a model they serve.</dd>
+    <dt>dispatch</dt>
+    <dd>One unit of work handed to one machine. Nothing streams: a completion goes
+        as one unit so that preemption has a bounded worst case.</dd>
+  </dl>
+
+  <hr class="rule">
+  <p style="font-size:.85rem;color:var(--ink3)">
+    Written against dAI 0.8.11. All commands have been executed against a live
+    fleet. Known failure modes are documented alongside the procedures that
+    trigger them.
+  </p>
+</section>
+
+</div>

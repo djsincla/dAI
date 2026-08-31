@@ -1,13 +1,33 @@
+# The fleet's database. Everything that matters is in here: node identities, the
+# certificate authority, every machine's certificate, pools, models and work. A
+# fleet that loses this does not lose its history, it loses its machines - every
+# agent then presents a certificate the control plane no longer recognises.
+#
+# Two things below are not development conveniences and should not be removed.
+#
+# `restart: unless-stopped`, because the control plane is a launch daemon and
+# starts itself at boot while a container does not. Without it, a reboot leaves
+# the server running and unable to reach its database, which fails in a way that
+# looks like the fleet rather than the database.
+#
+# A *named* volume, because the default is an anonymous one identified only by a
+# hash. This ran that way for months: the fleet's whole identity sat in a volume
+# nothing named, which `docker compose down -v` destroys without a question.
 services:
   postgres:
     image: postgres:17-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_USER: dai
       POSTGRES_PASSWORD: dai
       POSTGRES_DB: dai
     ports: ["5433:5432"]
+    volumes: ["dai-db:/var/lib/postgresql/data"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U dai"]
       interval: 2s
       timeout: 3s
       retries: 20
+
+volumes:
+  dai-db:

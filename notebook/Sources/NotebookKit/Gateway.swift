@@ -188,6 +188,68 @@ public actor Gateway {
         return "\(question)\n\nPassages:\n\n\(rendered)"
     }
 
+    // ---------------------------------------------------------- the catalogue
+
+    /// A model the fleet can serve now.
+    public struct Model: Sendable, Equatable, Identifiable, Hashable {
+        public let id: String
+        /// How much it can read, when the fleet knows.
+        public let contextLength: Int?
+        /// How many machines it runs across. More than one is a split model.
+        public let machines: Int
+
+        /// The last path component, which is what a person recognises.
+        public var shortName: String {
+            String(id.split(separator: "/").last ?? Substring(id))
+        }
+    }
+
+    /// What can actually be served, as against a catalogue of what exists.
+    ///
+    /// **Asked of the fleet rather than typed by hand.** Choosing the generation
+    /// model used to mean knowing an exact model id and entering it in Settings,
+    /// where a typo produced a refusal at the next question rather than at the
+    /// moment of the mistake.
+    ///
+    /// Embedding models are filtered out. They appear here because the fleet
+    /// serves them, and offering one as a generation model would produce a
+    /// refusal that reads as the fleet being broken.
+    public func models() async throws -> [Model] {
+        guard let key = credential(), !key.isEmpty else { throw Failure.noCredential }
+        var request = URLRequest(url: configuration.baseURL
+            .appendingPathComponent("v1/models"))
+        request.setValue("Bearer \(key)", forHTTPHeaderField: "authorization")
+        request.timeoutInterval = 30
+
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()
+        } catch {
+            throw Failure.unreachable("\(error.localizedDescription)")
+        }
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            throw Failure.refused(status: code, message: "could not list models")
+        }
+        guard let object = try? JSONSerialization.jsonObject(with: data)
+                as? [String: Any],
+              let rows = object["data"] as? [[String: Any]] else {
+            throw Failure.malformed("no data array")
+        }
+        return rows.compactMap { row in
+            guard let id = row["id"] as? String else { return nil }
+            // An embedding model is not a choice a question can use.
+            guard !id.hasPrefix("ane:"),
+                  !id.lowercased().contains("embedding") else { return nil }
+            let dai = row["dai"] as? [String: Any]
+            return Model(id: id,
+                         contextLength: row["context_length"] as? Int,
+                         machines: (dai?["machines"] as? Int) ?? 1)
+        }
+    }
+
     // --------------------------------------------------------------- sending
 
     private func send(_ path: String, body: [String: Any],

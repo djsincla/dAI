@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { isRefusal, selectNode, type Candidate } from '../src/lib/router.js'
+import { isRefusal, residentGenerationModel, selectNode,
+  type Candidate } from '../src/lib/router.js'
 
 /**
  * Which of two equal machines gets the work.
@@ -252,5 +253,48 @@ describe('residency against presence', () => {
       node('orca', { last_dispatch_at: AGO(90) }),
     ]
     expect(chosen(selectNode(pool, 'generate', 'm'))).toBe('orca')
+  })
+})
+
+/**
+ * Which model actually answered.
+ *
+ * A caller that names no model gets whatever the fleet is serving, and the
+ * response used to say `default` - true about the request and useless about the
+ * answer. notebookMLX recorded that word as the generation model of every turn
+ * it had ever written, so a record built to say what produced an answer said
+ * "default" instead.
+ */
+describe('naming the model that answered', () => {
+  const held = (...models: string[]): Candidate => ({
+    id: 'n', hostname: 'n', presence_state: 'ABSENT',
+    resident_models: Object.fromEntries(models.map((m) => [m, 1])),
+    capability_profiles: {}, in_flight: 0,
+  })
+
+  it('names the one generation model a node holds', () => {
+    expect(residentGenerationModel(held('mlx-community/Qwen3-30B')))
+      .toBe('mlx-community/Qwen3-30B')
+  })
+
+  /** Every node holds the ANE probe; it never generates. */
+  it('ignores the embedding probe', () => {
+    expect(residentGenerationModel(held('ane:embed', 'mlx-community/Qwen3-30B')))
+      .toBe('mlx-community/Qwen3-30B')
+    expect(residentGenerationModel(held('ane:embed'))).toBeNull()
+  })
+
+  /**
+   * The refusal that matters. Naming the wrong model in a provenance record is
+   * worse than naming none, so ambiguity is reported rather than guessed.
+   */
+  it('names nothing when a node holds more than one generation model', () => {
+    expect(residentGenerationModel(held('a/one', 'b/two'))).toBeNull()
+  })
+
+  it('names nothing for a node holding nothing, or for no node', () => {
+    expect(residentGenerationModel(held())).toBeNull()
+    expect(residentGenerationModel(null)).toBeNull()
+    expect(residentGenerationModel(undefined)).toBeNull()
   })
 })

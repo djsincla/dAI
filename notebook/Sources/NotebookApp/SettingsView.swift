@@ -12,6 +12,9 @@ struct SettingsView: View {
     @State private var model = GatewaySettings.model
     @State private var maxTokens = GatewaySettings.maxTokens
     @State private var appearance = Appearance.current
+    @State private var available: [Gateway.Model] = []
+    @State private var loadingModels = false
+    @State private var modelsProblem: String?
     @State private var key = Credentials.read() ?? ""
     @State private var result: String?
     @State private var testing = false
@@ -25,8 +28,42 @@ struct SettingsView: View {
                               prompt: Text("the installer prints this path"))
                     Button("Choose…") { choose() }
                 }
-                TextField("Model", text: $model,
-                          prompt: Text("leave empty to let the fleet choose"))
+                // A picker fed from the fleet, not a field to type an id into.
+                //
+                // The previous field required knowing an exact model id, and a
+                // typo did not fail here: it failed at the next question, as a
+                // refusal that reads as the fleet being broken rather than as a
+                // setting being wrong.
+                Picker("Model", selection: $model) {
+                    Text("Whatever the fleet is serving").tag("")
+                    ForEach(available) { m in
+                        Text(m.machines > 1
+                             ? "\(m.shortName) · across \(m.machines) machines"
+                             : m.shortName).tag(m.id)
+                    }
+                    // A model chosen earlier that the fleet is no longer
+                    // serving stays selectable rather than silently reverting,
+                    // which would look like the setting not saving.
+                    if !model.isEmpty && !available.contains(where: { $0.id == model }) {
+                        Text("\(model.split(separator: "/").last.map(String.init) ?? model) · not offered now")
+                            .tag(model)
+                    }
+                }
+                .disabled(available.isEmpty && model.isEmpty)
+                HStack(spacing: 8) {
+                    Button(loadingModels ? "Loading…" : "Refresh from fleet") {
+                        loadModels()
+                    }
+                    .disabled(loadingModels)
+                    if let modelsProblem {
+                        Text(modelsProblem).font(.caption)
+                            .foregroundStyle(Palette.warning)
+                    } else if !available.isEmpty {
+                        Text(available.count == 1 ? "1 model offered"
+                                                  : "\(available.count) models offered")
+                            .font(.caption).foregroundStyle(Palette.inkSecondary)
+                    }
+                }
             }
             Section("Appearance") {
                 // A segmented picker rather than a toggle, because there are
@@ -84,7 +121,31 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 520)
         .padding()
+        .onAppear(perform: loadModels)
         .onDisappear(perform: save)
+    }
+
+    /// Ask the fleet what it can serve.
+    ///
+    /// Failure is reported beside the control rather than thrown away: a picker
+    /// that is simply empty cannot be told apart from a fleet with nothing to
+    /// offer, and the two need different actions.
+    private func loadModels() {
+        loadingModels = true
+        modelsProblem = nil
+        Task {
+            defer { loadingModels = false }
+            guard let gateway = AskBar.gateway() else {
+                modelsProblem = "Set the gateway and a key first."
+                return
+            }
+            do {
+                available = try await gateway.models()
+                if available.isEmpty { modelsProblem = "The fleet offers no models." }
+            } catch {
+                modelsProblem = "\(error)"
+            }
+        }
     }
 
     private func save() {

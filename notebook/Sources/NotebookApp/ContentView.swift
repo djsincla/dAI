@@ -1196,6 +1196,17 @@ struct Provenance: View {
             if turn.wasTruncated, let applied = turn.maxTokensApplied {
                 Text("cut at \(applied)").foregroundStyle(Palette.warning)
             }
+            // What wrote the answer.
+            //
+            // Recorded since generation existed and never shown, so the line
+            // named the model that found the passages and not the one that
+            // produced the words. Omitted when the fleet reports "default",
+            // which is what it says when nobody named a model and it declined
+            // to resolve one: printing that word would assert a model called
+            // default had answered.
+            if let generation, generation != "default" {
+                Text(generation)
+            }
             Spacer(minLength: 0)
             // The embedding model is the least urgent of these and is the one
             // that never changes within a notebook, so it sits at the far end
@@ -1213,6 +1224,12 @@ struct Provenance: View {
 
     private var model: String {
         turn.embeddingModel.split(separator: "/").last.map(String.init) ?? ""
+    }
+
+    private var generation: String? {
+        turn.generationModel.map {
+            String($0.split(separator: "/").last ?? Substring($0))
+        }
     }
 
     /// Presence states under which a harvested machine limits completions.

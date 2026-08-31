@@ -3,7 +3,8 @@ import type { Db } from '../lib/db.js'
 import type { Broker } from '../lib/broker.js'
 import { userAuth } from '../lib/auth.js'
 import { POLICY, type PresenceState, type WorkKind } from '../lib/policy.js'
-import { candidatesFor, isRefusal, selectGang, selectNode,
+import { candidatesFor, isRefusal, residentGenerationModel,
+  selectGang, selectNode,
          type Candidate, type Refusal } from '../lib/router.js'
 import { shapeOf } from '../lib/shape.js'
 import { membersOf } from '../lib/pools.js'
@@ -533,7 +534,7 @@ export function servingRoutes(db: Db, broker: Broker): Router {
       id: `chatcmpl-${started}`,
       object: 'chat.completion',
       created: Math.floor(started / 1000),
-      model: modelHash ?? 'default',
+      model: modelHash ?? residentGenerationModel(choice) ?? 'default',
       choices: [{
         index: 0,
         message: { role: 'assistant', content: result.text },
@@ -771,7 +772,7 @@ export function servingRoutes(db: Db, broker: Broker): Router {
         connection: 'keep-alive',
       })
       send('message_start', { type: 'message_start', message: {
-        id, type: 'message', role: 'assistant', model: modelHash ?? 'default',
+        id, type: 'message', role: 'assistant', model: modelHash ?? residentGenerationModel(choice) ?? 'default',
         content: [], stop_reason: null, stop_sequence: null,
         // Not yet known: the node has not read the prompt. The final
         // message_delta carries the real figures, as it does upstream.
@@ -1005,7 +1006,7 @@ export function servingRoutes(db: Db, broker: Broker): Router {
       id,
       type: 'message',
       role: 'assistant',
-      model: modelHash ?? 'default',
+      model: modelHash ?? residentGenerationModel(choice) ?? 'default',
       content,
       stop_reason: stopReason,
       stop_sequence: null,

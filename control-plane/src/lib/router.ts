@@ -360,3 +360,25 @@ export async function candidatesFor(db: Db, inFlight: Map<string, number>,
     in_flight: inFlight.get(n.id) ?? 0,
   }))
 }
+
+/**
+ * The generation model a node is actually holding, when that is unambiguous.
+ *
+ * A caller that names no model gets whatever the fleet is serving, and the
+ * response said `default` - which is true of the request and useless about the
+ * answer. A client recording provenance then recorded the word "default" as the
+ * model that wrote every answer it had.
+ *
+ * Read from residency rather than from the group's intent, because residency is
+ * what the node had loaded when it answered; a group can be pointed at a model
+ * a machine has not taken yet.
+ *
+ * Probes are excluded: `ane:embed` is loaded on every node and never generates.
+ * Ambiguity is reported as null rather than guessed, because naming the wrong
+ * model in a provenance record is worse than naming none.
+ */
+export function residentGenerationModel(c: Candidate | null | undefined): string | null {
+  const held = Object.keys(c?.resident_models ?? {})
+    .filter((m) => !m.startsWith('ane:'))
+  return held.length === 1 ? held[0]! : null
+}

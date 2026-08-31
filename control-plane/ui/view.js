@@ -1148,6 +1148,36 @@ export function splitNote(machines) {
   return n > 1 ? `${n} machines` : ''
 }
 
+/**
+ * What a model's own figure means, which is not what a group's means.
+ *
+ * `models.machines` is the fewest machines the weights can run on. It used to
+ * be the deployment as well, so serving a model wide in one group made it wide
+ * for every caller, and the catalogue read "2 machines" for an 8.3 GB model that
+ * fits on either machine alone. Saying "needs" is the difference between a
+ * requirement and a decision.
+ */
+export function minimumNote(machines) {
+  const n = Math.max(1, Math.trunc(Number(machines) || 1))
+  return n > 1 ? `needs ${n} machines` : ''
+}
+
+/**
+ * How wide a group actually runs what it serves.
+ *
+ * The group's choice where it has made one, the model's minimum otherwise.
+ * Shown only when it is more than one machine, because "across 1 machine" is
+ * what everything does and says nothing.
+ */
+export function deploymentNote(pool, model) {
+  const wants = pool?.servingMachines
+  const minimum = Math.max(1, Math.trunc(Number(model?.machines) || 1))
+  const n = wants === null || wants === undefined
+    ? minimum
+    : Math.max(minimum, Math.trunc(Number(wants) || 1))
+  return n > 1 ? `across ${n} machines` : ''
+}
+
 /* -------------------------------------------------------------- readiness */
 
 /**

@@ -16,7 +16,7 @@ import {
   bucketFor, certificateStanding, clampWindow, effectiveModelFor, groupMismatches,
   splitNote, suspensionNote, describeWindow, groupMachines,
   groupMode, groupWarning, importProgress, isStale, isSynthetic, kindsFor,
-  expiresIn, idleWindowApplies, knobLabel,
+  deploymentNote, expiresIn, idleWindowApplies, knobLabel, minimumNote,
   machinesThatCouldHold, matchesQuery, MAX_WINDOW_S, MIN_WINDOW_S, nextSort,
   pauseAction, progressOf, runsGpu, servingFor, sortRows, windowFromDrag,
   withFreshness,
@@ -1561,5 +1561,43 @@ describe('knob labels', () => {
   /** Zero is a value somebody chose, not an absence. */
   it('treats zero as set', () => {
     expect(knobLabel(0, 8, ' GB')).toBe('0 GB')
+  })
+})
+
+/**
+ * A model's minimum against a group's deployment.
+ *
+ * These were one number, so the catalogue said "2 machines" about an 8.3 GB
+ * model that fits on either machine alone - a split tested once with it, made
+ * permanent and fleet-wide. The words have to differ because the facts do: one
+ * is what the weights require, the other is what an operator chose.
+ */
+describe('machine counts', () => {
+  it('says a model needs machines, and says nothing when it needs one', () => {
+    expect(minimumNote(2)).toBe('needs 2 machines')
+    expect(minimumNote(1)).toBe('')
+    expect(minimumNote(null)).toBe('')
+  })
+
+  it('reports what a group runs, which may be wider than the minimum', () => {
+    expect(deploymentNote({ servingMachines: 2 }, { machines: 1 }))
+      .toBe('across 2 machines')
+  })
+
+  /** Unset means the group takes whatever the model requires. */
+  it('falls back to the model minimum when the group has not chosen', () => {
+    expect(deploymentNote({ servingMachines: null }, { machines: 2 }))
+      .toBe('across 2 machines')
+    expect(deploymentNote({}, { machines: 1 })).toBe('')
+  })
+
+  /** A group cannot run a model on fewer machines than it needs. */
+  it('never reports narrower than the model minimum', () => {
+    expect(deploymentNote({ servingMachines: 1 }, { machines: 2 }))
+      .toBe('across 2 machines')
+  })
+
+  it('says nothing for a single machine, which is what everything does', () => {
+    expect(deploymentNote({ servingMachines: 1 }, { machines: 1 })).toBe('')
   })
 })

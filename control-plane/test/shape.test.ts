@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { RUNTIME_HEADROOM, runnability, shapeOf, whyGroupCannotHost } from '../src/lib/shape.js'
+import { servingWidth, RUNTIME_HEADROOM, runnability, shapeOf, whyGroupCannotHost } from '../src/lib/shape.js'
 
 /**
  * What a model needs, and whether a group can give it.
@@ -151,5 +151,41 @@ describe('whether a group can run it now', () => {
     const shape = shapeOf({ size_bytes: SEVENTY_TWO_B, machines: 1 })
     expect(runnability([m('mini', 8, true), m('rotorua', 51.8, false)], shape).state)
       .toBe('pending')
+  })
+})
+
+/**
+ * How wide a group runs a model, against how wide the model can run at all.
+ *
+ * The two were one column, so a model had a single shape fleet-wide and testing
+ * a split with an 8.3 GB model left it requiring two machines for every caller
+ * afterwards. A group can now choose, within what the weights allow.
+ */
+describe('serving width', () => {
+  it('uses the model minimum when the group has not chosen', () => {
+    expect(servingWidth({ modelMinimum: 1, groupWants: null }).machines).toBe(1)
+    expect(servingWidth({ modelMinimum: 2, groupWants: null }).machines).toBe(2)
+  })
+
+  /** The case this exists for: one model, two deployments. */
+  it('lets one group split a model another runs whole', () => {
+    expect(servingWidth({ modelMinimum: 1, groupWants: 2 }).machines).toBe(2)
+    expect(servingWidth({ modelMinimum: 1, groupWants: 1 }).machines).toBe(1)
+  })
+
+  /**
+   * Wider is a choice; narrower is a model that will not fit. Refused here
+   * rather than discovered when a machine tries to load it.
+   */
+  it('refuses a group that asks for fewer machines than the model needs', () => {
+    const r = servingWidth({ modelMinimum: 2, groupWants: 1 })
+    expect(r.refused).toContain('at least 2')
+    expect(r.machines).toBe(2)
+  })
+
+  it('treats nonsense as unset rather than as zero machines', () => {
+    expect(servingWidth({ modelMinimum: 2, groupWants: 0 }).machines).toBe(2)
+    expect(servingWidth({ modelMinimum: 1, groupWants: -3 }).machines).toBe(1)
+    expect(servingWidth({ modelMinimum: 1, groupWants: NaN }).machines).toBe(1)
   })
 })

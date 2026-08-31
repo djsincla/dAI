@@ -6,7 +6,7 @@ import { POLICY, type PresenceState, type WorkKind } from '../lib/policy.js'
 import { candidatesFor, isRefusal, residentGenerationModel,
   selectGang, selectNode,
          type Candidate, type Refusal } from '../lib/router.js'
-import { shapeOf } from '../lib/shape.js'
+import { servingWidth, shapeOf } from '../lib/shape.js'
 import { membersOf } from '../lib/pools.js'
 import { splitReport } from '../lib/splitReport.js'
 import { assignRanks } from '../lib/splitRanks.js'
@@ -236,7 +236,6 @@ async function gangFor(
   if (rows.length === 0) return null
 
   const shape = shapeOf(rows[0] as never)
-  if (shape.machines <= 1) return null
 
   // A split runs where an operator said it should, and nowhere else.
   //
@@ -260,26 +259,52 @@ async function gangFor(
   // would accept any model in the catalogue and fail at dispatch, with the
   // machines discovering the weights were never there.
   const { rows: serving } = await db.query(
-    `SELECT id, name FROM pools p
+    `SELECT id, name, serving_machines FROM pools p
       WHERE p.tier = 'cluster' AND p.enabled
         AND (p.serving_model_id = $1
              OR (p.serving_model_id IS NULL
                  AND EXISTS (SELECT 1 FROM pool_models pm
                               WHERE pm.pool_id = p.id AND pm.model_id = $1)))`,
     [modelId])
-  if (serving.length === 0) {
-    return { refusal: {
-      refused: 'not-offered',
-      detail: `${modelId} runs across ${shape.machines} machines, and no cluster group `
-        + 'is serving it or has been staged it. A split runs where an operator has '
-        + 'assigned it, because it takes those machines out of harvesting for as long '
-        + 'as it stands.',
-    } }
+  // **The group decides the width, not the model.**
+  //
+  // This asked the model first: `machines > 1` meant split, and then a cluster
+  // group had to be found or the request was refused. So a model had one shape
+  // for the whole fleet, and testing a split with an 8.3 GB model left every
+  // caller assembling a gang for something that fits on either machine alone.
+  //
+  // Now the model states a minimum and the group states a deployment. A model
+  // no cluster group is serving wide runs on one machine, which is what the
+  // catalogue always said it could do; a model whose minimum is above one and
+  // which no group serves is still refused, because that one genuinely cannot
+  // run alone.
+  const widest = serving.reduce((best, p) => {
+    const w = servingWidth({
+      modelMinimum: shape.machines,
+      groupWants: (p as { serving_machines: number | null }).serving_machines,
+    })
+    return w.machines > best.machines ? { machines: w.machines, pool: p } : best
+  }, { machines: 1, pool: null as unknown })
+
+  if (widest.machines <= 1) {
+    // Nothing here wants it wide. If the model itself cannot run alone, say so;
+    // otherwise it is an ordinary single-machine request.
+    if (shape.machines > 1) {
+      return { refusal: {
+        refused: 'not-offered',
+        detail: `${modelId} needs at least ${shape.machines} machines, and no `
+          + 'cluster group is serving it that wide or has been staged it. A split runs where an operator '
+          + 'has assigned it, because it takes those machines out of harvesting '
+          + 'for as long as it stands.',
+      } }
+    }
+    return null
   }
+
   const offered = new Set(serving.map((p) => p.id as string))
   const eligible = connected.filter((c) => c.group_id != null && offered.has(c.group_id))
 
-  const gang = selectGang(eligible, 'generate', modelId, shape.machines)
+  const gang = selectGang(eligible, 'generate', modelId, widest.machines)
   if (isRefusal(gang)) return { refusal: gang }
 
   // Where each machine can be reached for pipeline traffic. Declared by the

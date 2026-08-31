@@ -26,7 +26,8 @@ import {
   isReadOnly, matchesOperation, operationsFrom, responseSize, statusTone,
   whyNotCallable,
   rankLine, readinessSummary, shouldKeepWatching,
-  groupAddress, servableChoices, serveConsequences,
+  expiresIn, groupAddress, idleWindowApplies, knobLabel,
+  servableChoices, serveConsequences,
   servingLine, stagedLines, unpinConsequences,
 } from './view.js'
 
@@ -393,6 +394,11 @@ function renderNodes(nodes, details) {
  * the alternative - putting drawer state in the URL - would make a poll that
  * changes nothing look like navigation.
  */
+// Mirrors src/lib/groupRules.ts. Shown as placeholders so an empty field reads
+// as the fleet's value rather than as nothing.
+const DEFAULT_IDLE_UNLOAD = 300
+const DEFAULT_PROMPT_CACHE_GB = 8
+
 const drawer = {
   stack: [],
 
@@ -446,6 +452,180 @@ const drawer = {
       $('#drawer-body').innerHTML = `<p class="dim">${escape(err.message)}</p>`
     }
   },
+}
+
+
+/**
+ * Minting a token that lets a machine enrol.
+ *
+ * **The token is shown once and never again.** The control plane stores it and
+ * returns it only from the call that creates it; every later listing shows the
+ * first eight characters so a token can be recognised and revoked, and nothing
+ * more. So the mint step puts the value on screen with a copy button and says
+ * plainly that closing the drawer loses it, rather than presenting it as a row
+ * somebody can come back to.
+ *
+ * This was the last thing an operator could not do from here. Adding a machine
+ * began with a shell script, which made the first step of using the fleet the
+ * one step that had no console.
+ */
+function showJoinTokens() {
+  drawer.open({
+    kind: 'Add a machine',
+    title: 'join tokens',
+    async body() {
+      const tokens = await api('/join-tokens')
+      return `
+      <p class="dim">A machine enrols with a join token, then waits to be
+         approved. Tokens expire, and one per machine is easier to withdraw than
+         one shared by all of them.</p>
+
+      <label class="field">Valid for
+        <select id="jt-hours">
+          <option value="1">1 hour</option>
+          <option value="24" selected>24 hours</option>
+          <option value="168">7 days</option>
+          <option value="720">30 days</option>
+        </select>
+      </label>
+      <label class="field">Note <span class="hint">optional, for your own records</span>
+        <input id="jt-note" type="text" placeholder="studio-01" maxlength="120">
+      </label>
+      <button class="primary" id="jt-mint">Mint a token</button>
+      <div id="jt-minted"></div>
+
+      <h3 class="drawer-h">Existing tokens</h3>
+      ${tokens.length === 0
+        ? '<p class="dim">None. A machine cannot enrol until one exists.</p>'
+        : `<table class="mini"><thead><tr>
+             <th>Token</th><th>Expires</th><th>Used</th><th></th>
+           </tr></thead><tbody>
+           ${tokens.map((t) => `
+             <tr>
+               <td class="mono">${escape(t.prefix)}&hellip;</td>
+               <td>${escape(expiresIn(t.expiresAt))}</td>
+               <td>${t.usedAt
+                     ? escape(new Date(t.usedAt).toLocaleDateString())
+                     : '<span class="hint">no</span>'}</td>
+               <td><button class="link danger" data-revoke="${escape(t.prefix)}"
+                     >revoke</button></td>
+             </tr>`).join('')}
+           </tbody></table>`}`
+    },
+    mount(root) {
+      root.querySelector('#jt-mint')?.addEventListener('click', async () => {
+        const hours = Number(root.querySelector('#jt-hours').value)
+        const note = root.querySelector('#jt-note').value.trim()
+        try {
+          const out = await api('/join-tokens', {
+            method: 'POST',
+            body: { expiresInHours: hours, note: note || undefined },
+          })
+          // Rendered here rather than re-fetching the list, because the list
+          // cannot show this value and re-rendering would throw it away.
+          root.querySelector('#jt-minted').innerHTML = `
+            <div class="minted">
+              <p class="consequence warn">Copy this now. It is not stored in a
+                 form this page can show again.</p>
+              <code class="token" id="jt-value">${escape(out.token)}</code>
+              <button class="link" id="jt-copy">Copy</button>
+            </div>`
+          root.querySelector('#jt-copy').addEventListener('click', async () => {
+            await navigator.clipboard.writeText(out.token)
+            toast('token copied')
+          })
+        } catch (err) {
+          toast(err.message, true)
+        }
+      })
+
+      root.querySelectorAll('[data-revoke]').forEach((btn) =>
+        btn.addEventListener('click', async () => {
+          const prefix = btn.dataset.revoke
+          if (!confirm(`Revoke token ${prefix}…?\n\n`
+              + 'A machine that has not yet enrolled with it will not be able to.')) return
+          try {
+            await api(`/join-tokens/${encodeURIComponent(prefix)}`, { method: 'DELETE' })
+            toast('token revoked')
+            drawer.render()
+          } catch (err) {
+            toast(err.message, true)
+          }
+        }))
+    },
+  })
+}
+
+
+/**
+ * The two per-group numbers that had an API and no console.
+ *
+ * Both are "unset means follow the fleet", and that is the part worth getting
+ * right in the interface: leaving a field empty is a different instruction from
+ * typing the default into it, because one tracks the fleet and the other pins a
+ * number that happens to match it today.
+ */
+function showGroupTuning(poolId, pools) {
+  const pool = (pools ?? []).find((p) => p.id === poolId)
+  const idle = idleWindowApplies(pool)
+
+  drawer.open({
+    kind: 'Tuning',
+    title: pool?.name ?? 'group',
+    body: () => `
+      <p class="dim">Both follow the fleet unless this group says otherwise.
+         Clearing a field returns it to the fleet's value rather than setting
+         zero.</p>
+
+      <label class="field">Idle unload
+        <span class="hint">how long these machines hold a model once nothing is
+          being asked of them</span>
+        <input id="tune-idle" type="number" min="1" step="1"
+               ${idle.applies ? '' : 'disabled'}
+               placeholder="${escape(String(DEFAULT_IDLE_UNLOAD))}"
+               value="${escape(pool?.idleUnloadSeconds ?? '')}">
+      </label>
+      ${idle.applies
+        ? `<p class="hint">Currently ${escape(
+             knobLabel(pool?.idleUnloadSeconds, DEFAULT_IDLE_UNLOAD, 's'))}.</p>`
+        : `<p class="consequence warn">${escape(idle.why)}</p>`}
+
+      <label class="field">Prompt cache
+        <span class="hint">memory each machine may keep for warm conversations,
+          in gigabytes</span>
+        <input id="tune-cache" type="number" min="0" step="0.5"
+               placeholder="${escape(String(DEFAULT_PROMPT_CACHE_GB))}"
+               value="${escape(pool?.promptCacheGb ?? '')}">
+      </label>
+      <p class="hint">Currently ${escape(
+        knobLabel(pool?.promptCacheGb, DEFAULT_PROMPT_CACHE_GB, ' GB'))}.
+        A machine clamps this to what it can afford.</p>
+
+      <button class="primary" id="tune-save">Save</button>`,
+
+    mount(root) {
+      root.querySelector('#tune-save').addEventListener('click', async () => {
+        const idleField = root.querySelector('#tune-idle')
+        const cacheField = root.querySelector('#tune-cache')
+        // Empty means "follow the fleet", which the API spells as null.
+        const seconds = idleField.value.trim() === '' ? null : Number(idleField.value)
+        const gb = cacheField.value.trim() === '' ? null : Number(cacheField.value)
+        try {
+          if (idle.applies) {
+            await api(`/pools/${poolId}/idle-unload`,
+              { method: 'PUT', body: { seconds } })
+          }
+          await api(`/pools/${poolId}/prompt-cache`,
+            { method: 'PUT', body: { gb } })
+          toast('saved; machines take it on their next heartbeat')
+          drawer.close()
+          refresh()
+        } catch (err) {
+          toast(err.message, true)
+        }
+      })
+    },
+  })
 }
 
 
@@ -1210,13 +1390,17 @@ function renderGroups(nodes, pools, models) {
                    : line.title)}"
                  >serve a model</button>`
       : ''
+    // On every group, unlike "serve a model": the prompt cache budget applies to
+    // both tiers, and the idle window explains its own absence inside.
+    const tuning = `<button class="link" data-tune="${escape(g.pool.id)}"
+             title="Idle unload and prompt cache for this group">tuning</button>`
     const sharedMark = shared
       ? `<span class="triangle warn" title="${escape(shared.detail)}">&#9650;</span>
          <span class="hint warn">${escape(shared.label)}</span>`
       : ''
     return card(g.pool.name, `${state}${g.pool.tier} tier, ${mode}${at}${serves}`,
                 g.nodes, g.pool.id,
-                warning, sharedMark + serve + socket + stand + remove, off, readiness)
+                warning, sharedMark + serve + tuning + socket + stand + remove, off, readiness)
   }).join('') + (ungrouped.length > 0
     ? card('In no group', 'not scheduled by any pool, and holding no assigned models',
       ungrouped, null, null)
@@ -1228,6 +1412,8 @@ function renderGroups(nodes, pools, models) {
   // Deleting asks first, and what it asks with is the control plane's own
   // sentence rather than a generic "are you sure": the refusal names the jobs,
   // the assignments and the machines, which is the part somebody needs to weigh.
+  box.querySelectorAll('[data-tune]').forEach((btn) =>
+    btn.addEventListener('click', () => showGroupTuning(btn.dataset.tune, pools)))
   box.querySelectorAll('[data-serve]').forEach((btn) =>
     btn.addEventListener('click', (ev) => {
       ev.stopPropagation()
@@ -1846,6 +2032,7 @@ const VIEWS = {
         aggressive for a particular machine.
       </p>
       ${searchBox('nodes', 'Search machines')}
+      <button id="add-machine">Add a machine</button>
       <button id="new-group" class="primary">New group</button>
     </header>
     <div id="groups"></div>
@@ -2323,6 +2510,7 @@ function mount(name) {
   }
   if (name === 'machines') {
     $('#new-group').addEventListener('click', createGroup)
+    $('#add-machine').addEventListener('click', showJoinTokens)
   }
   if (name === 'overview') bindChartDrag()
   if (name === 'logs') bindLogControls()

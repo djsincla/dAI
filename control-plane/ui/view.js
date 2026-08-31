@@ -1358,3 +1358,62 @@ export function groupAddress(pool, origin) {
   })()
   return `https://${host}:${pool.servingPort}`
 }
+
+/**
+ * How long a join token has left, in the coarsest unit that is still true.
+ *
+ * Hours up to two days and days beyond that, because the decision a token's
+ * expiry informs is "will this still work when I get to that machine", and an
+ * answer to the minute invites reading it as a countdown.
+ *
+ * An expired token is called expired rather than shown as a negative interval.
+ * It is still listed, because it is still a row somebody may want to revoke and
+ * tidy away, but it can no longer let a machine in.
+ */
+export function expiresIn(iso, now = Date.now()) {
+  if (!iso) return 'never'
+  const at = new Date(iso).getTime()
+  if (!Number.isFinite(at)) return 'unknown'
+  const ms = at - now
+  if (ms <= 0) return 'expired'
+  const hours = Math.round(ms / 3_600_000)
+  if (hours < 1) return 'under an hour'
+  return hours < 48 ? `in ${hours}h` : `in ${Math.round(hours / 24)}d`
+}
+
+/**
+ * Whether an idle-unload window means anything for this group.
+ *
+ * A cluster group with a model pinned to it is never sent one: dedicated means
+ * loaded, and a window would describe a release that never happens. An
+ * *unpinned* cluster group does need one, because it holds whatever it was last
+ * asked for, and without a window the first caller's model stays in memory for
+ * as long as the group stands - chosen by whoever asked first rather than by an
+ * operator.
+ *
+ * Returned as a reason rather than a boolean so the control can say why it is
+ * absent instead of simply not being there.
+ */
+export function idleWindowApplies(pool) {
+  if (!pool) return { applies: false, why: 'no group' }
+  if (pool.tier === 'cluster' && pool.servingModelId) {
+    return {
+      applies: false,
+      why: 'a cluster group pinned to a model holds it loaded; there is nothing '
+         + 'to release',
+    }
+  }
+  return { applies: true, why: '' }
+}
+
+/**
+ * How a knob's current value reads when nobody has set one.
+ *
+ * "Not set" and "set to the same number as the default" are different facts: the
+ * first follows the fleet if the fleet changes, the second does not.
+ */
+export function knobLabel(value, fallback, unit) {
+  return value === null || value === undefined
+    ? `fleet default (${fallback}${unit})`
+    : `${value}${unit}`
+}

@@ -21,10 +21,22 @@ const SCRATCH = 'postgres://dai:dai@localhost:5433/dai_backup_test'
 let db: Db
 let dir: string
 
+/**
+ * Reached over TCP rather than through a container.
+ *
+ * This shelled out to `docker exec control-plane-postgres-1` and so described
+ * one way of running Postgres rather than the one the fleet uses. When the
+ * control plane moved to a native server under launchd the container stopped,
+ * and this file failed with "container is not running" - a suite that was
+ * testing the deployment instead of the backup.
+ *
+ * The URL is the same one the rest of the file already used for its own
+ * connection, so a server anywhere works: container, native, or another host.
+ */
 const psql = (sql: string, database = 'dai_backup_test') =>
-  execFileSync('docker', [
-    'exec', '-i', 'control-plane-postgres-1',
-    'psql', '-q', '-t', '-A', '-U', 'dai', '-d', database, '-c', sql,
+  execFileSync('psql', [
+    `postgres://dai:dai@localhost:5433/${database}`,
+    '-q', '-t', '-A', '-c', sql,
   ], { encoding: 'utf8' }).trim()
 
 beforeAll(async () => {

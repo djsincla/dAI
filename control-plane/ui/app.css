@@ -823,3 +823,25 @@ th.sortable.desc::after { content: ' \2193'; opacity: 1; color: var(--accent); }
   border: 1px solid var(--rule, rgba(127,127,127,.3)); border-radius: 4px;
   background: inherit; color: inherit; font: inherit;
 }
+
+/* ------------------------------------------------- join tokens
+   The minted value is deliberately loud and deliberately transient: it exists
+   on screen once, and the listing underneath can only ever show a prefix. */
+.drawer-h {
+  font-size: 13px; font-weight: 600; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--muted);
+  margin: 26px 0 0;
+}
+.minted {
+  margin: 14px 0 4px; padding: 12px 14px;
+  border: 1px solid var(--warn-fg); border-radius: 8px;
+  background: var(--warn-bg);
+}
+.minted .consequence { margin: 0 0 8px; }
+code.token {
+  display: block; font-size: 13px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-all; user-select: all;
+  padding: 8px 10px; margin-bottom: 8px;
+  background: var(--flat-bg); border: 1px solid var(--line); border-radius: 6px;
+}

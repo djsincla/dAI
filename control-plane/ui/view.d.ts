@@ -174,3 +174,14 @@ export function stagedLines(r: any): {
 export function unpinConsequences(
   pool: any, staged: any[],
 ): { level: 'note' | 'cost' | 'blocked'; text: string }[]
+
+/** How long a join token has left, in the coarsest unit that is still true. */
+export function expiresIn(iso: string | null | undefined, now?: number): string
+
+/** Whether an idle-unload window means anything for this group. */
+export function idleWindowApplies(pool: any): { applies: boolean; why: string }
+
+/** How a knob reads when nobody has set one: unset follows the fleet. */
+export function knobLabel(
+  value: number | null | undefined, fallback: number, unit: string,
+): string

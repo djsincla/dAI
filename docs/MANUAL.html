@@ -414,10 +414,24 @@ psql -h localhost -p 5433 -d postgres -c "create database dai owner dai"</pre>
 
   <ol class="steps">
     <li>
-      <h3>Mint a join token, on the control plane</h3>
-      <pre class="cmd">./scripts/dai-fleet token --hours <span class="v">24</span></pre>
-      <p>Tokens expire, and are best minted per machine. The same command is
-      available as <code>POST /admin/v1/join-tokens</code>.</p>
+      <h3>Mint a join token</h3>
+      <p>
+        In the console: <strong>Machines &rarr; Add a machine</strong>. Choose how
+        long it should be valid for, add a note if you want one, and mint it.
+      </p>
+      <div class="warn">
+        <p><strong>The token is shown once.</strong> The control plane keeps only
+        enough to recognise and revoke it, so the listing shows the first eight
+        characters and nothing more. Copy it before closing the drawer.</p>
+      </div>
+      <p>Or from a script:</p>
+      <pre class="cmd">./scripts/dai-fleet token --hours <span class="v">24</span>
+<span class="c"># or POST /admin/v1/join-tokens {"expiresInHours": 24}</span></pre>
+      <p>
+        Tokens expire and are best minted one per machine: withdrawing one is
+        then a decision about one machine rather than about all of them. The same
+        drawer lists existing tokens with their expiry and revokes any of them.
+      </p>
     </li>
 
     <li>
@@ -631,6 +645,14 @@ GET  /admin/v1/pools/<span class="v">{poolId}</span>/models                   <s
     -d '{"machines":2}'</pre>
 
   <h3>Splitting a model across machines</h3>
+  <p>
+    In the console this is <strong>serve a model</strong> on a cluster group's
+    card, and the field is <em>"Across how many machines"</em>. Nothing in the
+    interface uses the word split; the card reports the result as
+    "across 2 machines". The link appears only on cluster groups, because a
+    harvest group's machines are preemptible and a split rank cannot be
+    preempted.
+  </p>
   <p>Four conditions must hold. The fleet reports which one does not.</p>
   <div class="scroll">
     <table>
@@ -690,6 +712,36 @@ curl -sk https://<span class="v">host</span>:8452/admin/v1/agent/rollout -H "aut
     reports comes from its plist and can remain stale after a self-update. The
     fingerprint is the hash of the running executable. Machines pick up a new
     build within 120 seconds.</p>
+  </div>
+
+  <h3>Idle unload and prompt cache</h3>
+  <p>
+    Two per-group numbers, on the group's <strong>tuning</strong> link in the
+    console or by API. Both follow the fleet unless the group overrides them, and
+    clearing a field returns it to the fleet's value rather than setting zero.
+  </p>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Knob</th><th>Default</th><th>What it decides</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">idle-unload</td><td class="num">300s</td>
+            <td>How long these machines hold a model once nothing is being asked
+                of them.</td></tr>
+        <tr><td class="mono">prompt-cache</td><td class="num">8 GB</td>
+            <td>Memory each machine may keep for warm conversations. The machine
+                clamps this to what it can afford.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <pre class="cmd">curl -sk -X PUT https://<span class="v">host</span>:8452/admin/v1/pools/<span class="v">{id}</span>/idle-unload \
+    -H "authorization: Bearer $TOK" -d '{"seconds":<span class="v">600</span>}'   <span class="c"># null for the default</span></pre>
+  <div class="note">
+    <p><strong>A cluster group pinned to a model has no idle window</strong>, and
+    the console disables the field and says so. Dedicated means loaded, so a
+    window would describe a release that never happens. An <em>unpinned</em>
+    cluster group does have one: it holds whatever it was last asked for, and
+    without a window the first caller's model stays in memory for as long as the
+    group stands.</p>
   </div>
 
   <h3>Certificates</h3>

@@ -197,6 +197,12 @@ public actor Gateway {
         public let contextLength: Int?
         /// How many machines it runs across. More than one is a split model.
         public let machines: Int
+        /// Whether a machine has it loaded now, as against holding the weights.
+        ///
+        /// Both are offered, because both can be served. The difference is about
+        /// half a minute of cold load on a large model, which is worth knowing
+        /// before choosing rather than discovering as a slow first answer.
+        public let loaded: Bool
 
         /// The last path component, which is what a person recognises.
         public var shortName: String {
@@ -246,7 +252,8 @@ public actor Gateway {
             let dai = row["dai"] as? [String: Any]
             return Model(id: id,
                          contextLength: row["context_length"] as? Int,
-                         machines: (dai?["machines"] as? Int) ?? 1)
+                         machines: (dai?["machines"] as? Int) ?? 1,
+                         loaded: (dai?["loaded"] as? Bool) ?? false)
         }
     }
 

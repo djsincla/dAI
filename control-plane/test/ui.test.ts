@@ -16,6 +16,7 @@ import {
   bucketFor, certificateStanding, clampWindow, effectiveModelFor, groupMismatches,
   splitNote, suspensionNote, describeWindow, groupMachines,
   groupMode, groupWarning, importProgress, isStale, isSynthetic, kindsFor,
+  expiresIn, idleWindowApplies, knobLabel,
   machinesThatCouldHold, matchesQuery, MAX_WINDOW_S, MIN_WINDOW_S, nextSort,
   pauseAction, progressOf, runsGpu, servingFor, sortRows, windowFromDrag,
   withFreshness,
@@ -1464,5 +1465,101 @@ describe('the console agrees with the scheduler about tiers', () => {
       tier: grant.next!.includes('cluster') ? 'cluster' : 'harvest',
     } as any
     expect(whyNotInPool(after, p)).toBeNull()
+  })
+})
+
+/**
+ * How long a join token has left.
+ *
+ * The listing exists so a token can be recognised and revoked; the full value is
+ * returned once, by the call that mints it, and never again. So the only thing
+ * this column has to get right is whether the token still works.
+ */
+describe('join token expiry', () => {
+  const NOW = Date.parse('2026-08-31T12:00:00Z')
+  const at = (hours: number) =>
+    new Date(NOW + hours * 3_600_000).toISOString()
+
+  it('counts in hours up to two days', () => {
+    expect(expiresIn(at(1), NOW)).toBe('in 1h')
+    expect(expiresIn(at(23), NOW)).toBe('in 23h')
+    expect(expiresIn(at(47), NOW)).toBe('in 47h')
+  })
+
+  it('counts in days beyond that', () => {
+    expect(expiresIn(at(48), NOW)).toBe('in 2d')
+    expect(expiresIn(at(24 * 30), NOW)).toBe('in 30d')
+  })
+
+  /** The case the column exists for: this one will not let a machine in. */
+  it('says expired rather than showing a negative interval', () => {
+    expect(expiresIn(at(-1), NOW)).toBe('expired')
+    expect(expiresIn(at(0), NOW)).toBe('expired')
+  })
+
+  it('does not round a token that is nearly gone up to an hour', () => {
+    expect(expiresIn(new Date(NOW + 60_000).toISOString(), NOW))
+      .toBe('under an hour')
+  })
+
+  it('handles a token with no expiry, and a malformed one', () => {
+    expect(expiresIn(null, NOW)).toBe('never')
+    expect(expiresIn('not a date', NOW)).toBe('unknown')
+  })
+})
+
+/**
+ * Which groups an idle-unload window means anything for.
+ *
+ * The control plane never sends one to a cluster group that has a model pinned
+ * to it: dedicated means loaded, so a window would describe a release that never
+ * happens. An unpinned cluster group is the opposite case and needs one, because
+ * it holds whatever it was last asked for.
+ */
+describe('the idle window', () => {
+  it('does not apply to a cluster group pinned to a model', () => {
+    const r = idleWindowApplies({ tier: 'cluster', servingModelId: 'm' })
+    expect(r.applies).toBe(false)
+    expect(r.why).toContain('holds it loaded')
+  })
+
+  /** The case that is easy to get backwards. */
+  it('applies to an unpinned cluster group', () => {
+    expect(idleWindowApplies({ tier: 'cluster', servingModelId: null }).applies)
+      .toBe(true)
+  })
+
+  it('applies to a harvest group either way', () => {
+    expect(idleWindowApplies({ tier: 'harvest', servingModelId: 'm' }).applies)
+      .toBe(true)
+    expect(idleWindowApplies({ tier: 'harvest', servingModelId: null }).applies)
+      .toBe(true)
+  })
+
+  it('says so rather than throwing when there is no group', () => {
+    expect(idleWindowApplies(undefined).applies).toBe(false)
+  })
+})
+
+/**
+ * Unset against set-to-the-default.
+ *
+ * They read the same and behave differently: an unset knob follows the fleet if
+ * the fleet changes, a set one does not.
+ */
+describe('knob labels', () => {
+  it('names the fleet default when nothing is set', () => {
+    expect(knobLabel(null, 300, 's')).toBe('fleet default (300s)')
+    expect(knobLabel(undefined, 8, ' GB')).toBe('fleet default (8 GB)')
+  })
+
+  it('shows a set value plainly, including one equal to the default', () => {
+    expect(knobLabel(300, 300, 's')).toBe('300s')
+    expect(knobLabel(8, 8, ' GB')).toBe('8 GB')
+  })
+
+  /** Zero is a value somebody chose, not an absence. */
+  it('treats zero as set', () => {
+    expect(knobLabel(0, 8, ' GB')).toBe('0 GB')
   })
 })

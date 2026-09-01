@@ -1,0 +1,103 @@
+# What a pull request has to survive.
+#
+# Both jobs run on macOS, which is not the usual default and is not an accident.
+# The control-plane suite is mostly portable TypeScript, but `packaging.test.ts`
+# and `reload.test.ts` shell out to `plutil`, `pkgutil` and `launchctl` — they
+# exist to check the artifact rather than the source, which is where every
+# expensive packaging fault in this project has landed. Running them on Linux
+# would mean skipping them, and a skipped artifact test is how those faults got
+# through in the first place.
+#
+# The cost is that Postgres has to be installed rather than run as a service
+# container, which macOS runners do not support. That is a couple of minutes and
+# worth it.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A second push supersedes the first; nothing here needs the older answer.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  control-plane:
+    name: control plane (905 tests, real Postgres)
+    runs-on: macos-15
+    timeout-minutes: 25
+    env:
+      # The suite refuses to use DATABASE_URL, deliberately: the variable that
+      # points at real data must not be able to nominate itself as the thing to
+      # drop. See control-plane/test/helpers.ts.
+      TEST_DATABASE_URL: postgres://dai:dai@localhost:5432/dai_test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: control-plane/package-lock.json
+
+      - name: Start Postgres
+        run: |
+          brew install postgresql@17
+          brew services start postgresql@17
+          # brew's service is ready before it accepts connections.
+          for i in $(seq 1 30); do
+            /opt/homebrew/opt/postgresql@17/bin/pg_isready -q && break
+            sleep 2
+          done
+          /opt/homebrew/opt/postgresql@17/bin/pg_isready
+
+      - name: Create the test role
+        run: |
+          export PATH="/opt/homebrew/opt/postgresql@17/bin:$PATH"
+          createuser -s dai
+          psql -d postgres -c "ALTER USER dai WITH PASSWORD 'dai';"
+          # helpers.ts creates and drops dai_test itself, through a maintenance
+          # connection to /postgres. It only needs the role to exist and to be
+          # allowed to create databases.
+
+      - run: npm ci
+        working-directory: control-plane
+
+      - run: npm run typecheck
+        working-directory: control-plane
+
+      - run: npm test
+        working-directory: control-plane
+
+  agent:
+    name: agent (391 tests)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Swift version
+        run: swift --version
+
+      # Resolves github.com/djsincla/mlx-swift-examples at the revision
+      # Package.resolved names. ForkPinTests then checks that revision is the
+      # one NOTICE claims, so a bumped pin with a stale notice fails here.
+      - name: Resolve dependencies
+        run: swift package resolve
+        working-directory: agent
+
+      - run: swift build
+        working-directory: agent
+
+      # MLX tests that need compiled Metal shaders skip themselves under
+      # `swift test`: SwiftPM cannot build them, and the bundle comes from
+      # xcodebuild. That is a real gap in this job and is documented in
+      # agent/README.md rather than hidden by it.
+      - run: swift test
+        working-directory: agent

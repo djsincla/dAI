@@ -366,7 +366,7 @@ npm start</div>
 
       <div class="step"><div class="step-body">
         <h4>Build the agent</h4>
-<div class="cmd"><span class="c"># in agent/ &mdash; xcodebuild, not swift build</span>
+<div class="cmd"><span class="c"># in agent/ - xcodebuild, not swift build</span>
 xcodebuild build -scheme dai-agent -destination 'platform=OS X' \
   -configuration Release -derivedDataPath .xcbuild \
   ENABLE_CODE_COVERAGE=NO CLANG_ENABLE_CODE_COVERAGE=NO \
@@ -638,7 +638,7 @@ curl -sk -X POST https://localhost:8452/admin/v1/nodes/<span class="v">NODE_ID</
           </tr>
           <tr>
             <td>An uninstall printed <span class="mono">==&gt; stopping</span> and nothing else</td>
-            <td>An old copy of <code>uninstall.sh</code>. It stopped on a failed menu bar bootout — which fails whenever the menu bar job is not loaded — after removing the agent and before removing the identity, and said nothing.</td>
+            <td>An old copy of <code>uninstall.sh</code>. It stopped on a failed menu bar bootout - which fails whenever the menu bar job is not loaded - after removing the agent and before removing the identity, and said nothing.</td>
             <td>Copy the current scripts to the machine and re-run. A <code>--purge</code> that ended this way did not purge: check whether <code>/var/db/dai</code> is still there.</td>
           </tr>
           <tr>
@@ -693,7 +693,7 @@ curl -sk -X POST https://localhost:8452/admin/v1/nodes/<span class="v">NODE_ID</
       An interrupted upgrade is cleared either way. The pending-upgrade marker
       and the rollback copy are removed even without <code>--purge</code>,
       because a marker that outlives its binary is not a record of anything and
-      the next install would act on it — reading it first, finding a deadline
+      the next install would act on it - reading it first, finding a deadline
       long past and no agent reporting in, and restoring the old binary over the
       version just installed.
     </p>

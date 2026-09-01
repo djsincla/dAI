@@ -1,6 +1,6 @@
 # Third-party notices
 
-dAI is licensed under the Apache License 2.0, © 2026 Dwayne Sinclair — see
+dAI is licensed under the Apache License 2.0, © 2026 Dwayne Sinclair - see
 [LICENSE](LICENSE) and [NOTICE](NOTICE). It also contains and depends on work by
 others, listed here with the notices their licences require.
 
@@ -15,12 +15,12 @@ MIT.
 **Our fork:** https://github.com/djsincla/mlx-swift-examples, branch
 `dai-pipeline`, pinned at revision `7d86f26988c9d48ec703ec1828906be2ad6f875c`
 **Upstream:** https://github.com/ml-explore/mlx-swift-examples
-**Licence:** MIT — full text in the fork's `LICENSE`, unchanged from upstream
+**Licence:** MIT - full text in the fork's `LICENSE`, unchanged from upstream
 **Forked from:** commit `9bff95c` (mlx-swift 0.29.1)
 
 It lived at `agent/vendor/mlx-swift-examples/` until it was split out into its
 own repository. It is now resolved by SwiftPM rather than checked in here, so
-this repository no longer redistributes it — but the **built artefacts do**, and
+this repository no longer redistributes it - but the **built artefacts do**, and
 the notice below applies to them.
 
 > Copyright (c) 2024 ml-explore
@@ -43,8 +43,8 @@ the notice below applies to them.
 > OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 > SOFTWARE.
 
-Individual files in the fork carry their own copyright lines — including
-`Copyright © 2024 Apple Inc.` on parts of `MLXLMCommon` — which are preserved as
+Individual files in the fork carry their own copyright lines - including
+`Copyright © 2024 Apple Inc.` on parts of `MLXLMCommon` - which are preserved as
 found. Contributors are credited upstream in the fork's `ACKNOWLEDGMENTS.md`.
 
 ### Modifications made for dAI
@@ -54,7 +54,7 @@ splitting a model across machines cannot be done from outside the library: the
 layer loop, the weight loader and the quantisation pass all have to agree about
 which layers a machine owns, and none of them are extension points. Upstream has
 no pipeline parallelism for Qwen, and `mlx-swift` deliberately excludes
-distributed support — its `Package.swift` excludes `ring.cpp`, `mpi.cpp` and
+distributed support - its `Package.swift` excludes `ring.cpp`, `mpi.cpp` and
 `nccl.cpp` and compiles the `no_ring.cpp` stub instead.
 
 Four files differ from upstream. Changes within existing files are marked `dAI:`
@@ -73,7 +73,7 @@ about certificates, fleets or sockets.
 
 **The pin is exact, and has to match notebookMLX's.** Both resolve this fork for
 `MLXEmbedders`, and two copies at different revisions could pool or normalise
-differently — an index built by one would be silently incomparable with a query
+differently - an index built by one would be silently incomparable with a query
 from the other. While the fork was vendored, one checkout made that structural.
 Now it is two pins that agree by assertion, so a test in each repository checks
 that the two `Package.resolved` files name the same revision.
@@ -115,7 +115,7 @@ only.
 ## Models
 
 No model weights are contained in this repository. Models referenced in
-documentation and defaults — Qwen2.5, Qwen3, Llama 3.3, and the `mlx-community`
-quantisations of them — are downloaded at runtime from their publishers and
+documentation and defaults - Qwen2.5, Qwen3, Llama 3.3, and the `mlx-community`
+quantisations of them - are downloaded at runtime from their publishers and
 carry their own licences, which are **not** MIT and in several cases restrict
 commercial use. Check the licence of any model before serving it.

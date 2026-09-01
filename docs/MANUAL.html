@@ -1,4 +1,4 @@
-<title>dAI — Installation and Operations Manual</title>
+<title>dAI - Installation and Operations Manual</title>
 <style>
   :root {
     --page:#FFFFFF; --card:#F4F8F7; --edge:rgba(15,59,56,.14);
@@ -147,13 +147,13 @@
   <h4>Contents</h4>
   <ol>
     <li><a href="#before">Before you begin</a></li>
-    <li><a href="#control">Part 1 — Install the control plane</a></li>
-    <li><a href="#agent">Part 2 — Add a machine</a></li>
-    <li><a href="#operate">Part 3 — Everyday operations</a></li>
-    <li><a href="#upgrade">Part 4 — Upgrading</a></li>
-    <li><a href="#trouble">Part 5 — When it goes wrong</a></li>
-    <li><a href="#remove">Part 6 — Giving a machine back</a></li>
-    <li><a href="#reference">Reference — ports, policy, glossary</a></li>
+    <li><a href="#control">Part 1 - Install the control plane</a></li>
+    <li><a href="#agent">Part 2 - Add a machine</a></li>
+    <li><a href="#operate">Part 3 - Everyday operations</a></li>
+    <li><a href="#upgrade">Part 4 - Upgrading</a></li>
+    <li><a href="#trouble">Part 5 - When it goes wrong</a></li>
+    <li><a href="#remove">Part 6 - Giving a machine back</a></li>
+    <li><a href="#reference">Reference - ports, policy, glossary</a></li>
   </ol>
 </div>
 
@@ -209,8 +209,8 @@
     <li>
       <h3>Install PostgreSQL</h3>
       <p>
-        The one dependency the installer cannot supply. Everything else — the
-        Node runtime, the TLS material, the schema — is in the package or made by
+        The one dependency the installer cannot supply. Everything else - the
+        Node runtime, the TLS material, the schema - is in the package or made by
         it. Version 14 or later.
       </p>
 
@@ -240,7 +240,7 @@ brew --version                       <span class="c"># prove it before going on<
         can skip all of this.</p>
       </div>
 
-      <h4>Then PostgreSQL, native under launchd — the recommended way</h4>
+      <h4>Then PostgreSQL, native under launchd - the recommended way</h4>
       <p>
         No container runtime, no licensing question, and the same start-at-boot
         mechanism the control plane itself uses.
@@ -288,7 +288,7 @@ sudo chown root:wheel /Library/LaunchDaemons/homebrew.mxcl.postgresql@17.plist</
         has been asked to stop, not when it has stopped, and bootstrapping into a
         label that still exists fails with the same
         <code>5: Input/output error</code>. Until the old job is really gone,
-        launchd keeps running the definition it cached — so a corrected plist on
+        launchd keeps running the definition it cached - so a corrected plist on
         disk changes nothing and every symptom stays identical.</p>
       </div>
       <pre class="cmd">sudo /usr/local/libexec/dai-control/reload-daemon.sh \
@@ -316,7 +316,7 @@ sleep 5 &amp;&amp; pg_isready -h localhost -p <span class="v">5433</span></pre>
         The fleet's URL names <strong>5433</strong>. Set
         <code>port = 5433</code> in
         <code>/opt/homebrew/var/postgresql@17/postgresql.conf</code> rather than
-        changing the URL, and nothing else — plist, scripts, notes — has to
+        changing the URL, and nothing else - plist, scripts, notes - has to
         change. If you are migrating from an existing database, run the new
         server on a spare port first, prove it, and move it to 5433 only when the
         old one is stopped.
@@ -336,7 +336,7 @@ psql -h localhost -p 5433 -d postgres -c "create database dai owner dai"</pre>
         <code>postgres:17-alpine</code> on 5433. It carries a named volume and
         <code>restart: unless-stopped</code>; both are required for production use. Note that a restart policy
         only acts once the container runtime is running, so the runtime itself
-        must start at login or boot — which is the fragility the native install
+        must start at login or boot - which is the fragility the native install
         avoids.
       </p>
       <div class="warn">
@@ -366,7 +366,7 @@ psql -h localhost -p 5433 -d postgres -c "create database dai owner dai"</pre>
         <p><strong>Keep the CA path it prints.</strong> Every agent needs that
         file. The fleet issues its own certificates, so the system trust store
         does not know them, and the alternative to distributing the CA is
-        disabling validation — which would also accept anything else on that
+        disabling validation - which would also accept anything else on that
         address.</p>
       </div>
     </li>
@@ -386,7 +386,7 @@ psql -h localhost -p 5433 -d postgres -c "create database dai owner dai"</pre>
   <p>
     Four surfaces share port 8452 and each takes its own CIDR allow-list, set in
     the daemon's environment. <code>/monitor/v1</code> is closed entirely unless
-    a CIDR is configured — the alternative is a long-lived secret in a scraper
+    a CIDR is configured - the alternative is a long-lived secret in a scraper
     config that nobody rotates.
   </p>
   <div class="scroll">
@@ -587,7 +587,7 @@ curl -sk https://<span class="v">host</span>:8452/monitor/v1/health   <span clas
     -H "authorization: Bearer $TOK"
 <span class="c">{"servingPort":8460,"allocated":true}</span></pre>
 
-  <h4>Standing a group down — reversible</h4>
+  <h4>Standing a group down - reversible</h4>
   <p>
     A disabled group keeps its machines, model, socket and roles and asserts none
     of them. It decides nothing about what its machines serve, suspends nobody,
@@ -600,7 +600,7 @@ curl -sk https://<span class="v">host</span>:8452/monitor/v1/health   <span clas
     -H "authorization: Bearer $TOK" -H 'content-type: application/json' \
     -d '{"enabled":false}'</pre>
 
-  <h4>Deleting a group — not reversible</h4>
+  <h4>Deleting a group - not reversible</h4>
   <div class="danger">
     <p>Its jobs and their work, its model assignments and every role on it are
     deleted with it. Its machines are freed. Its socket is retired rather than
@@ -670,7 +670,7 @@ GET  /admin/v1/pools/<span class="v">{poolId}</span>/models                   <s
         <tr><td>All of them are connected at once</td>
             <td>A gang is admitted whole or not at all. A model using every
                 machine in its group leaves no spare rank, so any other request
-                in flight — including a token count — blocks it.</td></tr>
+                in flight - including a token count - blocks it.</td></tr>
       </tbody>
     </table>
   </div>
@@ -839,7 +839,7 @@ sudo /usr/local/libexec/dai-control/install.sh</pre>
     <p><strong>The second command is not optional.</strong> The package puts new
     code on disk and does nothing else: it does not apply the schema and it does
     not restart the daemon. Install it alone and the old process keeps serving
-    until something restarts it — and when something does, the new code meets the
+    until something restarts it - and when something does, the new code meets the
     old database and refuses every request with a message naming a column it
     expects and cannot find. This failure has occurred in practice.</p>
   </div>
@@ -900,7 +900,7 @@ sudo /usr/local/libexec/dai-control/install.sh</pre>
         <tr><td class="mono">no-nodes</td>
             <td>No active node is holding the reverse channel.</td>
             <td>Check the machines are up and approved. If they heartbeat but do
-                not serve, the agent is reconnecting — read the node log.</td></tr>
+                not serve, the agent is reconnecting - read the node log.</td></tr>
         <tr><td class="mono">all-in-use</td>
             <td>Every node has a user present, so GPU work is not permitted.</td>
             <td>Nothing. This is the policy working. It resolves when somebody
@@ -948,7 +948,7 @@ sudo /usr/local/libexec/dai-control/install.sh</pre>
       <tbody>
         <tr><td class="mono">empty</td><td>There is no work. The fleet is idle.</td></tr>
         <tr><td class="mono">none-of-these-kinds</td>
-            <td>There is work, but not of a kind this machine may run now —
+            <td>There is work, but not of a kind this machine may run now -
                 almost always GPU work while somebody is at the keyboard.</td></tr>
         <tr><td class="mono">no-pool</td>
             <td>There is work, and this machine is in no group that can be given
@@ -1035,7 +1035,7 @@ rank 0 (layers 24..&lt;48) finished 205 tokens in 15.4s</pre>
   </div>
   <div class="warn">
     <p><strong>The split link is not the control plane's link.</strong> A split
-    runs over whatever the machines share — a Thunderbolt bridge, for example —
+    runs over whatever the machines share - a Thunderbolt bridge, for example -
     while both reach the control plane over the LAN. A bridge goes inactive when
     its peer sleeps or is unplugged, the advertised address stops being
     reachable, and the node clears it on the next heartbeat.</p>
@@ -1050,7 +1050,7 @@ rank 0 (layers 24..&lt;48) finished 205 tokens in 15.4s</pre>
       node reading a large prompt is occupied for minutes and is not parked on the
       channel.</li>
     <li><strong>A group shows "not serving this group's model".</strong> The
-      machines are running something else — either they have not taken the
+      machines are running something else - either they have not taken the
       group's model yet, or a cluster group is overriding this one. The card
       names which.</li>
     <li><strong>A node is not holding what it was assigned.</strong> The drawer
@@ -1087,7 +1087,7 @@ rank 0 (layers 24..&lt;48) finished 205 tokens in 15.4s</pre>
     model, then measured throughput, then longest since it was last given work.
   </p>
   <p>
-    If it is the <em>wrong</em> machine — the one somebody is sitting at — check
+    If it is the <em>wrong</em> machine - the one somebody is sitting at - check
     that the others are <code>serving=true</code>. A machine that is asleep or
     paused is not a candidate at all, and no preference can pick it.
   </p>
@@ -1097,7 +1097,7 @@ rank 0 (layers 24..&lt;48) finished 205 tokens in 15.4s</pre>
     Presence policy, not <code>max_tokens</code>. Read
     <code>dai.maxTokensApplied</code> and <code>dai.cappedByPolicy</code> in the
     response. A machine somebody is using allows 256 tokens; locked allows 2,048
-    and logged out 4,096. Raising the request limit changes nothing — the answer
+    and logged out 4,096. Raising the request limit changes nothing - the answer
     has to land on a freer machine.
   </p>
 
@@ -1240,7 +1240,7 @@ sudo /usr/local/libexec/dai/uninstall.sh --purge    <span class="c"># enrol it a
     <p><strong>Cluster machines are exempt from the gate, not from the
     preference.</strong> A cluster machine serves whatever its presence, because
     interactive work needs it to. But the router still prefers the freest machine
-    available, so work moves to the one nobody is using — and the completion cap
+    available, so work moves to the one nobody is using - and the completion cap
     still follows the presence of whichever machine answers.</p>
   </div>
 

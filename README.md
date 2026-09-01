@@ -29,13 +29,13 @@ flowchart TB
 
 | | What it is | Why it is separate |
 |---|---|---|
-| **[dAI](https://github.com/djsincla/dAI)** | Control plane and node agent. Machines enrol, get approved, take work, and yield when someone touches the keyboard. Serves whole models and models split across several machines. | — |
-| **[mlx-swift-examples](https://github.com/djsincla/mlx-swift-examples)** | Our fork, branch `dai-pipeline`. Upstream has no pipeline parallelism for Qwen, and `mlx-swift` excludes distributed support outright, so a dense model too large for one machine cannot be served at all. | It has **two** consumers. Splitting a model across machines cannot be done from outside the library — the layer loop, weight loader and quantisation pass all have to agree which layers a machine owns, and none are extension points. |
+| **[dAI](https://github.com/djsincla/dAI)** | Control plane and node agent. Machines enrol, get approved, take work, and yield when someone touches the keyboard. Serves whole models and models split across several machines. | - |
+| **[mlx-swift-examples](https://github.com/djsincla/mlx-swift-examples)** | Our fork, branch `dai-pipeline`. Upstream has no pipeline parallelism for Qwen, and `mlx-swift` excludes distributed support outright, so a dense model too large for one machine cannot be served at all. | It has **two** consumers. Splitting a model across machines cannot be done from outside the library - the layer loop, weight loader and quantisation pass all have to agree which layers a machine owns, and none are extension points. |
 | **[notebookMLX](https://github.com/djsincla/notebookMLX)** | A document app. Embeds locally through `MLXEmbedders`; asks a dAI gateway for generation. Citations open the passage they name. | It is a *client*, and it shares the fork rather than borrowing it. It used to reach the library through `../agent/vendor/`, welding it to this repo's directory layout. |
 
 **Both consumers pin the fork at the same exact revision, and must.** Two copies
 at different revisions could pool or normalise differently, and an index built
-by one would be silently incomparable with a query from the other — which reads
+by one would be silently incomparable with a query from the other - which reads
 as a bad corpus or a bad model, not as a version skew. `ForkPinTests` in each
 repository binds the resolved revision to the one its `NOTICE` names, so
 checking that the two agree is a grep rather than a resolve.
@@ -61,7 +61,7 @@ will end the program.
 **Built and running, on a fleet of two.** A control plane, a Swift agent that
 installs as a system daemon, and a signed, notarised installer pair. Machines
 enrol against a join token, are approved by a human, report what they can do,
-and take work — yielding it the moment somebody touches the keyboard. A model
+and take work - yielding it the moment somebody touches the keyboard. A model
 too large for one machine is served across two, its layers divided, over a
 Thunderbolt bridge.
 
@@ -295,7 +295,7 @@ docs/
 
 `agent/vendor/` and `notebook/` used to live in this tree. They are
 [mlx-swift-examples](https://github.com/djsincla/mlx-swift-examples) and
-[notebookMLX](https://github.com/djsincla/notebookMLX) now — see the top of this
+[notebookMLX](https://github.com/djsincla/notebookMLX) now - see the top of this
 file for what each is and how the three connect.
 
 ## Running the spike
@@ -323,7 +323,7 @@ Requires Apple Silicon and macOS 26+.
 
 ## Licence
 
-Apache License 2.0, © 2026 Dwayne Sinclair — see [LICENSE](LICENSE) and
+Apache License 2.0, © 2026 Dwayne Sinclair - see [LICENSE](LICENSE) and
 [NOTICE](NOTICE). Apache-2.0 rather than MIT for the express patent grant in
 §3, which matters for work of this kind, and because the dependency stack this
 sits on is already almost entirely Apache-2.0.
@@ -333,7 +333,7 @@ The agent and notebookMLX both build against
 which is **not** covered by that notice. It is a fork of
 [ml-explore/mlx-swift-examples](https://github.com/ml-explore/mlx-swift-examples),
 MIT © 2024 ml-explore, forked at `9bff95c` to add pipeline parallelism for dense
-Qwen models — three files, all marked `dAI:`. It stays MIT so the fork can be
+Qwen models - three files, all marked `dAI:`. It stays MIT so the fork can be
 merged back upstream, and its licence travels with it in that directory.
 
 Model weights are not in this repository and carry their own licences, several

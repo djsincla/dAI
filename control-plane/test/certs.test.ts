@@ -65,7 +65,13 @@ describe('certificate authority', () => {
     // request an identity belonging to another node record.
     const { csr, dir } = makeCsr('i-am-the-admin-box')
     const signed = await ca.sign(csr, 'node-42', 'orca')
-    const subject = execSync(`echo '${signed.certPem}' | openssl x509 -noout -subject`).toString()
+    // -nameopt RFC2253 because openssl's default subject formatting is not
+    // stable across builds: 3.6.3 locally prints `CN=node-42, OU=orca` and
+    // the CI runner prints `CN = node-42, OU = orca`, so an assertion written
+    // against one machine fails on the other while the certificate is
+    // byte-identical. RFC2253 is a specified format and renders the same
+    // everywhere.
+    const subject = execSync(`echo '${signed.certPem}' | openssl x509 -noout -subject -nameopt RFC2253`).toString()
     expect(subject).toContain('CN=node-42')
     expect(subject).not.toContain('i-am-the-admin-box')
     rmSync(dir, { recursive: true, force: true })
@@ -83,7 +89,7 @@ describe('certificate authority', () => {
     // separately, not by these bits.
     const { csr, dir } = makeCsr()
     const signed = await ca.sign(csr, 'node-1', 'orca')
-    const text = execSync(`echo '${signed.certPem}' | openssl x509 -noout -text`).toString()
+    const text = execSync(`echo '${signed.certPem}' | openssl x509 -noout -text -nameopt RFC2253`).toString()
     expect(text).toContain('TLS Web Client Authentication')
     expect(text).toContain('TLS Web Server Authentication')
     expect(text).toContain('CA:FALSE')
@@ -128,7 +134,7 @@ describe('certificate authority', () => {
     // Enclave will generate, and forge cannot sign one at all.
     const { csr, dir } = makeCsr('enclave-node', 'ec')
     const signed = await ca.sign(csr, 'node-se', 'orca')
-    const text = execSync(`echo '${signed.certPem}' | openssl x509 -noout -text`).toString()
+    const text = execSync(`echo '${signed.certPem}' | openssl x509 -noout -text -nameopt RFC2253`).toString()
     expect(text).toContain('id-ecPublicKey')
     expect(text).toContain('prime256v1')
     expect(text).toContain('CN=node-se')
@@ -167,7 +173,7 @@ describe('certificate authority', () => {
 
     const { csr, dir: csrDir } = makeCsr('enclave-node', 'ec')
     const signed = await legacy.sign(csr, 'node-se', 'orca')
-    const text = execSync(`echo '${signed.certPem}' | openssl x509 -noout -text`).toString()
+    const text = execSync(`echo '${signed.certPem}' | openssl x509 -noout -text -nameopt RFC2253`).toString()
     expect(text).toContain('prime256v1')                    // EC leaf
     expect(text).toContain('sha256WithRSAEncryption')       // RSA issuer signature
 

@@ -59,13 +59,17 @@ fi
 echo "    $(wc -l < "$WORK/dai.sql") lines"
 
 echo "==> certificate authority"
+# Where the authority lives. Overridable because the scripts were otherwise
+# only runnable on a machine that already had one, which meant nothing could
+# test them: CI reported "MISSING: certs/srv-ca.key" and was right to.
+CERT_DIR="${DAI_CERT_DIR:-$HERE/certs}"
 mkdir -p "$WORK/certs"
 # The keys are the point of this whole script, so their absence is an error
 # rather than a warning. A backup that quietly skipped them would be worse than
 # no backup, because somebody would believe it.
 for f in ca.crt ca.key srv-ca.crt srv-ca.key server.crt server.key; do
-  if [[ -f "$HERE/certs/$f" ]]; then
-    cp "$HERE/certs/$f" "$WORK/certs/$f"
+  if [[ -f "$CERT_DIR/$f" ]]; then
+    cp "$CERT_DIR/$f" "$WORK/certs/$f"
   elif [[ "$f" == *.key ]]; then
     echo "    MISSING: certs/$f" >&2
     exit 1

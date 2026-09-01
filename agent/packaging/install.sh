@@ -68,7 +68,23 @@ done
 # machine...".
 if [[ -n "$CONFIG" ]]; then
   [[ -f "$CONFIG" ]] || { echo "no configuration at $CONFIG" >&2; exit 1; }
-  cfg() { plutil -extract "$1" raw -o - "$CONFIG" 2>/dev/null || true; }
+  # Gated on plutil's exit status, not on redirecting its complaint.
+  #
+  # This was `plutil ... 2>/dev/null || true`, which assumed a missing key
+  # writes its error to stderr. On this machine it does. On the CI runner it
+  # writes it to stdout, so the caller received
+  # "Could not extract value, error: No value at that key path" as if that were
+  # the setting - and since a non-empty string looks like a value, the
+  # certificate-beside-the-config fallback below never ran and the install died
+  # on "server CA not found: <the error message>".
+  #
+  # That is the documented MDM case: two files in a directory and no caPath.
+  # Exit status is 1 on both machines, so it is the thing to test.
+  cfg() {
+    local value
+    value="$(plutil -extract "$1" raw -o - "$CONFIG" 2>/dev/null)" || return 0
+    printf '%s' "$value"
+  }
 
   URL="${URL:-$(cfg url)}"
   TOKEN="${TOKEN:-$(cfg joinToken)}"

@@ -50,18 +50,20 @@ if [[ "$CONFIRM" != "--yes" ]]; then
 fi
 
 echo "==> certificate authority"
-mkdir -p "$HERE/certs"
+# Same override as backup.sh, and for the same reason.
+CERT_DIR="${DAI_CERT_DIR:-$HERE/certs}"
+mkdir -p "$CERT_DIR"
 # The existing CA is moved aside rather than overwritten. If this restore turns
 # out to be the wrong archive, the fleet that was working five minutes ago is
 # still recoverable.
-if [[ -f "$HERE/certs/ca.key" ]]; then
-  ASIDE="$HERE/certs/superseded-$(date -u +%Y%m%dT%H%M%SZ)"
+if [[ -f "$CERT_DIR/ca.key" ]]; then
+  ASIDE="$CERT_DIR/superseded-$(date -u +%Y%m%dT%H%M%SZ)"
   mkdir -p "$ASIDE"
   cp "$HERE"/certs/*.key "$HERE"/certs/*.crt "$ASIDE"/ 2>/dev/null || true
   chmod -R go-rwx "$ASIDE"
   echo "    previous CA kept at $ASIDE"
 fi
-cp "$WORK"/certs/* "$HERE/certs/"
+cp "$WORK"/certs/* "$CERT_DIR/"
 chmod go-rwx "$HERE"/certs/*.key
 
 echo "==> database"

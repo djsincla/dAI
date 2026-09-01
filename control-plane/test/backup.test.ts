@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -20,6 +20,26 @@ import { createPool, type Db } from '../src/lib/db.js'
 const SCRATCH = 'postgres://dai:dai@localhost:5433/dai_backup_test'
 let db: Db
 let dir: string
+
+/**
+ * A certificate authority to back up, rather than the machine's own.
+ *
+ * These scripts read $HERE/certs, which exists only on a machine that has been
+ * set up - so on CI the backup stopped at "MISSING: certs/srv-ca.key" and the
+ * remaining tests fell over an undefined archive path. They were passing here
+ * for the reason they should not: they were reading a real authority belonging
+ * to a real fleet.
+ *
+ * Worse, restore.sh *wrote* to it. Every run of this file left another
+ * superseded-<timestamp> directory in the developer's own certs, and the last
+ * test asserted on them. A test that mutates the thing it is meant to protect
+ * is one bad archive away from being the incident.
+ *
+ * DAI_CERT_DIR points both scripts at a temporary authority instead. The
+ * contents are not certificates and do not need to be: nothing here parses
+ * them, it copies them and checks they arrived.
+ */
+let certDir: string
 
 /**
  * Reached over TCP rather than through a container.
@@ -57,11 +77,17 @@ beforeAll(async () => {
     `INSERT INTO models (id, runtime, kind, size_bytes)
      VALUES ('mlx-community/Qwen2.5-Coder-32B-Instruct-4bit','mlx','generate',18441439373)`)
   dir = mkdtempSync(join(tmpdir(), 'dai-backup-'))
+  certDir = mkdtempSync(join(tmpdir(), 'dai-certs-'))
+  for (const f of ['ca.crt', 'ca.key', 'srv-ca.crt', 'srv-ca.key',
+                   'server.crt', 'server.key']) {
+    writeFileSync(join(certDir, f), `---${f}---\n`)
+  }
 })
 
 afterAll(async () => {
   await db?.end()
   rmSync(dir, { recursive: true, force: true })
+  rmSync(certDir, { recursive: true, force: true })
   try { psql('DROP DATABASE IF EXISTS dai_backup_test', 'postgres') } catch { /* gone */ }
 })
 
@@ -70,7 +96,7 @@ describe('a backup of a fleet', () => {
 
   it('captures the database, the CA and the configuration', () => {
     execFileSync('bash', [join(process.cwd(), 'scripts', 'backup.sh'), dir], {
-      env: { ...process.env, DATABASE_URL: SCRATCH },
+      env: { ...process.env, DATABASE_URL: SCRATCH, DAI_CERT_DIR: certDir },
       encoding: 'utf8',
     })
     const found = readdirSync(dir).filter((f) => f.endsWith('.tar.gz'))
@@ -103,7 +129,7 @@ describe('a backup of a fleet', () => {
 
     const out = execFileSync('bash', [
       join(process.cwd(), 'scripts', 'restore.sh'), archive, '--yes',
-    ], { env: { ...process.env, DATABASE_URL: SCRATCH }, encoding: 'utf8' })
+    ], { env: { ...process.env, DATABASE_URL: SCRATCH, DAI_CERT_DIR: certDir }, encoding: 'utf8' })
 
     expect(psql('SELECT count(*) FROM nodes')).toBe('2')
     expect(psql("SELECT hostname FROM nodes ORDER BY hostname")).toContain('orca')
@@ -117,10 +143,10 @@ describe('a backup of a fleet', () => {
   it('keeps the CA it replaced rather than overwriting it', () => {
     // If this turns out to be the wrong archive, the fleet that was working
     // five minutes ago has to still be recoverable.
-    const superseded = readdirSync(join(process.cwd(), 'certs'))
+    const superseded = readdirSync(certDir)
       .filter((f) => f.startsWith('superseded-'))
     expect(superseded.length).toBeGreaterThan(0)
-    expect(existsSync(join(process.cwd(), 'certs', superseded[0]!, 'ca.key'))).toBe(true)
+    expect(existsSync(join(certDir, superseded[0]!, 'ca.key'))).toBe(true)
   })
 })
 

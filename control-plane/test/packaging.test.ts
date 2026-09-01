@@ -387,6 +387,13 @@ describe('install.sh --config', () => {
     // an absolute path in the file would make the payload machine-specific.
     const r = run({ url: 'https://cp.example:8452', joinToken: 'jt-abc' })
     expect(r.output).toContain('no build found')
+    // A missing key must read as absent, not as whatever plutil said about it.
+    // This machine's plutil writes that complaint to stderr and the CI runner's
+    // writes it to stdout, so the reader took the error text for a value, the
+    // fallback above never ran, and the install died on
+    // "server CA not found: Could not extract value...". Asserting on the
+    // symptom names the cause; without it the failure is a confusing path.
+    expect(r.output).not.toContain('Could not extract')
   })
 
   it('says which setting is missing rather than failing vaguely', () => {
@@ -443,6 +450,15 @@ describe('installing over files the package already laid down', () => {
       .replace(/^\[\[ \$EUID -eq 0 \]\].*$/m, 'true')
       .replace(/^BINARY_DIR=.*$/m, `BINARY_DIR=${binDir}`)
       .replace(/^(IDENTITY_DIR|STATE_DIR|LOG_DIR|MODEL_DIR)=/gm, `$1=${root}`)
+      // Skip creating the service account. Not what is under test, and it needs
+      // real root: stubbing $EUID gets the script past its own check but dscl
+      // still refuses, with eDSPermissionError.
+      //
+      // Left unstubbed this passed here and failed in CI, for the worst
+      // possible reason - it passed because _dai already exists on a machine
+      // with dAI installed, so the block was skipped by accident. The test was
+      // reading the state of the developer's laptop.
+      .replace(/^if \[\[ "\$SVC_USER" != "root" \]\] && ! id "\$SVC_USER".*$/m, 'if false; then')
       .replace(/^install -d -m 700 "\$STATE_DIR".*$/m, 'echo REACHED_THE_END; exit 0')
 
     const runner = join(root, 'install.sh')

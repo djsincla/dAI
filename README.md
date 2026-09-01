@@ -11,6 +11,35 @@ roughly electricity - and, critically, without data ever leaving the building.
 harvested Macs lose to both cloud APIs and rented GPUs. The winning arguments
 are that the marginal cost is electricity and that the data stays on premises.
 
+## Three repositories, and how they fit
+
+**This one is the fleet.** It schedules idle Macs and serves models from them.
+Two others came out of it, and neither is optional reading if you are trying to
+work out where a piece of this lives.
+
+```mermaid
+flowchart TB
+  fork["<b>mlx-swift-examples</b> · MIT<br/>our fork of ml-explore's<br/>adds pipeline parallelism for dense Qwen"]
+  dai["<b>dAI</b> · Apache-2.0 · you are here<br/>control plane + node agent<br/>harvests idle Macs, serves models"]
+  nb["<b>notebookMLX</b> · Apache-2.0<br/>drop a document in, ask it questions"]
+  fork -->|"MLXLLM, MLXLMCommon<br/>pinned revision"| dai
+  fork -->|"MLXEmbedders<br/>the same pinned revision"| nb
+  nb -->|"HTTP: asks the gateway<br/>to generate an answer"| dai
+```
+
+| | What it is | Why it is separate |
+|---|---|---|
+| **[dAI](https://github.com/djsincla/dAI)** | Control plane and node agent. Machines enrol, get approved, take work, and yield when someone touches the keyboard. Serves whole models and models split across several machines. | — |
+| **[mlx-swift-examples](https://github.com/djsincla/mlx-swift-examples)** | Our fork, branch `dai-pipeline`. Upstream has no pipeline parallelism for Qwen, and `mlx-swift` excludes distributed support outright, so a dense model too large for one machine cannot be served at all. | It has **two** consumers. Splitting a model across machines cannot be done from outside the library — the layer loop, weight loader and quantisation pass all have to agree which layers a machine owns, and none are extension points. |
+| **[notebookMLX](https://github.com/djsincla/notebookMLX)** | A document app. Embeds locally through `MLXEmbedders`; asks a dAI gateway for generation. Citations open the passage they name. | It is a *client*, and it shares the fork rather than borrowing it. It used to reach the library through `../agent/vendor/`, welding it to this repo's directory layout. |
+
+**Both consumers pin the fork at the same exact revision, and must.** Two copies
+at different revisions could pool or normalise differently, and an index built
+by one would be silently incomparable with a query from the other — which reads
+as a bad corpus or a bad model, not as a version skew. `ForkPinTests` in each
+repository binds the resolved revision to the one its `NOTICE` names, so
+checking that the two agree is a grep rather than a resolve.
+
 Full design: [`docs/PLAN.md`](docs/PLAN.md).
 Control plane spec: [`docs/CONTROL_PLANE.md`](docs/CONTROL_PLANE.md).
 Install and operations: [`docs/MANUAL.html`](docs/MANUAL.html).
@@ -264,20 +293,10 @@ docs/
 
 ### Related repositories
 
-Two things that lived in this tree and now do not.
-
-| Repository | What it is |
-|---|---|
-| [djsincla/mlx-swift-examples](https://github.com/djsincla/mlx-swift-examples) | Our fork of `ml-explore/mlx-swift-examples`, branch `dai-pipeline`, adding pipeline parallelism for dense Qwen models. The agent pins it by exact revision. Was `agent/vendor/`. |
-| [djsincla/notebookMLX](https://github.com/djsincla/notebookMLX) | A document app: drop a file in, ask it questions, get answers whose citations open the passage they name. Embeds locally, asks a dAI gateway for generation. Was `notebook/`. |
-
-The fork has two consumers — the agent for the split, notebookMLX for
-`MLXEmbedders` — which is why it is a repository rather than a subdirectory of
-whichever one happened to need it first. **Both pin the same revision, and must:**
-two copies at different revisions could pool or normalise differently, and an
-index built by one would be silently incomparable with a query from the other.
-`ForkPinTests` in each repository binds the resolved revision to the one its
-NOTICE names, so comparing the two is a grep.
+`agent/vendor/` and `notebook/` used to live in this tree. They are
+[mlx-swift-examples](https://github.com/djsincla/mlx-swift-examples) and
+[notebookMLX](https://github.com/djsincla/notebookMLX) now — see the top of this
+file for what each is and how the three connect.
 
 ## Running the spike
 

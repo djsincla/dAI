@@ -4,19 +4,24 @@ dAI is licensed under the Apache License 2.0, © 2026 Dwayne Sinclair — see
 [LICENSE](LICENSE) and [NOTICE](NOTICE). It also contains and depends on work by
 others, listed here with the notices their licences require.
 
-The vendored subtree described first below is **MIT, not Apache-2.0**. That
-boundary is deliberate: it keeps the fork mergeable back into its upstream
-project, which is MIT.
+The fork described first below is **MIT, not Apache-2.0**. That boundary is
+deliberate: it keeps the fork mergeable back into its upstream project, which is
+MIT.
 
 ---
 
-## mlx-swift-examples (vendored, modified)
+## mlx-swift-examples (our fork, modified)
 
-**Location in this repository:** `agent/vendor/mlx-swift-examples/`
+**Our fork:** https://github.com/djsincla/mlx-swift-examples, branch
+`dai-pipeline`, pinned at revision `a3aba85274b152cc1dcd1964a8c2b28145ec2bd6`
 **Upstream:** https://github.com/ml-explore/mlx-swift-examples
-**Licence:** MIT — full text at
-[`agent/vendor/mlx-swift-examples/LICENSE`](agent/vendor/mlx-swift-examples/LICENSE)
+**Licence:** MIT — full text in the fork's `LICENSE`, unchanged from upstream
 **Forked from:** commit `9bff95c` (mlx-swift 0.29.1)
+
+It lived at `agent/vendor/mlx-swift-examples/` until it was split out into its
+own repository. It is now resolved by SwiftPM rather than checked in here, so
+this repository no longer redistributes it — but the **built artefacts do**, and
+the notice below applies to them.
 
 > Copyright (c) 2024 ml-explore
 >
@@ -38,10 +43,9 @@ project, which is MIT.
 > OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 > SOFTWARE.
 
-Individual files in that subtree carry their own copyright lines — including
+Individual files in the fork carry their own copyright lines — including
 `Copyright © 2024 Apple Inc.` on parts of `MLXLMCommon` — which are preserved as
-found. Contributors are credited upstream in
-[`ACKNOWLEDGMENTS.md`](agent/vendor/mlx-swift-examples/ACKNOWLEDGMENTS.md).
+found. Contributors are credited upstream in the fork's `ACKNOWLEDGMENTS.md`.
 
 ### Modifications made for dAI
 
@@ -67,8 +71,12 @@ No upstream file has been relicensed, and no copyright notice has been removed.
 The transport is a protocol the caller supplies, so the library learns nothing
 about certificates, fleets or sockets.
 
-See [`agent/vendor/README.md`](agent/vendor/README.md) for how to work on the
-fork as a repository and rebase it onto a newer upstream release.
+**The pin is exact, and has to match notebookMLX's.** Both resolve this fork for
+`MLXEmbedders`, and two copies at different revisions could pool or normalise
+differently — an index built by one would be silently incomparable with a query
+from the other. While the fork was vendored, one checkout made that structural.
+Now it is two pins that agree by assertion, so a test in each repository checks
+that the two `Package.resolved` files name the same revision.
 
 ---
 

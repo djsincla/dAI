@@ -9,16 +9,18 @@ This product includes a modified copy of mlx-swift-examples
 (https://github.com/ml-explore/mlx-swift-examples), Copyright (c) 2024
 ml-explore, licensed under the MIT License.
 
-  Location:  agent/vendor/mlx-swift-examples/
-  Licence:   agent/vendor/mlx-swift-examples/LICENSE
+  Fork:      https://github.com/djsincla/mlx-swift-examples (dai-pipeline)
+  Pinned at: a3aba85274b152cc1dcd1964a8c2b28145ec2bd6
   Forked at: 9bff95c (mlx-swift 0.29.1)
 
-That subtree remains under its original MIT licence and is NOT covered by the
-Apache License above. Parts of it carry further notices of their own, including
-"Copyright (c) 2024 Apple Inc." on portions of MLXLMCommon; those are preserved
-as found.
+It is resolved by SwiftPM rather than checked into this repository, so the
+source tree here does not redistribute it; the built artefacts do. It remains
+under its original MIT licence and is NOT covered by the Apache License above.
 
-Four files in that subtree were changed for dAI, each carrying a comment at the
+Parts of it carry further notices of their own, including "Copyright (c) 2024
+Apple Inc." on portions of MLXLMCommon; those are preserved as found.
+
+Four files in the fork were changed for dAI, each carrying a comment at the
 change itself:
 
   Libraries/MLXLLM/Pipeline.swift            added by dAI, not present upstream

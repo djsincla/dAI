@@ -265,8 +265,10 @@ Apache License 2.0, © 2026 Dwayne Sinclair — see [LICENSE](LICENSE) and
 §3, which matters for work of this kind, and because the dependency stack this
 sits on is already almost entirely Apache-2.0.
 
-`agent/vendor/mlx-swift-examples/` is **not** covered by that notice. It is a
-modified copy of [ml-explore/mlx-swift-examples](https://github.com/ml-explore/mlx-swift-examples),
+The agent and notebookMLX both build against
+[djsincla/mlx-swift-examples](https://github.com/djsincla/mlx-swift-examples),
+which is **not** covered by that notice. It is a fork of
+[ml-explore/mlx-swift-examples](https://github.com/ml-explore/mlx-swift-examples),
 MIT © 2024 ml-explore, forked at `9bff95c` to add pipeline parallelism for dense
 Qwen models — three files, all marked `dAI:`. It stays MIT so the fork can be
 merged back upstream, and its licence travels with it in that directory.

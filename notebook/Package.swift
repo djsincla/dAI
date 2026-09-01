@@ -26,12 +26,17 @@ let package = Package(
         // would otherwise write and own. The alternative was ZIPFoundation
         // plus XMLParser, which is the same work with our name on it.
         .package(url: "https://github.com/CoreOffice/CoreXLSX.git", from: "0.14.2"),
-        // The same vendored copy the agent builds against, by path rather than
-        // by version. Two copies of MLXEmbedders at different revisions could
+        // The same fork the agent builds against, pinned to the same exact
+        // revision. Two copies of MLXEmbedders at different revisions could
         // pool or normalise differently, and an index built by one would be
-        // silently incomparable with a query from the other. One copy is the
-        // only way to be sure they agree.
-        .package(path: "../agent/vendor/mlx-swift-examples"),
+        // silently incomparable with a query from the other.
+        //
+        // This used to be a path into the agent's checkout, which made
+        // agreement structural - there was only ever one copy. Now they are two
+        // pins that have to match, and nothing about a mismatch is loud, so a
+        // test asserts the two Package.resolved files name the same revision.
+        .package(url: "https://github.com/djsincla/mlx-swift-examples.git",
+                 revision: "a3aba85274b152cc1dcd1964a8c2b28145ec2bd6"),
     ],
     targets: [
         .target(name: "NotebookKit", dependencies: [

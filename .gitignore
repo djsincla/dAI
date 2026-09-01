@@ -92,3 +92,10 @@ control-plane/.maps/
 
 # The status app's build products.
 control-plane/app/.build/
+
+# The menu bar app bundle is assembled by agent/packaging/build-app.sh from the
+# Info.plist beside it and a freshly built binary. A copy of it was committed
+# once and sat in the history for three weeks at 82 MB across three revisions,
+# which was most of what a clone cost. The template is tracked; the bundle is a
+# build artifact and is not.
+agent/packaging/app/dAI.app/

@@ -19,7 +19,20 @@ let package = Package(
         .package(url: "https://github.com/ml-explore/mlx-swift", from: "0.25.0"),
         // Model loading, tokenisers and generation. mlx-swift itself is the
         // array framework; the LLM layer lives here.
-        .package(path: "vendor/mlx-swift-examples"),
+        //
+        // Our fork, because splitting a model across machines cannot be done
+        // from outside the library: the layer loop, the weight loader and the
+        // quantisation pass all have to agree about which layers a machine
+        // owns, and none of them are extension points.
+        //
+        // Pinned to an exact revision, never a range. notebookMLX resolves the
+        // same fork for MLXEmbedders, and two copies at different revisions
+        // could pool or normalise differently - an index built by one would be
+        // silently incomparable with a query from the other. This was a path
+        // dependency when both lived in one checkout, which made agreement
+        // structural; now it is a pin, and the pin has to be checked.
+        .package(url: "https://github.com/djsincla/mlx-swift-examples.git",
+                 revision: "a3aba85274b152cc1dcd1964a8c2b28145ec2bd6"),
         // URLSession can only present a client certificate as a SecIdentity,
         // which needs the private key as a SecKey. A key held in the Secure
         // Enclave is not one, and cannot be made into one without the keychain

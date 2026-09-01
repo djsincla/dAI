@@ -1,5 +1,5 @@
 {
-  "originHash" : "411b1669de0fba290df940b79413695114749fc2f4cd7be374e0630d6ec10d3a",
+  "originHash" : "09106514332c66e585ef24716ac90903841dcff8d450280085e3ade67eb14d4a",
   "pins" : [
     {
       "identity" : "corexlsx",
@@ -26,6 +26,14 @@
       "state" : {
         "revision" : "072b684acaae80b6a463abab3a103732f33774bf",
         "version" : "0.29.1"
+      }
+    },
+    {
+      "identity" : "mlx-swift-examples",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/djsincla/mlx-swift-examples.git",
+      "state" : {
+        "revision" : "a3aba85274b152cc1dcd1964a8c2b28145ec2bd6"
       }
     },
     {

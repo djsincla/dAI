@@ -36,7 +36,14 @@ jobs:
       # The suite refuses to use DATABASE_URL, deliberately: the variable that
       # points at real data must not be able to nominate itself as the thing to
       # drop. See control-plane/test/helpers.ts.
-      TEST_DATABASE_URL: postgres://dai:dai@localhost:5432/dai_test
+      #
+      # Port 5433, not the Postgres default, because that is this project's
+      # convention everywhere - docker-compose, backup.sh, the READMEs - and
+      # backup.test.ts hardcodes it rather than reading this variable. The first
+      # CI run used 5432 and those tests failed with connection refused while
+      # the rest of the suite passed, which is the tell: one file reaching a
+      # database the others could not.
+      TEST_DATABASE_URL: postgres://dai:dai@localhost:5433/dai_test
     steps:
       - uses: actions/checkout@v4
 
@@ -46,25 +53,26 @@ jobs:
           cache: npm
           cache-dependency-path: control-plane/package-lock.json
 
-      - name: Start Postgres
+      # Our own cluster rather than `brew services`, so the port is ours to set.
+      - name: Start Postgres on 5433
         run: |
           brew install postgresql@17
-          brew services start postgresql@17
-          # brew's service is ready before it accepts connections.
+          export PATH="/opt/homebrew/opt/postgresql@17/bin:$PATH"
+          initdb -D "$RUNNER_TEMP/pgdata" -U dai
+          pg_ctl -D "$RUNNER_TEMP/pgdata" -o "-p 5433" -l "$RUNNER_TEMP/pg.log" start
           for i in $(seq 1 30); do
-            /opt/homebrew/opt/postgresql@17/bin/pg_isready -q && break
+            pg_isready -p 5433 -q && break
             sleep 2
           done
-          /opt/homebrew/opt/postgresql@17/bin/pg_isready
+          pg_isready -p 5433
+          # helpers.ts and backup.test.ts each create and drop their own
+          # database through a maintenance connection to /postgres, so the role
+          # only has to exist and be allowed to create.
+          psql -p 5433 -d postgres -c "ALTER USER dai WITH PASSWORD 'dai';"
 
-      - name: Create the test role
-        run: |
-          export PATH="/opt/homebrew/opt/postgresql@17/bin:$PATH"
-          createuser -s dai
-          psql -d postgres -c "ALTER USER dai WITH PASSWORD 'dai';"
-          # helpers.ts creates and drops dai_test itself, through a maintenance
-          # connection to /postgres. It only needs the role to exist and to be
-          # allowed to create databases.
+      - name: Postgres log on failure
+        if: failure()
+        run: cat "$RUNNER_TEMP/pg.log" || true
 
       - run: npm ci
         working-directory: control-plane
@@ -77,13 +85,19 @@ jobs:
 
   agent:
     name: agent (391 tests)
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - name: Swift version
-        run: swift --version
+      # macos-26, not macos-15. The agent uses CoreML and AppKit APIs whose
+      # Sendable annotations arrived after Xcode 16.4, so on the older image
+      # `MLComputePlan` fails strict concurrency and the build stops. That is a
+      # real constraint on what this compiles against, not a CI quirk, and the
+      # honest fix is to say which toolchain rather than to weaken the code
+      # until an old SDK accepts it.
+      - name: Toolchain
+        run: swift --version && xcodebuild -version
 
       # Resolves github.com/djsincla/mlx-swift-examples at the revision
       # Package.resolved names. ForkPinTests then checks that revision is the

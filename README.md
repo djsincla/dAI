@@ -257,3 +257,22 @@ sudo ./run_daemon_test.sh uninstall
 > clone somewhere other than `/Users/dwayne/Developer/dAI`.
 
 Requires Apple Silicon and macOS 26+.
+
+## Licence
+
+Apache License 2.0, © 2026 Dwayne Sinclair — see [LICENSE](LICENSE) and
+[NOTICE](NOTICE). Apache-2.0 rather than MIT for the express patent grant in
+§3, which matters for work of this kind, and because the dependency stack this
+sits on is already almost entirely Apache-2.0.
+
+`agent/vendor/mlx-swift-examples/` is **not** covered by that notice. It is a
+modified copy of [ml-explore/mlx-swift-examples](https://github.com/ml-explore/mlx-swift-examples),
+MIT © 2024 ml-explore, forked at `9bff95c` to add pipeline parallelism for dense
+Qwen models — three files, all marked `dAI:`. It stays MIT so the fork can be
+merged back upstream, and its licence travels with it in that directory.
+
+Model weights are not in this repository and carry their own licences, several
+of which restrict commercial use.
+
+Full details, including build-time dependencies, in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

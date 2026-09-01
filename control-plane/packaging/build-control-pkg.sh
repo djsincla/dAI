@@ -84,6 +84,12 @@ cp "$HERE/install.sh" "$HERE/uninstall.sh" "$HERE/com.dai.control.plist.in" "$PA
 # is reloaded reaches both installers. It is the script that knows bootout is
 # asynchronous, which is not obvious and cost a failed install to learn.
 cp "$ROOT/../agent/packaging/reload-daemon.sh" "$PAYLOAD/"
+# The terms travel with the thing they cover. Apache-2.0 section 4(d) requires a
+# redistribution to carry the NOTICE, and this package redistributes a great deal
+# more than our own code: `npm ci` above puts nearly two hundred dependencies in
+# the payload. Shipping our LICENSE beside theirs is what makes the bundle
+# answerable rather than merely assembled.
+cp "$ROOT/../LICENSE" "$ROOT/../NOTICE" "$ROOT/../THIRD-PARTY-NOTICES.md" "$PAYLOAD/"
 cp "$ROOT/scripts/make-certs.sh" "$PAYLOAD/"
 echo "$VERSION" > "$PAYLOAD/VERSION"
 

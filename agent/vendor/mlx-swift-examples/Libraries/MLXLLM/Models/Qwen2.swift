@@ -4,6 +4,11 @@
 //
 //  Created by John Mai on 2024/3/3.
 //
+//  Upstream: ml-explore/mlx-swift-examples, MIT (c) 2024 ml-explore.
+//  Modified for dAI in 2026 to add pipeline parallelism: this machine takes the
+//  hidden state from the one holding the earlier layers, and hands its own on.
+//  Every change is marked `dAI:`.
+//
 
 import Foundation
 import MLX

@@ -934,13 +934,50 @@ describe('what the shipped build gives away', () => {
     expect(verify).toContain('exit 1')
   })
 
-  it('carries a licence', () => {
+  it('carries a licence, and the notice that names who holds it', () => {
     // A package with no terms leaves a recipient guessing and the author with
     // nothing to point at.
-    const licence = readFileSync(
-      join(import.meta.dirname, '..', '..', 'LICENSE'), 'utf8')
-    expect(licence).toMatch(/Copyright \(c\) \d{4}/)
+    //
+    // Apache-2.0 splits what MIT keeps in one file: the LICENSE is the verbatim
+    // terms and deliberately carries no copyright line - the appendix still says
+    // `[yyyy] [name of copyright owner]` - and the holder is named in NOTICE
+    // instead. Asserting a copyright in LICENSE is what the MIT version of this
+    // test did, and it is the assertion that failed on the switch.
+    const root = join(import.meta.dirname, '..', '..')
+    const licence = readFileSync(join(root, 'LICENSE'), 'utf8')
+    expect(licence).toContain('Apache License')
+    expect(licence).toContain('Version 2.0, January 2004')
+
+    const notice = readFileSync(join(root, 'NOTICE'), 'utf8')
+    expect(notice).toMatch(/Copyright \d{4}/)
+
     expect(JSON.parse(readFileSync(
-      join(import.meta.dirname, '..', 'package.json'), 'utf8')).license).toBeTruthy()
+      join(import.meta.dirname, '..', 'package.json'), 'utf8')).license)
+      .toBe('Apache-2.0')
+  })
+
+  it('does not relicense the vendored fork', () => {
+    // The subtree is MIT and has to stay MIT: it is a derivative of an MIT
+    // project and it is meant to be mergeable back into it. Relicensing it
+    // would be silent - nothing builds differently - so it is asserted here
+    // rather than left to whoever next reads the top-level LICENSE and assumes
+    // it covers everything below.
+    const vendored = readFileSync(
+      join(import.meta.dirname, '..', '..', 'agent', 'vendor',
+           'mlx-swift-examples', 'LICENSE'), 'utf8')
+    expect(vendored).toContain('MIT License')
+    expect(vendored).toContain('Copyright (c) 2024 ml-explore')
+  })
+
+  it('ships the terms inside the package, not only in the repository', () => {
+    // The payload is mostly other people's code - `npm ci --omit=dev` puts
+    // nearly two hundred dependencies in it - and Apache-2.0 section 4(d)
+    // requires a redistribution to carry the NOTICE. Checking the repository
+    // has a LICENSE proves nothing about what the installer hands over, which
+    // is the distinction this whole file exists for.
+    const build = readFileSync(
+      join(import.meta.dirname, '..', 'packaging', 'build-control-pkg.sh'), 'utf8')
+    expect(build).toContain('$ROOT/../LICENSE')
+    expect(build).toContain('$ROOT/../NOTICE')
   })
 })

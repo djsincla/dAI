@@ -1,0 +1,31 @@
+dAI - Distributed AI on Harvested Apple Silicon
+Copyright 2026 Dwayne Sinclair
+
+Licensed under the Apache License, Version 2.0. See the LICENSE file.
+
+------------------------------------------------------------------------------
+
+This product includes a modified copy of mlx-swift-examples
+(https://github.com/ml-explore/mlx-swift-examples), Copyright (c) 2024
+ml-explore, licensed under the MIT License.
+
+  Location:  agent/vendor/mlx-swift-examples/
+  Licence:   agent/vendor/mlx-swift-examples/LICENSE
+  Forked at: 9bff95c (mlx-swift 0.29.1)
+
+That subtree remains under its original MIT licence and is NOT covered by the
+Apache License above. Parts of it carry further notices of their own, including
+"Copyright (c) 2024 Apple Inc." on portions of MLXLMCommon; those are preserved
+as found.
+
+Three files in that subtree were changed for dAI, each marked with a notice in
+its header and with `dAI:` comments at the changes themselves:
+
+  Libraries/MLXLLM/Pipeline.swift        added by dAI, not present upstream
+  Libraries/MLXLLM/Models/Qwen2.swift    modified by dAI
+  Libraries/MLXLMCommon/Load.swift       modified by dAI
+
+------------------------------------------------------------------------------
+
+The full list of third-party components, including build-time dependencies that
+are not redistributed in this repository, is in THIRD-PARTY-NOTICES.md.

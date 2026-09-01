@@ -68,7 +68,9 @@ jobs:
           # helpers.ts and backup.test.ts each create and drop their own
           # database through a maintenance connection to /postgres, so the role
           # only has to exist and be allowed to create.
-          psql -p 5433 -d postgres -c "ALTER USER dai WITH PASSWORD 'dai';"
+          # -U dai: initdb made dai the superuser, and psql would otherwise
+          # connect as the OS user, which has no role here.
+          psql -U dai -p 5433 -d postgres -c "ALTER USER dai WITH PASSWORD 'dai';"
 
       - name: Postgres log on failure
         if: failure()

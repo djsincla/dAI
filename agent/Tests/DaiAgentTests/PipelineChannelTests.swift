@@ -432,18 +432,35 @@ struct PipelineDialTests {
     func succeedsOnceListening() async throws {
         let channel = PipelineChannel()
         let attempts = Counter()
+        struct Enough: Error {}
         // Sleep is injected so the schedule is exercised without waiting for it.
         // A test that really slept would be measuring Task.sleep.
+        //
+        // It also ends the loop, which is the part that took a CI run to learn.
+        // This used to pass `deadline: 1.0` and assert more than one attempt,
+        // which quietly depended on a refusal from port 1 arriving in well under
+        // a second. On loopback it does; on a virtualised runner the first
+        // attempt outlived the deadline and the loop exited having tried once,
+        // so the test failed for a reason that had nothing to do with the
+        // schedule it was checking. A generous deadline alone would have been
+        // worse - with a no-op sleep the loop spins as fast as connect fails,
+        // so the test would have run until the deadline expired.
+        //
+        // Stopping on the second wait asserts the same thing - it did not give
+        // up on the first refusal - and depends on no clock at all.
         do {
             try await channel.connectWithRetry(
                 host: "127.0.0.1", port: 1, tls: try testClientContext(),
-                serverName: "peer", deadline: 1.0,
-                sleep: { _ in await attempts.bump() })
+                serverName: "peer", deadline: 30.0,
+                sleep: { _ in
+                    await attempts.bump()
+                    if await attempts.count >= 2 { throw Enough() }
+                })
         } catch {
-            // Expected: nothing is listening on port 1. What is asserted is that
-            // it kept trying rather than giving up on the first refusal.
+            // Expected: nothing listens on port 1, and the injected sleep ends
+            // the loop once it has retried.
         }
-        #expect(await attempts.count > 1)
+        #expect(await attempts.count == 2)
     }
 
     @Test("gives up rather than waiting past the deadline")

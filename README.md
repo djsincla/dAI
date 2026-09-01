@@ -236,6 +236,23 @@ docs/
   SPLIT_MODEL_ERRORS.md  the Swift split model, and what went wrong building it
 ```
 
+### Related repositories
+
+Two things that lived in this tree and now do not.
+
+| Repository | What it is |
+|---|---|
+| [djsincla/mlx-swift-examples](https://github.com/djsincla/mlx-swift-examples) | Our fork of `ml-explore/mlx-swift-examples`, branch `dai-pipeline`, adding pipeline parallelism for dense Qwen models. The agent pins it by exact revision. Was `agent/vendor/`. |
+| [djsincla/notebookMLX](https://github.com/djsincla/notebookMLX) | A document app: drop a file in, ask it questions, get answers whose citations open the passage they name. Embeds locally, asks a dAI gateway for generation. Was `notebook/`. |
+
+The fork has two consumers — the agent for the split, notebookMLX for
+`MLXEmbedders` — which is why it is a repository rather than a subdirectory of
+whichever one happened to need it first. **Both pin the same revision, and must:**
+two copies at different revisions could pool or normalise differently, and an
+index built by one would be silently incomparable with a query from the other.
+`ForkPinTests` in each repository binds the resolved revision to the one its
+NOTICE names, so comparing the two is a grep.
+
 ## Running the spike
 
 ```bash

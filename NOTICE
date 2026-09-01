@@ -5,9 +5,9 @@ Licensed under the Apache License, Version 2.0. See the LICENSE file.
 
 ------------------------------------------------------------------------------
 
-This product includes a modified copy of mlx-swift-examples
-(https://github.com/ml-explore/mlx-swift-examples), Copyright (c) 2024
-ml-explore, licensed under the MIT License.
+This product depends on a fork of mlx-swift-examples
+(https://github.com/ml-explore/mlx-swift-examples),
+Copyright (c) 2024 ml-explore, licensed under the MIT License.
 
   Fork:      https://github.com/djsincla/mlx-swift-examples (dai-pipeline)
   Pinned at: a3aba85274b152cc1dcd1964a8c2b28145ec2bd6

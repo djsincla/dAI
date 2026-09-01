@@ -956,17 +956,32 @@ describe('what the shipped build gives away', () => {
       .toBe('Apache-2.0')
   })
 
-  it('does not relicense the vendored fork', () => {
-    // The subtree is MIT and has to stay MIT: it is a derivative of an MIT
-    // project and it is meant to be mergeable back into it. Relicensing it
-    // would be silent - nothing builds differently - so it is asserted here
-    // rather than left to whoever next reads the top-level LICENSE and assumes
-    // it covers everything below.
-    const vendored = readFileSync(
-      join(import.meta.dirname, '..', '..', 'agent', 'vendor',
-           'mlx-swift-examples', 'LICENSE'), 'utf8')
-    expect(vendored).toContain('MIT License')
-    expect(vendored).toContain('Copyright (c) 2024 ml-explore')
+  it('keeps saying the fork is MIT and not ours to relicense', () => {
+    // The fork is a derivative of an MIT project and is meant to be mergeable
+    // back into it, so it has to stay MIT while this repository is Apache-2.0.
+    //
+    // This used to read agent/vendor/mlx-swift-examples/LICENSE directly. That
+    // subtree is gone - the fork is its own repository now - and the test broke
+    // by reading a path that no longer exists, which is the honest failure and
+    // better than a guard that quietly stopped guarding.
+    //
+    // What is left here to protect is the *statement* of the boundary. Nothing
+    // builds differently if somebody folds the fork under the top-level Apache
+    // header while tidying, and a reader who finds Apache at the root and no
+    // contradiction will reasonably assume it covers everything dAI ships.
+    // The fork's own licence is the fork repository's to assert.
+    const root = join(import.meta.dirname, '..', '..')
+    for (const file of ['NOTICE', 'THIRD-PARTY-NOTICES.md']) {
+      // Whitespace-normalised, because these are prose files that get rewrapped
+      // and a copyright line split across two of them is still the notice.
+      const text = readFileSync(join(root, file), 'utf8').replace(/\s+/g, ' ')
+      expect(text, `${file} no longer names ml-explore's copyright`)
+        .toContain('Copyright (c) 2024 ml-explore')
+      expect(text, `${file} no longer says the fork is MIT`)
+        .toMatch(/MIT/)
+      expect(text, `${file} no longer says the fork is outside the Apache licence`)
+        .toMatch(/NOT covered by the Apache|not covered by that notice|MIT, not Apache/)
+    }
   })
 
   it('ships the terms inside the package, not only in the repository', () => {

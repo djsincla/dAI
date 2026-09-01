@@ -18,12 +18,13 @@ Apache License above. Parts of it carry further notices of their own, including
 "Copyright (c) 2024 Apple Inc." on portions of MLXLMCommon; those are preserved
 as found.
 
-Three files in that subtree were changed for dAI, each marked with a notice in
-its header and with `dAI:` comments at the changes themselves:
+Four files in that subtree were changed for dAI, each carrying a comment at the
+change itself:
 
-  Libraries/MLXLLM/Pipeline.swift        added by dAI, not present upstream
-  Libraries/MLXLLM/Models/Qwen2.swift    modified by dAI
-  Libraries/MLXLMCommon/Load.swift       modified by dAI
+  Libraries/MLXLLM/Pipeline.swift            added by dAI, not present upstream
+  Libraries/MLXLLM/Models/Qwen2.swift        modified by dAI
+  Libraries/MLXLMCommon/Load.swift           modified by dAI
+  Libraries/Embedders/EmbeddingModel.swift   modified by dAI
 
 ------------------------------------------------------------------------------
 

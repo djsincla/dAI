@@ -1,4 +1,9 @@
 // Copyright © 2024 Apple Inc.
+//
+// Upstream: ml-explore/mlx-swift-examples, MIT (c) 2024 ml-explore.
+// Modified for dAI in 2026: `EmbeddingModelOutput.hiddenStates` and
+// `pooledOutput` are public rather than internal, so pooling can be done
+// outside this library. The change is commented where it is made.
 
 import Foundation
 @preconcurrency import Hub

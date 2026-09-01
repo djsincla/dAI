@@ -21,13 +21,22 @@ is why the transport here is our own.
 
 ### What is changed
 
-Three files, all marked `dAI:` in comments.
+Four files. The first three are the split and are marked `dAI:` at each change;
+the fourth is a one-line visibility change from a different piece of work.
 
 | File | Change |
 |---|---|
 | `Libraries/MLXLLM/Pipeline.swift` | New. `PipelineSplit`, the `PipelineTransport` seam, and `Pipelineable`. |
 | `Libraries/MLXLLM/Models/Qwen2.swift` | Takes the hidden state from the machine holding the earlier layers, and hands its own on. |
 | `Libraries/MLXLMCommon/Load.swift` | `loadWeights(..., keepingLayers:)` drops the layers this machine does not own and renumbers the rest. |
+| `Libraries/Embedders/EmbeddingModel.swift` | `EmbeddingModelOutput.hiddenStates` and `pooledOutput` made public, so pooling can be done outside the library. See `1b306b09`. |
+
+This table said "three files" for four days after the fourth was added in
+`1b306b09` on 2026-08-27. That change is commented where it is and explained in
+its commit message, and was still missing from the one place a reader looks to
+find out what differs from upstream. **A list of modifications is only useful if
+adding a modification also updates it** - and once this fork is published, the
+same list is the attribution.
 
 The transport is a protocol the caller supplies. This library never learns
 about certificates, fleets or sockets, and the code that owns those does not

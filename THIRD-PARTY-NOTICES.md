@@ -53,14 +53,15 @@ no pipeline parallelism for Qwen, and `mlx-swift` deliberately excludes
 distributed support — its `Package.swift` excludes `ring.cpp`, `mpi.cpp` and
 `nccl.cpp` and compiles the `no_ring.cpp` stub instead.
 
-Three files differ from upstream. Changes within existing files are marked
-`dAI:` in comments.
+Four files differ from upstream. Changes within existing files are marked `dAI:`
+in comments, except the last, which carries a plain comment at the change.
 
 | File | Change |
 |---|---|
 | `Libraries/MLXLLM/Pipeline.swift` | **Added by dAI, not present upstream.** `PipelineSplit`, the `PipelineTransport` seam, and `Pipelineable`. |
 | `Libraries/MLXLLM/Models/Qwen2.swift` | **Modified by dAI.** Takes the hidden state from the machine holding the earlier layers, and hands its own on. |
 | `Libraries/MLXLMCommon/Load.swift` | **Modified by dAI.** `loadWeights(..., keepingLayers:)` drops the layers this machine does not own and renumbers the rest. |
+| `Libraries/Embedders/EmbeddingModel.swift` | **Modified by dAI.** `EmbeddingModelOutput.hiddenStates` and `pooledOutput` made public, so pooling can be done outside the library. |
 
 No upstream file has been relicensed, and no copyright notice has been removed.
 The transport is a protocol the caller supplies, so the library learns nothing

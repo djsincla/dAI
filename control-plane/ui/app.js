@@ -15,7 +15,7 @@
 import {
   attentionItems, capacityOf, copyState, distributionOf, humanBytes, importCost,
   bucketFor, certificateStanding, clampWindow, describeTier, describeWindow,
-  deploymentNote, effectiveModelFor, minimumNote, splitNote, suspensionNote,
+  deploymentNote, effectiveModelFor, minimumNote, suspensionNote,
   groupMachines, groupMismatches,
   TIERS, tiersOf, tierToggle, needsTierFor, bothTiersNote,
   groupMode, groupWarning, importProgress, isSynthetic, kindsFor,

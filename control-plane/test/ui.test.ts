@@ -14,7 +14,7 @@ import {
   tierToggle, needsTierFor, bothTiersNote,
   attentionItems, capacityOf, copyState, distributionOf, humanBytes, importCost,
   bucketFor, certificateStanding, clampWindow, effectiveModelFor, groupMismatches,
-  splitNote, suspensionNote, describeWindow, groupMachines,
+  suspensionNote, describeWindow, groupMachines,
   groupMode, groupWarning, importProgress, isStale, isSynthetic, kindsFor,
   deploymentNote, expiresIn, idleWindowApplies, knobLabel, minimumNote,
   machinesThatCouldHold, matchesQuery, MAX_WINDOW_S, MIN_WINDOW_S, nextSort,
@@ -1076,25 +1076,6 @@ describe('what the fleet view says about the model a machine runs', () => {
   })
 })
 
-describe('how wide a model is, said where it is named', () => {
-  it('marks a model that runs across machines', () => {
-    // A repository path says nothing about this, and serving it engages two
-    // machines, needs a group set up for it, and takes those machines out of
-    // harvesting while it stands.
-    expect(splitNote(2)).toBe('2 machines')
-    expect(splitNote(5)).toBe('5 machines')
-  })
-
-  it('says nothing about the ordinary case', () => {
-    // The point is that split models stand out. A list decorated with
-    // "1 machine" on every row hides them again.
-    expect(splitNote(1)).toBe('')
-    expect(splitNote(null)).toBe('')
-    expect(splitNote(undefined)).toBe('')
-  })
-})
-
-
 /**
  * The readiness strip on a cluster group's card.
  *
@@ -1575,8 +1556,10 @@ describe('knob labels', () => {
 describe('machine counts', () => {
   it('says a model needs machines, and says nothing when it needs one', () => {
     expect(minimumNote(2)).toBe('needs 2 machines')
+    expect(minimumNote(5)).toBe('needs 5 machines')
     expect(minimumNote(1)).toBe('')
     expect(minimumNote(null)).toBe('')
+    expect(minimumNote(undefined)).toBe('')
   })
 
   it('reports what a group runs, which may be wider than the minimum', () => {

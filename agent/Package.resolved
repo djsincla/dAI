@@ -33,7 +33,7 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/djsincla/mlx-swift-examples.git",
       "state" : {
-        "revision" : "a3aba85274b152cc1dcd1964a8c2b28145ec2bd6"
+        "revision" : "7d86f26988c9d48ec703ec1828906be2ad6f875c"
       }
     },
     {

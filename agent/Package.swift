@@ -32,7 +32,7 @@ let package = Package(
         // dependency when both lived in one checkout, which made agreement
         // structural; now it is a pin, and the pin has to be checked.
         .package(url: "https://github.com/djsincla/mlx-swift-examples.git",
-                 revision: "a3aba85274b152cc1dcd1964a8c2b28145ec2bd6"),
+                 revision: "7d86f26988c9d48ec703ec1828906be2ad6f875c"),
         // URLSession can only present a client certificate as a SecIdentity,
         // which needs the private key as a SecKey. A key held in the Secure
         // Enclave is not one, and cannot be made into one without the keychain
@@ -66,10 +66,11 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXLLM", package: "mlx-swift-examples"),
                 .product(name: "MLXLMCommon", package: "mlx-swift-examples"),
-                // Embedding models, for /v1/embeddings. Vendored with the rest
-                // of mlx-swift-examples and simply not depended on until now;
-                // it carries Bert, NomicBert and Qwen3 with their own
-                // tokenizers and pooling. See docs/EMBEDDINGS_PLAN.md.
+                // Embedding models, for /v1/embeddings. It carries Bert,
+                // NomicBert and Qwen3 with their own tokenizers and pooling.
+                // notebookMLX depends on this same product from the same
+                // revision, which is what the pin above is protecting. See
+                // docs/EMBEDDINGS_PLAN.md.
                 .product(name: "MLXEmbedders", package: "mlx-swift-examples"),
             ]
         ),

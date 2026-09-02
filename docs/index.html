@@ -252,13 +252,14 @@ claude</code></pre>
 <div class="scroll"><table>
   <tr><th>Thing</th><th>State</th></tr>
   <tr><td>Two-node fleet acceptance test: work redistributing on yield</td><td class="no">not run</td></tr>
+  <tr><td>A <code>.pkg</code> installed on a clean machine</td><td class="no">never - CI runs the packaging suite off this machine, but nothing runs <code>installer -pkg</code> onto a fresh Mac</td></tr>
   <tr><td>Logged-out operation - the reason for a daemon over an agent</td><td class="no">untested</td></tr>
-  <tr><td>Notarised installer for MDM distribution</td><td class="warn">written, needs a Developer ID</td></tr>
-  <tr><td>Throughput figures from a real embedding model</td><td class="warn">synthetic stand-in</td></tr>
+  <tr><td>MDM distribution</td><td class="warn">signed and notarised; no MDM has ever delivered one</td></tr>
+  <tr><td>Fleet-level throughput from a real embedding model</td><td class="warn">synthetic stand-in; single-machine embedding is real (44,000 chunks, checked against the Python client)</td></tr>
   <tr><td>tool_choice honoured by constrained decoding</td><td class="warn">refused with 400 when the model declines</td></tr>
   <tr><td>A model large enough for agentic coding</td><td class="warn">a 4-bit 3B degrades from ~8k tokens; a 32B stays coherent but reads prompt at ~64 tokens/sec</td></tr>
-  <tr><td>Model catalogue with hash verification</td><td class="no">models staged by hand</td></tr>
-  <tr><td>Cluster tier over Thunderbolt</td><td class="no">cables not yet tested</td></tr>
+  <tr><td>Model catalogue with hash verification</td><td class="no">models staged by hand; the catalogue records size and shape and no digest</td></tr>
+  <tr><td>Cluster tier over Thunderbolt</td><td class="ok">built and measured - 0.85 ms, 324 MB/s; 14B, 32B and 72B split across the bridge</td></tr>
   <tr><td>Multi-instance control plane</td><td class="no">single process</td></tr>
 </table></div>
 

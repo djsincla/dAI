@@ -81,6 +81,29 @@ this one. Read it as a working system with a fleet of two, not a product.
 A client that uses it: [notebookMLX](https://github.com/djsincla/notebookMLX),
 which embeds documents locally and asks a dAI gateway the questions.
 
+### Not done, and honestly so
+
+A public repository invites the assumption that everything described works
+everywhere. This is what does not, kept here rather than discovered.
+
+| Thing | State |
+|---|---|
+| Two-node acceptance test: work redistributing on yield | Not run. Yield works and dispatch works; nobody has sat down at a busy machine and watched its units complete elsewhere. |
+| Logged-out operation | Untested, and it is the reason this is a daemon rather than an agent. E1 covered locked and idle; the fully logged-out state is inferred. |
+| A `.pkg` installed on a clean machine | Never. CI exercises the packaging suite on a machine that is not the author's, which found real faults - but nothing runs `installer -pkg` onto a fresh Mac. Every packaging fault so far has been invisible to any test of the repository. |
+| MDM distribution | The installers are signed and notarised, and no MDM has ever delivered one. The payload shape is designed for it and unproven by it. |
+| Throughput from a real embedding model | The fleet-level figures use a synthetic stand-in. Single-machine embedding is real - the notebook has indexed 44,000 chunks with Qwen3-Embedding, checked against the Python client - but the aggregate numbers are not measured end to end. |
+| `tool_choice` under constrained decoding | Not honoured. A model that declines returns a 400 rather than being forced. |
+| A model large enough for agentic coding | Not on this hardware. A 4-bit 3B degrades past ~8k tokens; a 32B stays coherent but reads prompt at ~64 tokens/sec. |
+| Model catalogue with hash verification | Models are staged by hand. The `models` table records size and shape and no digest, so a re-import is trusted rather than verified. |
+| Multi-instance control plane | Single process. No leader election, no shared-nothing story; the database survives a reboot and the daemon does not run twice. |
+
+Two things people assume are missing and are not: **splitting a model across
+machines is built and measured** - 14B, 32B and 72B across a Thunderbolt bridge
+benchmarked at 0.85 ms and 324 MB/s, with gang admission and per-rank layer
+ranges on every completion - and **the installers are genuinely notarised**, so
+Gatekeeper will not stop you.
+
 ### How it got here: the Phase 0 spike
 
 Before any architecture was committed, seven experiments answered the questions

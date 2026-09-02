@@ -40,6 +40,8 @@ as a bad corpus or a bad model, not as a version skew. `ForkPinTests` in each
 repository binds the resolved revision to the one its `NOTICE` names, so
 checking that the two agree is a grep rather than a resolve.
 
+**Installing it:** [three components, start to finish](#installing-it).
+
 Full design: [`docs/PLAN.md`](docs/PLAN.md).
 Control plane spec: [`docs/CONTROL_PLANE.md`](docs/CONTROL_PLANE.md).
 Install and operations: [`docs/MANUAL.html`](docs/MANUAL.html).
@@ -256,6 +258,104 @@ instruments cover different contention paths:
   +65% and p99 +82% (mean fps 68.7 → 53.4). Reporting medians or mean fps would
   have read as "negligible impact"; the tail is where the user sees stutter.
   This is why the harness reports percentiles and hitch counts.
+
+## Installing it
+
+Three components. The control plane and the agent ship as signed, notarised
+packages on the [releases page](https://github.com/djsincla/dAI/releases);
+notebookMLX is built from source.
+
+**You need:** Apple Silicon, macOS 26 or later, and a Postgres the control plane
+can reach. Everything is installed by `installer -pkg`, so the packages are
+notarised - Gatekeeper will not stop you.
+
+### 1. The control plane, on one machine
+
+This is the gateway, the console and the certificate authority. Install it
+first: an agent with nothing to enrol against just waits.
+
+```sh
+sudo installer -pkg dai-control-0.8.14.pkg -target /
+sudo /usr/local/libexec/dai-control/install.sh \
+    --db postgres://user:pass@localhost:5432/dai \
+    --hostname control.example.com
+```
+
+The second command is not optional and is the one people skip. The package puts
+code on disk; `install.sh` applies the schema, provisions the CA and starts the
+daemon. It prints two things worth keeping: **the console URL** (port 8452) and
+**the path to `srv-ca.crt`**, which every agent needs.
+
+Sign in as `admin` / `admin`. It will make you choose a real password before
+anything else works.
+
+### 2. An agent, on every machine that lends capacity
+
+One package for every machine; what differs is a file. Put this at
+`/Library/Application Support/dAI/config.json`, with `server-ca.crt` beside it:
+
+```json
+{ "url": "https://control.example.com:8452",
+  "joinToken": "...",
+  "caPath": "/Library/Application Support/dAI/server-ca.crt" }
+```
+
+Mint the join token in the console, or with `scripts/dai-fleet token`. Then:
+
+```sh
+sudo installer -pkg dai-agent-0.8.14.pkg -target /
+```
+
+With that file present the package enrols the machine and starts. **Without it
+the package installs and deliberately starts nothing**, so MDM may deliver the
+two payloads in either order.
+
+**Approve each machine in the console.** Nothing runs on it until you do. A
+newly approved machine reports healthy and does nothing for a while - that is
+the model sync fetching weights, not a fault.
+
+### 3. notebookMLX, optionally
+
+A document app that embeds locally and asks your fleet for the answers. No
+package yet, and building it has one prerequisite worth knowing before you
+start: **SwiftPM cannot compile MLX's Metal shaders**, so the app needs a shader
+bundle produced by `xcodebuild`. `make-app.sh` borrows the one from a sibling
+dAI checkout, which means building this agent at least once:
+
+```sh
+# in this repository, once - produces mlx-swift_Cmlx.bundle
+xcodebuild build -scheme dai-agent -destination 'platform=OS X' \
+    -derivedDataPath agent/.xcbuild
+
+# then, beside it
+git clone https://github.com/djsincla/notebookMLX.git
+cd notebookMLX && ./packaging/make-app.sh
+open .build/NotebookMLX.app
+```
+
+Clone it somewhere that is not beside dAI and point `DAI_CMLX_BUNDLE` at the
+bundle instead. Skip this and `make-app.sh` warns, the build still succeeds, and
+the app aborts on its first embedding with "Failed to load the default
+metallib" - which names Metal rather than the missing directory, so it is worth
+reading the warning.
+
+In Settings, point it at `https://control.example.com:8452`, give it the same
+`srv-ca.crt`, and paste an API key minted from the console. It also speaks plain
+OpenAI, so it can be pointed at any compatible server instead - see its own
+README.
+
+### Then what
+
+Register a model and assign it to a group, and the fleet will serve it on the
+group's port. `docs/MANUAL.html` covers that, upgrades, backups and what to do
+when it goes wrong - it is HTML, so read it locally rather than on GitHub:
+
+```sh
+open docs/MANUAL.html
+```
+
+Upgrading is the same two commands as the install, in the same order, and both
+installers are safe to re-run on a working machine.
 
 ## Runtime
 

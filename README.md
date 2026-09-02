@@ -11,11 +11,10 @@ roughly electricity - and, critically, without data ever leaving the building.
 harvested Macs lose to both cloud APIs and rented GPUs. The winning arguments
 are that the marginal cost is electricity and that the data stays on premises.
 
-## Three repositories, and how they fit
+## Three repositories
 
-**This one is the fleet.** It schedules idle Macs and serves models from them.
-Two others came out of it, and neither is optional reading if you are trying to
-work out where a piece of this lives.
+This one is the fleet: it schedules idle Macs and serves models from them. Two
+others came out of it.
 
 ```mermaid
 flowchart TB
@@ -33,14 +32,13 @@ flowchart TB
 | **[mlx-swift-examples](https://github.com/djsincla/mlx-swift-examples)** | Our fork, branch `dai-pipeline`. Upstream has no pipeline parallelism for Qwen, and `mlx-swift` excludes distributed support outright, so a dense model too large for one machine cannot be served at all. | It has **two** consumers. Splitting a model across machines cannot be done from outside the library - the layer loop, weight loader and quantisation pass all have to agree which layers a machine owns, and none are extension points. |
 | **[notebookMLX](https://github.com/djsincla/notebookMLX)** | A document app. Embeds locally through `MLXEmbedders`; asks a dAI gateway for generation. Citations open the passage they name. | It is a *client*, and it shares the fork rather than borrowing it. It used to reach the library through `../agent/vendor/`, welding it to this repo's directory layout. |
 
-**Both consumers pin the fork at the same exact revision, and must.** Two copies
-at different revisions could pool or normalise differently, and an index built
-by one would be silently incomparable with a query from the other - which reads
-as a bad corpus or a bad model, not as a version skew. `ForkPinTests` in each
-repository binds the resolved revision to the one its `NOTICE` names, so
-checking that the two agree is a grep rather than a resolve.
+Both consumers pin the fork at the same exact revision. Two copies at different
+revisions could pool or normalise differently, and an index built by one would
+not match a query from the other - which looks like a bad corpus or a bad model
+rather than a version skew. `ForkPinTests` in each repository checks the
+resolved revision against the one its `NOTICE` names.
 
-**Installing it:** [three components, start to finish](#installing-it).
+**Installing:** [three components](#installing).
 
 Full design: [`docs/PLAN.md`](docs/PLAN.md).
 Control plane spec: [`docs/CONTROL_PLANE.md`](docs/CONTROL_PLANE.md).
@@ -60,16 +58,16 @@ will end the program.
 
 ## Status
 
-**Built and running, on a fleet of two.** A control plane, a Swift agent that
+Built and running on a fleet of two. A control plane, a Swift agent that
 installs as a system daemon, and a signed, notarised installer pair. Machines
 enrol against a join token, are approved by a human, report what they can do,
-and take work - yielding it the moment somebody touches the keyboard. A model
-too large for one machine is served across two, its layers divided, over a
-Thunderbolt bridge.
+and take work, yielding it when somebody touches the keyboard. A model too large
+for one machine is served across two, its layers divided, over a Thunderbolt
+bridge.
 
-That is the honest scope: it works on the author's own two machines. It has no
-users, no CI, and nothing has installed it onto a clean machine that was not
-this one. Read it as a working system with a fleet of two, not a product.
+Scope: it runs on the author's own two machines and has no other users. Nothing
+has installed it onto a clean machine. Treat it as a working system at that
+scale, not a product.
 
 | | |
 |---|---|
@@ -81,10 +79,9 @@ this one. Read it as a working system with a fleet of two, not a product.
 A client that uses it: [notebookMLX](https://github.com/djsincla/notebookMLX),
 which embeds documents locally and asks a dAI gateway the questions.
 
-### Not done, and honestly so
+### Not done
 
-A public repository invites the assumption that everything described works
-everywhere. This is what does not, kept here rather than discovered.
+What does not work, or has not been tested.
 
 | Thing | State |
 |---|---|
@@ -98,17 +95,16 @@ everywhere. This is what does not, kept here rather than discovered.
 | Model catalogue with hash verification | Models are staged by hand. The `models` table records size and shape and no digest, so a re-import is trusted rather than verified. |
 | Multi-instance control plane | Single process. No leader election, no shared-nothing story; the database survives a reboot and the daemon does not run twice. |
 
-Two things people assume are missing and are not: **splitting a model across
-machines is built and measured** - 14B, 32B and 72B across a Thunderbolt bridge
-benchmarked at 0.85 ms and 324 MB/s, with gang admission and per-rank layer
-ranges on every completion - and **the installers are genuinely notarised**, so
+Two things that are done, and are often assumed not to be. Splitting a model
+across machines is built and measured: 14B, 32B and 72B across a Thunderbolt
+bridge benchmarked at 0.85 ms and 324 MB/s, with gang admission and per-rank
+layer ranges on every completion. And the installers are notarised, so
 Gatekeeper will not stop you.
 
-### How it got here: the Phase 0 spike
+### The Phase 0 spike
 
-Before any architecture was committed, seven experiments answered the questions
-that could have killed or reshaped the idea. They are why the design looks the
-way it does, and the numbers are still the argument for it.
+Seven experiments, run before any architecture was committed. They decided the
+design, and the numbers are still the case for it.
 
 | Experiment | Question | Status |
 |---|---|---|
@@ -282,20 +278,20 @@ instruments cover different contention paths:
   have read as "negligible impact"; the tail is where the user sees stutter.
   This is why the harness reports percentiles and hitch counts.
 
-## Installing it
+## Installing
 
 Three components. The control plane and the agent ship as signed, notarised
-packages on the [releases page](https://github.com/djsincla/dAI/releases);
+packages on the [releases page](https://github.com/djsincla/dAI/releases).
 notebookMLX is built from source.
 
 **You need:** Apple Silicon, macOS 26 or later, and a Postgres the control plane
 can reach. Everything is installed by `installer -pkg`, so the packages are
 notarised - Gatekeeper will not stop you.
 
-### 1. The control plane, on one machine
+### 1. Control plane
 
-This is the gateway, the console and the certificate authority. Install it
-first: an agent with nothing to enrol against just waits.
+The gateway, the console and the certificate authority. Install it first: an
+agent with nothing to enrol against waits.
 
 ```sh
 sudo installer -pkg dai-control-0.8.14.pkg -target /
@@ -304,15 +300,14 @@ sudo /usr/local/libexec/dai-control/install.sh \
     --hostname control.example.com
 ```
 
-The second command is not optional and is the one people skip. The package puts
-code on disk; `install.sh` applies the schema, provisions the CA and starts the
-daemon. It prints two things worth keeping: **the console URL** (port 8452) and
-**the path to `srv-ca.crt`**, which every agent needs.
+The second command is required. The package puts code on disk; `install.sh`
+applies the schema, provisions the CA and starts the daemon. It prints the
+console URL (port 8452) and the path to `srv-ca.crt`, which every agent needs.
 
 Sign in as `admin` / `admin`. It will make you choose a real password before
 anything else works.
 
-### 2. An agent, on every machine that lends capacity
+### 2. Agent, on each machine
 
 One package for every machine; what differs is a file. Put this at
 `/Library/Application Support/dAI/config.json`, with `server-ca.crt` beside it:
@@ -333,17 +328,16 @@ With that file present the package enrols the machine and starts. **Without it
 the package installs and deliberately starts nothing**, so MDM may deliver the
 two payloads in either order.
 
-**Approve each machine in the console.** Nothing runs on it until you do. A
-newly approved machine reports healthy and does nothing for a while - that is
-the model sync fetching weights, not a fault.
+Approve each machine in the console. Nothing runs on it until you do. A newly
+approved machine reports healthy and does nothing for a while: that is the model
+sync fetching weights, not a fault.
 
-### 3. notebookMLX, optionally
+### 3. notebookMLX (optional)
 
-A document app that embeds locally and asks your fleet for the answers. No
-package yet, and building it has one prerequisite worth knowing before you
-start: **SwiftPM cannot compile MLX's Metal shaders**, so the app needs a shader
-bundle produced by `xcodebuild`. `make-app.sh` borrows the one from a sibling
-dAI checkout, which means building this agent at least once:
+A document app that embeds locally and asks the fleet for answers. No package
+yet, and one prerequisite: SwiftPM cannot compile MLX's Metal shaders, so the
+app needs a shader bundle produced by `xcodebuild`. `make-app.sh` takes the one
+from a sibling dAI checkout, so build this agent once first:
 
 ```sh
 # in this repository, once - produces mlx-swift_Cmlx.bundle
@@ -356,25 +350,23 @@ cd notebookMLX && ./packaging/make-app.sh
 open .build/NotebookMLX.app
 ```
 
-Clone it somewhere that is not beside dAI and point `DAI_CMLX_BUNDLE` at the
-bundle instead. Skip this and `make-app.sh` warns, the build still succeeds, and
-the app aborts on its first embedding with "Failed to load the default
-metallib" - which names Metal rather than the missing directory, so it is worth
-reading the warning.
+If notebookMLX is not beside dAI, point `DAI_CMLX_BUNDLE` at the bundle
+instead. Without it `make-app.sh` warns, the build succeeds, and the app aborts
+on its first embedding with "Failed to load the default metallib" - a message
+that names Metal rather than the missing directory.
 
 In Settings, point it at `https://control.example.com:8452`, give it the same
 `srv-ca.crt`, and paste an API key minted from the console. It also speaks plain
 OpenAI, so it can be pointed at any compatible server instead - see its own
 README.
 
-### Then what
+### After that
 
-Register a model and assign it to a group, and the fleet will serve it on the
-group's port. **[The manual](https://djsincla.github.io/dAI/MANUAL.html)** covers
-that, upgrades, backups and what to do when it goes wrong, and
-[the docs site](https://djsincla.github.io/dAI/) has the rest - architecture, the
-decision record, testing and releasing. They are HTML, which GitHub shows as
-source, so they are published rather than linked into the tree.
+Register a model and assign it to a group, and the fleet serves it on the
+group's port. [The manual](https://djsincla.github.io/dAI/MANUAL.html) covers
+that, upgrades, backups and troubleshooting;
+[the docs site](https://djsincla.github.io/dAI/) has architecture, decisions,
+testing and releasing.
 
 Upgrading is the same two commands as the install, in the same order, and both
 installers are safe to re-run on a working machine.
@@ -417,8 +409,8 @@ docs/
 
 `agent/vendor/` and `notebook/` used to live in this tree. They are
 [mlx-swift-examples](https://github.com/djsincla/mlx-swift-examples) and
-[notebookMLX](https://github.com/djsincla/notebookMLX) now - see the top of this
-file for what each is and how the three connect.
+[notebookMLX](https://github.com/djsincla/notebookMLX) now. See the top of this
+file.
 
 ## Running the spike
 

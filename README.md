@@ -44,7 +44,7 @@ checking that the two agree is a grep rather than a resolve.
 
 Full design: [`docs/PLAN.md`](docs/PLAN.md).
 Control plane spec: [`docs/CONTROL_PLANE.md`](docs/CONTROL_PLANE.md).
-Install and operations: [`docs/MANUAL.html`](docs/MANUAL.html).
+Install and operations: [the manual](https://djsincla.github.io/dAI/MANUAL.html).
 Reporting a vulnerability, and what is knowingly weak: [`SECURITY.md`](SECURITY.md).
 
 ## Where the analogy breaks
@@ -76,7 +76,7 @@ this one. Read it as a working system with a fleet of two, not a product.
 | Control plane | TypeScript on Postgres, OpenAPI-first, **905 tests** |
 | Agent | Swift with `mlx-swift`, one signed binary, **391 tests** |
 | Serving | OpenAI-compatible gateway; whole models and split models |
-| Operations | Install, upgrade, backup and troubleshooting in [`docs/MANUAL.html`](docs/MANUAL.html) |
+| Operations | Install, upgrade, backup and troubleshooting in [the manual](https://djsincla.github.io/dAI/MANUAL.html) |
 
 A client that uses it: [notebookMLX](https://github.com/djsincla/notebookMLX),
 which embeds documents locally and asks a dAI gateway the questions.
@@ -347,12 +347,11 @@ README.
 ### Then what
 
 Register a model and assign it to a group, and the fleet will serve it on the
-group's port. `docs/MANUAL.html` covers that, upgrades, backups and what to do
-when it goes wrong - it is HTML, so read it locally rather than on GitHub:
-
-```sh
-open docs/MANUAL.html
-```
+group's port. **[The manual](https://djsincla.github.io/dAI/MANUAL.html)** covers
+that, upgrades, backups and what to do when it goes wrong, and
+[the docs site](https://djsincla.github.io/dAI/) has the rest - architecture, the
+decision record, testing and releasing. They are HTML, which GitHub shows as
+source, so they are published rather than linked into the tree.
 
 Upgrading is the same two commands as the install, in the same order, and both
 installers are safe to re-run on a working machine.

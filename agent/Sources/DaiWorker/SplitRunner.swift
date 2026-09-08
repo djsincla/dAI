@@ -57,6 +57,8 @@ public actor SplitRunner {
         public let reusedTokens: Int
         public let decodeSeconds: Double
         public let residentGb: Double
+        /// Which of the caller's stop sequences ended this, if one did.
+        public var stopSequence: String? = nil
     }
 
     public enum Failure: Error, CustomStringConvertible {
@@ -325,10 +327,12 @@ public actor SplitRunner {
         return true
     }
 
-    public func run(directory: URL, prompt: String, maxTokens: Int) async throws -> Completed {
+    public func run(directory: URL, prompt: String, maxTokens: Int,
+                    sampling: Sampling = Sampling()) async throws -> Completed {
         try await prepare(directory: directory)
         guard let loaded = built else { throw Failure.notPipelineable(plan.modelId) }
-        let outcome = try generate(loaded, prompt: prompt, maxTokens: maxTokens)
+        let outcome = try generate(loaded, prompt: prompt, maxTokens: maxTokens,
+                                   sampling: sampling)
         return Completed(outcome: outcome, isHead: loaded.split.isLast,
                          layers: loaded.split.startIndex ..< loaded.split.endIndex,
                          totalLayers: loaded.totalLayers, size: loaded.split.size)
@@ -424,7 +428,8 @@ public actor SplitRunner {
                                   model: loaded.model, parameters: .init())
     }
 
-    public func generate(_ loaded: Loaded, prompt: String, maxTokens: Int) throws -> Outcome {
+    public func generate(_ loaded: Loaded, prompt: String, maxTokens: Int,
+                         sampling: Sampling = Sampling()) throws -> Outcome {
         let split = loaded.split
         let promptTokens = try loaded.tokenizer.applyChatTemplate(
             messages: [["role": "user", "content": prompt]])
@@ -446,12 +451,29 @@ public actor SplitRunner {
             .union([loaded.tokenizer.eosTokenId, loaded.tokenizer.unknownTokenId]
                 .compactMap { $0 }))
 
+        // The caller's own stop strings, which are a different thing from the
+        // token ids above: those end every answer this model gives, these end
+        // this one answer because somebody asked. Matched on decoded text
+        // because that is what was asked for - a sequence like "\n\nHuman:"
+        // rarely falls on a token boundary, and honouring only the ones that did
+        // would honour them intermittently.
+        let textStops = StopScanner(sampling.stop)
+        var stopSequence: String?
+
+        // Built only on the rank that samples, and only when something other
+        // than greedy was asked for. Every other rank is told the token, which
+        // is what keeps a pipeline in step: two ranks sampling independently
+        // from a shared temperature would still diverge, because each holds its
+        // own random state.
+        var head = split.isLast && !sampling.isGreedy
+            ? SamplingHead(sampling, promptTokens: promptTokens) : nil
+
         let started = Date()
         // Only the tokens nobody has read yet. `toProcess` is the whole prompt
         // when nothing was agreed, which is what every split request did before
         // this and what any disagreement still produces.
         var token = try step(loaded, input: MLXArray(plan.toProcess.map { Int32($0) }),
-                             cache: cache)
+                             cache: cache, head: &head)
         let firstAt = Date()
 
         // Tested before appending, never after. The previous order put the token
@@ -466,7 +488,19 @@ public actor SplitRunner {
             if stops.ends(token) { break }
             produced.append(token)
             if produced.count >= maxTokens { break }
-            token = try step(loaded, input: MLXArray([Int32(token)]), cache: cache)
+            // Every rank runs this and every rank reaches the same answer: the
+            // chosen token is broadcast, so `produced` is identical everywhere
+            // and so is the decode. It has to be. A rank that stopped while its
+            // peer stepped again would leave one machine waiting on a hidden
+            // state that is never coming, and this loop's only failure mode is
+            // a hang.
+            if !textStops.isEmpty,
+               let cut = textStops.cut(loaded.tokenizer.decode(tokens: produced)) {
+                stopSequence = cut.matched
+                break
+            }
+            token = try step(loaded, input: MLXArray([Int32(token)]), cache: cache,
+                             head: &head)
         }
         let ended = Date()
 
@@ -474,13 +508,14 @@ public actor SplitRunner {
             // Only the machine with the output head has anything to say. The
             // other one has been computing real work and holds no logits worth
             // decoding, so it returns nothing rather than nonsense.
-            text: split.isLast ? loaded.tokenizer.decode(tokens: produced) : "",
+            text: split.isLast ? decoded(loaded, produced, cutAt: textStops) : "",
             tokens: produced.count,
             promptTokens: promptTokens.count,
             promptSeconds: firstAt.timeIntervalSince(started),
             reusedTokens: plan.reused,
             decodeSeconds: ended.timeIntervalSince(firstAt),
-            residentGb: Double(GPU.peakMemory) / 1_073_741_824)
+            residentGb: Double(GPU.peakMemory) / 1_073_741_824,
+            stopSequence: stopSequence)
     }
 
     /// Give up if the model recorded a link failure it could not throw.
@@ -495,7 +530,22 @@ public actor SplitRunner {
     }
 
     /// One token, on both machines.
-    private func step(_ loaded: Loaded, input: MLXArray, cache: [KVCache]) throws -> Int {
+    /// The answer as text, with a stop sequence and anything after it removed.
+    ///
+    /// Cut here rather than at the break above because the break works in
+    /// tokens and the cut works in characters: the token that completed the
+    /// sequence usually carries the first characters of it, so leaving the
+    /// decode alone would return the answer with the caller's own terminator
+    /// stuck on the end - the bug the token-id stop set already had once, and
+    /// which put `<|im_end|>` on every split reply.
+    private func decoded(_ loaded: Loaded, _ produced: [Int],
+                         cutAt stops: StopScanner) -> String {
+        let text = loaded.tokenizer.decode(tokens: produced)
+        return stops.cut(text)?.text ?? text
+    }
+
+    private func step(_ loaded: Loaded, input: MLXArray, cache: [KVCache],
+                      head: inout SamplingHead?) throws -> Int {
         let split = loaded.split
         let logits = loaded.model(input.reshaped([1, -1]), cache: cache)
         let last = logits[0..., -1, 0...]
@@ -506,7 +556,13 @@ public actor SplitRunner {
             // machine's own embeddings - the right shape and the wrong numbers,
             // which would sample cleanly and answer confident nonsense.
             try failIfTheLinkBroke()
-            let chosen = argMax(last, axis: -1)
+            // `argMax` directly when nothing else was asked for, rather than
+            // through the sampler `GenerateParameters` would build for
+            // `temperature: 0` - which is an `ArgMaxSampler` and identical. The
+            // difference is an allocation and a protocol dispatch inside a loop
+            // whose entire budget is a round trip between machines, on the path
+            // every request that asked for nothing takes.
+            let chosen = head == nil ? argMax(last, axis: -1) : head!.pick(last)
             eval(chosen)
             let token = chosen.item(Int.self)
             // Told to the other machines rather than assumed. Carried as a

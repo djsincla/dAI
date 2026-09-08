@@ -130,6 +130,63 @@ default rather than a guess. Worth noting the cluster tier does not have this
 problem at all, since it is never preempted, which is another reason interactive
 serving belongs there.
 
+## Sampling
+
+Greedy by default, and that default is a choice rather than an oversight.
+
+Determinism is worth more on a harvested fleet than on a dedicated one. A
+request preempted by a returning user is requeued onto whichever machine is free
+next, so a batch whose items answer differently depending on which machine that
+turned out to be is not reproducible. `temperature: 0` makes the requeue
+invisible, which is the property the whole preemption design depends on. A
+caller who wants sampling asks for it, and by asking accepts that trade.
+
+What the fleet honours, in both request shapes: `temperature`, `top_p`,
+`repetition_penalty` with its `repetition_context_size`, and the stop list
+(`stop` on the OpenAI surface, `stop_sequences` on the Anthropic one). All of it
+is normalised to one spelling on the wire, so the runtime never has to know
+which surface asked.
+
+What it refuses, by name and with a reason: `seed`, `top_k`, `min_p`,
+`logprobs`, `logit_bias`, `n` above 1, and a non-zero `frequency_penalty` or
+`presence_penalty`. `top_k` and `min_p` have no sampler in the pinned MLX
+revision. `seed` is the interesting one - the runtime's samplers each build a
+random state from the clock in their own initialiser, so a seed could be
+accepted, stored, reported back, and would reproduce nothing. Accepting it would
+be a better-looking version of the bug this section documents.
+
+The refusals have a second rule holding them up: a parameter is only refused
+when its value would change the answer. Client libraries fill in `n: 1`,
+`presence_penalty: 0` and `logit_bias: {}` unasked, and rejecting a request for
+asking for nothing is a worse failure than the one being fixed - and would be
+blamed on the fleet just as wrongly.
+
+### Why this needed writing down
+
+`temperature`, `top_p` and `stop_sequences` were in the OpenAPI document from
+the beginning and were read by nothing. The handler built its dispatch body from
+`messages`, `max_tokens`, `model` and the tool fields; the value was validated
+against a schema that named it and then dropped between the handler and the
+wire. Both runtimes hardcoded a sampler of their own - `temperature: 0` in
+`MLXRuntime`, a bare `argMax` in `SplitRunner`.
+
+So a caller sent 0.9, was validated, got a 200, and got greedy output. Nothing
+anywhere said so, and the symptom reached them as "this model is dull" - which
+points at the model, not at the gateway that discarded the setting. It is the
+same shape as every other expensive fault in this system: it failed quietly and
+named the wrong component.
+
+The two hardcoded samplers are worth noting separately. They agreed with each
+other, so nothing was visibly wrong, but they were one fact written twice and
+would have drifted the moment either was made configurable alone. Both now build
+from the same `GenerateParameters`: `MLXRuntime` hands it to MLX's own token
+iterator, and `SplitRunner` - which steps the model by hand, because a split
+moves a hidden state between machines between every token - asks the same object
+for its sampler and its logit processor. Only the rank holding the output head
+samples at all. Every other rank is told the chosen token over the link, which
+is what keeps a pipeline in step: two ranks sampling from the same temperature
+would still diverge, because each holds its own random state.
+
 ## Built
 
 All five recommendations below are implemented and tested. 66 control plane

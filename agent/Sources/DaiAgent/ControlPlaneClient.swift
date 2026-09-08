@@ -26,7 +26,8 @@ public protocol ControlPlaneClient: Actor {
     func reportDispatch(id: String, text: String?, error: String?,
                         promptTokens: Int, completionTokens: Int,
                         cachedTokens: Int, toolCalls: [ToolCall],
-                        layerPlan: [[Int]], embeddings: [[Float]]) async throws
+                        layerPlan: [[Int]], embeddings: [[Float]],
+                        stopSequence: String?) async throws
     func isDispatchCancelled(id: String) async -> Bool
     func assignedModels() async throws -> [ControlPlane.AssignedModel]
     func downloadModelFile(modelId: String, path: String, to destination: URL) async throws -> String
@@ -80,11 +81,13 @@ public extension ControlPlaneClient {
                         promptTokens: Int = 0, completionTokens: Int = 0,
                         cachedTokens: Int = 0, toolCalls: [ToolCall] = [],
                         layerPlan: [[Int]] = [],
-                        embeddings: [[Float]] = []) async throws {
+                        embeddings: [[Float]] = [],
+                        stopSequence: String? = nil) async throws {
         try await reportDispatch(id: id, text: text, error: error,
                                  promptTokens: promptTokens,
                                  completionTokens: completionTokens,
                                  cachedTokens: cachedTokens, toolCalls: toolCalls,
-                                 layerPlan: layerPlan, embeddings: embeddings)
+                                 layerPlan: layerPlan, embeddings: embeddings,
+                                 stopSequence: stopSequence)
     }
 }

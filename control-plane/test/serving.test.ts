@@ -752,6 +752,124 @@ describe('serving over HTTP', () => {
     expect((await r.json()).error.type).toBe('overloaded_error')
   })
 
+  describe('sampling parameters reaching the machine that samples', () => {
+    /** Ask, and hand back whatever the node was actually told. */
+    async function dispatched(body: Record<string, unknown>, path = '/v1/chat/completions') {
+      let seen: any
+      const node = attachNode((b) => {
+        seen = b
+        return { text: 'x', promptTokens: 1, completionTokens: 1 }
+      })
+      await new Promise((r) => setTimeout(r, 150))
+      const r = await fetch(`${base}${path}`, {
+        method: 'POST', headers: asUser(fx.operatorToken),
+        body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }],
+                               max_tokens: 8, ...body }),
+      })
+      const answer = await r.json() as any
+      node.stop()
+      return { status: r.status, seen, answer }
+    }
+
+    it('sends what the caller asked for to the node', async () => {
+      // The whole point. These were declared in the OpenAPI document, validated
+      // against it, and never put in the dispatch body - so the node sampled
+      // greedily, the caller got a 200, and the only symptom was an answer that
+      // seemed dull. This assertion is on the payload the node received rather
+      // than on the response, because the response looked correct throughout.
+      const { seen } = await dispatched({ temperature: 0.7, top_p: 0.9, stop: ['</task>'] })
+      expect(seen).toMatchObject({ temperature: 0.7, top_p: 0.9, stop: ['</task>'] })
+    })
+
+    it('sends greedy when the caller asked for nothing', async () => {
+      const { seen } = await dispatched({})
+      expect(seen).toMatchObject({ temperature: 0, top_p: 1 })
+      expect(seen).not.toHaveProperty('stop')
+    })
+
+    it('accepts the bare string an OpenAI client sends as stop', async () => {
+      // Through HTTP rather than through the parser alone, because the schema
+      // declares this one as a oneOf and the request validator in front of the
+      // route is the thing most likely to refuse it. A parameter the parser
+      // handles and the validator rejects never reaches the parser.
+      const { status, seen } = await dispatched({ stop: '###' })
+      expect(status).toBe(200)
+      expect(seen.stop).toEqual(['###'])
+    })
+
+    it('refuses a parameter it cannot honour, before routing', async () => {
+      // 400 and not 503. A body naming something this fleet cannot do is wrong
+      // however many machines are free, and answering "no capacity" would send
+      // the caller to look at the fleet for a fault in their own request.
+      const { status, answer } = await dispatched({ seed: 42 })
+      expect(status).toBe(400)
+      expect(answer.error.message).toContain('seed')
+      expect(answer.error.type).toBe('invalid_request_error')
+    })
+
+    it('reports a stop sequence as a stop rather than as a length', async () => {
+      // The node cut the answer on purpose. `length` would tell the caller
+      // their budget ran out, which sends somebody to raise max_tokens for a
+      // request that was never going to be longer.
+      let seen: any
+      const node = attachNode((b) => {
+        seen = b
+        return { text: 'done', promptTokens: 1, completionTokens: 8,
+                 stopSequence: '</task>' }
+      })
+      await new Promise((r) => setTimeout(r, 150))
+      const r = await fetch(`${base}/v1/chat/completions`, {
+        method: 'POST', headers: asUser(fx.operatorToken),
+        body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }],
+                               max_tokens: 8, stop: ['</task>'] }),
+      })
+      const body = await r.json() as any
+      node.stop()
+      expect(seen.stop).toEqual(['</task>'])
+      expect(body.choices[0].finish_reason).toBe('stop')
+      expect(body.dai.stopSequence).toBe('</task>')
+      expect(body.dai.sampling.requested).toContain('stop')
+    })
+
+    it('takes the Anthropic spelling on the Anthropic surface', async () => {
+      await fetch(`${base}/agent/v1/heartbeat`, {
+        method: 'POST', headers: asNode(fx.fingerprint),
+        body: JSON.stringify({ presenceState: 'LOCKED', residentModels: { 'qwen-7b': 4.0 } }),
+      })
+      const { seen } = await dispatched(
+        { model: 'qwen-7b', temperature: 0.5, stop_sequences: ['\n\nHuman:'] },
+        '/v1/messages')
+      // Normalised to one name on the wire. The two surfaces spell it
+      // differently and the runtime should not have to know which one asked.
+      expect(seen).toMatchObject({ temperature: 0.5, stop: ['\n\nHuman:'] })
+    })
+
+    it('names the stop sequence in the Anthropic stop_reason', async () => {
+      await fetch(`${base}/agent/v1/heartbeat`, {
+        method: 'POST', headers: asNode(fx.fingerprint),
+        body: JSON.stringify({ presenceState: 'LOCKED', residentModels: { 'qwen-7b': 4.0 } }),
+      })
+      const node = attachNode(() => ({
+        text: 'done', promptTokens: 1, completionTokens: 4, stopSequence: '\n\nHuman:',
+      }))
+      await new Promise((r) => setTimeout(r, 150))
+      const r = await fetch(`${base}/v1/messages`, {
+        method: 'POST', headers: asUser(fx.operatorToken),
+        body: JSON.stringify({
+          model: 'qwen-7b', messages: [{ role: 'user', content: 'hi' }],
+          max_tokens: 32, stop_sequences: ['\n\nHuman:'],
+        }),
+      })
+      const body = await r.json() as any
+      node.stop()
+      expect(body.stop_reason).toBe('stop_sequence')
+      // Named, not just flagged: a caller that gave four of them branches on
+      // which matched, and `stop_sequence: null` beside a `stop_sequence` stop
+      // reason is a shape no client written against this API expects.
+      expect(body.stop_sequence).toBe('\n\nHuman:')
+    })
+  })
+
   it('still lists a model the repository has never heard of', async () => {
     // The filter is keyed on models.kind, and a node can hold weights that were
     // never imported. Those are unknown, not unreachable, and dropping them

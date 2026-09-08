@@ -226,7 +226,8 @@ public actor ControlPlane {
                                cachedTokens: Int = 0,
                                toolCalls: [ToolCall] = [],
                                layerPlan: [[Int]] = [],
-                               embeddings: [[Float]] = []) async throws {
+                               embeddings: [[Float]] = [],
+                               stopSequence: String? = nil) async throws {
         var body: [String: JSONValue] = [:]
         // Vectors, not text, and checked for emptiness before the branch below
         // rather than after: an embedding result has no text and no error, which
@@ -271,6 +272,12 @@ public actor ControlPlane {
                 "layerPlan": .array(layerPlan.map { range in
                     .array(range.map { .number(Double($0)) })
                 }),
+                // Which stop sequence ended the answer, when one did. Named
+                // rather than flagged: a caller that gave four of them branches
+                // on which matched, and by the time this is read the sequence
+                // has been cut out of the text, so there is nothing left in the
+                // answer for the control plane to work it out from.
+                "stopSequence": stopSequence.map(JSONValue.string) ?? .null,
             ])
         }
         if let error { body["error"] = .string(error) }

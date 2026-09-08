@@ -602,9 +602,16 @@ public actor ReverseChannel {
             // presence of the machine holding the head. Read rather than
             // recomputed, so the decision lives in one place.
             let budget = dispatch.body["max_tokens"]?.intValue ?? 256
+            // Read on every rank, from the body every rank was given. The
+            // control plane spreads sampling into each rank's payload for the
+            // same reason it spreads the model id: a gang whose ranks disagreed
+            // about how to sample would not produce a worse answer, it would
+            // stop producing one - the ranks step in lockstep or they wait on
+            // each other forever.
             let done = try await runner.run(directory: directory,
                                             prompt: promptFrom(dispatch.body),
-                                            maxTokens: budget)
+                                            maxTokens: budget,
+                                            sampling: Sampling(dispatch.body))
 
             let seconds = Date().timeIntervalSince(started)
             // Split into reading the prompt and producing the answer, because
@@ -637,7 +644,12 @@ public actor ReverseChannel {
                 // should be: two hostnames prove two machines were sent work,
                 // where 0..<24 beside 24..<48 proves neither held the whole
                 // model.
-                layerPlan: done.layerPlan)
+                layerPlan: done.layerPlan,
+                // Sent only by the head, for the same reason the text is. Every
+                // rank computed the same stop and broke at the same token, but
+                // the control plane assembles one answer and a second copy of
+                // the field could only ever agree or reveal a bug too late.
+                stopSequence: done.isHead ? done.outcome.stopSequence : nil)
         } catch {
             // A pipeline failure already names the rank that noticed, which is
             // not always this one: rank 0 timing out and rank 1 failing to send
@@ -811,6 +823,7 @@ public actor ReverseChannel {
                 tools: dispatch.body["tools"]?.arrayValue,
                 messages: chatFrom(dispatch.body, dialect: await gpu.toolDialect),
                 forceTool: forcedTool(dispatch.body),
+                sampling: Sampling(dispatch.body),
                 cancelled: cancelled)
 
             if cancelled.isSet {
@@ -852,7 +865,8 @@ public actor ReverseChannel {
             try await controlPlane.reportDispatch(
                 id: dispatch.id, text: out.text, error: nil,
                 promptTokens: out.promptTokens, completionTokens: out.completionTokens,
-                cachedTokens: out.reusedTokens, toolCalls: calls)
+                cachedTokens: out.reusedTokens, toolCalls: calls,
+                stopSequence: out.stopSequence)
         } catch {
             log("failed: \(error)")
             try? await controlPlane.reportDispatch(

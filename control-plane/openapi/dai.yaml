@@ -923,9 +923,52 @@ paths:
                 max_tokens: { type: integer, minimum: 1 }
                 stream: { type: boolean }
                 system: {}
-                temperature: { type: number }
-                top_p: { type: number }
-                stop_sequences: { type: array, items: { type: string } }
+                temperature:
+                  type: number
+                  minimum: 0
+                  maximum: 2
+                  description: |
+                    Defaults to 0, which is greedy, and is not the runtime's
+                    own default. Determinism is load-bearing on a harvested
+                    fleet: a request preempted by a returning user is requeued
+                    onto whichever machine is free, and a batch whose items
+                    answer differently depending on which that was is not
+                    reproducible. A caller who asks for sampling accepts that.
+                top_p:
+                  type: number
+                  minimum: 0
+                  maximum: 1
+                  description: Defaults to 1.
+                repetition_penalty:
+                  type: number
+                  minimum: 0.01
+                  maximum: 2
+                  description: |
+                    Not in either API this server imitates, and offered because
+                    the runtime implements it natively and it is the parameter
+                    people reach for on local models. Named as mlx and
+                    llama.cpp name it. Not the same function as OpenAI's
+                    `frequency_penalty` or `presence_penalty`, which are
+                    refused rather than quietly mapped onto this.
+                repetition_context_size:
+                  type: integer
+                  minimum: 1
+                  maximum: 4096
+                  description: |
+                    The sliding window `repetition_penalty` applies over,
+                    defaulting to 20.
+                    Refused without a penalty to apply in it, because a
+                    parameter that silently does nothing is the fault this
+                    whole surface was fixed to remove.
+                stop_sequences:
+                  type: array
+                  maxItems: 4
+                  items: { type: string, minLength: 1 }
+                  description: |
+                    Matched on the decoded answer and removed from it, with
+                    generation ending there. The matched sequence comes back in
+                    `stop_sequence` alongside a `stop_reason` of
+                    `stop_sequence`.
                 tools: { type: array, items: { type: object, additionalProperties: true } }
                 tool_choice: { type: object, additionalProperties: true }
                 metadata: { type: object, additionalProperties: true }
@@ -1004,6 +1047,56 @@ paths:
                 stream:
                   type: boolean
                   description: Not supported; a completion is dispatched as one unit.
+                temperature:
+                  type: number
+                  minimum: 0
+                  maximum: 2
+                  description: |
+                    Defaults to 0, which is greedy, and is not the runtime's
+                    own default. Determinism is load-bearing on a harvested
+                    fleet: a request preempted by a returning user is requeued
+                    onto whichever machine is free, and a batch whose items
+                    answer differently depending on which that was is not
+                    reproducible. A caller who asks for sampling accepts that.
+                top_p:
+                  type: number
+                  minimum: 0
+                  maximum: 1
+                  description: Defaults to 1.
+                repetition_penalty:
+                  type: number
+                  minimum: 0.01
+                  maximum: 2
+                  description: |
+                    Not in either API this server imitates, and offered because
+                    the runtime implements it natively and it is the parameter
+                    people reach for on local models. Named as mlx and
+                    llama.cpp name it. Not the same function as OpenAI's
+                    `frequency_penalty` or `presence_penalty`, which are
+                    refused rather than quietly mapped onto this.
+                repetition_context_size:
+                  type: integer
+                  minimum: 1
+                  maximum: 4096
+                  description: |
+                    The sliding window `repetition_penalty` applies over,
+                    defaulting to 20.
+                    Refused without a penalty to apply in it, because a
+                    parameter that silently does nothing is the fault this
+                    whole surface was fixed to remove.
+                stop:
+                  description: |
+                    A string or up to four of them. Matched on the decoded
+                    answer and removed from it, with generation ending there.
+                    Which one matched comes back in `dai.stopSequence`, and the
+                    completion's `finish_reason` is `stop` rather than
+                    `length`.
+                  oneOf:
+                    - type: string
+                      minLength: 1
+                    - type: array
+                      maxItems: 4
+                      items: { type: string, minLength: 1 }
       responses:
         '200':
           description: Completion
@@ -1014,6 +1107,15 @@ paths:
           description: |
             Malformed request. Uses the OpenAI error shape rather than this
             API's, because the callers of this surface are OpenAI clients.
+
+            Also the answer for a sampling parameter this fleet cannot honour -
+            `seed`, `top_k`, `min_p`, `logprobs`, `logit_bias`, `n` above 1,
+            and a non-zero `frequency_penalty` or `presence_penalty`. Refused
+            by name and with a reason rather than accepted and dropped, which
+            is what this surface used to do with `temperature`. A value that
+            asks for nothing - `n: 1`, `presence_penalty: 0`, `logit_bias: {}` -
+            is accepted, because client libraries fill those in unasked and
+            rejecting them would turn a correctness rule into an outage.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/OpenAIError' }

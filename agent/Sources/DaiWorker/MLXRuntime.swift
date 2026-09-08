@@ -138,6 +138,13 @@ public actor MLXRuntime {
         public var generateSeconds: Double = 0
         /// Prompt tokens that did not have to be read again.
         public var reusedTokens: Int = 0
+        /// Which of the caller's stop sequences ended this, if one did.
+        ///
+        /// Reported rather than inferred from the text, because by the time the
+        /// control plane sees the answer the sequence has been removed from it -
+        /// that is the point of a stop sequence - so there is nothing left to
+        /// infer from.
+        public var stopSequence: String? = nil
     }
 
     public func generate(prompt: String, maxTokens: Int) async throws -> String {
@@ -148,11 +155,13 @@ public actor MLXRuntime {
                          tools: [DaiAgent.JSONValue]? = nil,
                          messages: [[String: String]]? = nil,
                          forceTool: String? = nil,
+                         sampling: Sampling = Sampling(),
                          cancelled: CancelFlag? = nil) async throws -> Completion {
         let started = Date()
         let out = try await generateCompletion(prompt: prompt, maxTokens: maxTokens,
                                                tools: tools, messages: messages,
-                                               forceTool: forceTool, cancelled: cancelled)
+                                               forceTool: forceTool, sampling: sampling,
+                                               cancelled: cancelled)
         let elapsed = Date().timeIntervalSince(started)
 
         // Measured here rather than taken from MLX's promptTime, which reports
@@ -175,6 +184,7 @@ public actor MLXRuntime {
                                     tools: [DaiAgent.JSONValue]? = nil,
                                     messages: [[String: String]]? = nil,
                                     forceTool: String? = nil,
+                                    sampling: Sampling = Sampling(),
                                     cancelled: CancelFlag? = nil) async throws -> Completion {
         guard let container else { throw Failure.notLoaded }
         let dialect = toolDialect
@@ -201,6 +211,7 @@ public actor MLXRuntime {
         let conversation = built
         let prefill = opening
         let cache = promptCache
+        let stops = StopScanner(sampling.stop)
 
         // Converted inside, because [[String: Any]] is not Sendable and cannot
         // cross into the closure.
@@ -219,16 +230,19 @@ public actor MLXRuntime {
             // is the whole prefix a client resends every turn, which for an
             // agentic conversation is nearly all of it.
             let allTokens = full.text.tokens.asArray(Int.self)
-            let parameters = GenerateParameters(maxTokens: maxTokens, temperature: 0)
+            let parameters = sampling.parameters(maxTokens: maxTokens)
             let plan = cache.plan(for: allTokens, model: context.model,
                                   parameters: parameters)
             let input = plan.reused > 0
                 ? LMInput(text: .init(tokens: MLXArray(plan.toProcess)))
                 : full
 
-            // Greedy. Determinism matters for batch work, where the same item
-            // dispatched to a different node after a requeue should not produce
-            // a different answer.
+            // Greedy unless the caller asked otherwise, which is the default
+            // rather than the only option: determinism matters for batch work,
+            // where the same item dispatched to a different node after a requeue
+            // should not produce a different answer. A caller who asks for
+            // temperature is accepting that trade, and says so in the request
+            // instead of having it decided for them here.
             let stream = try MLXLMCommon.generate(
                 input: input, cache: plan.cache,
                 parameters: parameters,
@@ -241,6 +255,24 @@ public actor MLXRuntime {
             var completionTokens = 0
             var promptSeconds = 0.0
             var generateSeconds = 0.0
+            var stopSequence: String?
+            // A fallback count, used only when the loop is left early.
+            //
+            // The stream reports its figures in a final `.info` event, and
+            // breaking out - which is what a stop sequence does - means that
+            // event never arrives. Without this a stopped answer would be
+            // returned with zero tokens against it, and a client sizing its
+            // context window from the usage block would believe the
+            // conversation never grows.
+            //
+            // Text chunks, not tokens: the detokeniser yields nothing for a
+            // token that only completes half a character, so this is a lower
+            // bound on what was generated rather than the exact count MLX would
+            // have reported. Undercounting a stopped answer is the right way to
+            // be wrong here - it is a few tokens on a completion the caller
+            // deliberately cut short, where the alternative on offer is zero.
+            var chunks = 0
+            let streamStarted = Date()
             for await item in stream {
                 // Checked between tokens. Generation cannot be interrupted
                 // mid-token, so this is as fine-grained as it gets - and it is
@@ -250,6 +282,16 @@ public actor MLXRuntime {
                 switch item {
                 case let .chunk(chunk):
                     text += chunk
+                    chunks += 1
+                    // Tested as the answer grows rather than once at the end.
+                    // Stopping early is the whole value of the parameter: a
+                    // sequence noticed after the model has run to max_tokens has
+                    // saved the caller nothing and held the machine for the full
+                    // budget, which on a harvested fleet is somebody's laptop.
+                    if let cut = stops.cut(text) {
+                        text = cut.text
+                        stopSequence = cut.matched
+                    }
                 case let .info(info):
                     // Reported by MLX at the end of the stream rather than
                     // estimated from the text, so the numbers are the model's
@@ -266,6 +308,15 @@ public actor MLXRuntime {
                 default:
                     break
                 }
+                if stopSequence != nil { break }
+            }
+            // Filled in only when the stream was left before it could report.
+            // `allTokens` is the whole prompt including the part answered from
+            // cache, which is what MLX's figure is reassembled into above.
+            if stopSequence != nil {
+                promptTokens = allTokens.count
+                completionTokens = chunks
+                generateSeconds = Date().timeIntervalSince(streamStarted)
             }
             // Raw output, behind a flag. Every tool-parsing problem so far has
             // been a question of what the model actually emitted, and answering
@@ -280,13 +331,15 @@ public actor MLXRuntime {
                                   completionTokens: completionTokens,
                                   promptSeconds: promptSeconds,
                                   generateSeconds: generateSeconds,
-                                  reusedTokens: plan.reused)
+                                  reusedTokens: plan.reused,
+                                  stopSequence: stopSequence)
             }
             let parsed = dialect.parseCalls(from: text)
             return Completion(text: parsed.text, promptTokens: promptTokens,
                               completionTokens: completionTokens,
                               toolCalls: parsed.calls, promptSeconds: promptSeconds,
-                              generateSeconds: generateSeconds, reusedTokens: plan.reused)
+                              generateSeconds: generateSeconds, reusedTokens: plan.reused,
+                              stopSequence: stopSequence)
         }
     }
 

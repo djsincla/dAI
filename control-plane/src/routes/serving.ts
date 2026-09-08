@@ -10,6 +10,7 @@ import { servingWidth, shapeOf } from '../lib/shape.js'
 import { membersOf } from '../lib/pools.js'
 import { splitReport } from '../lib/splitReport.js'
 import { assignRanks } from '../lib/splitRanks.js'
+import { readSampling, samplingReport } from '../lib/sampling.js'
 
 /**
  * OpenAI-compatible serving surface.
@@ -499,12 +500,22 @@ export function servingRoutes(db: Db, broker: Broker): Router {
       messages: unknown[]
       max_tokens?: number
       stream?: boolean
-    }
+    } & Record<string, unknown>
     if (body.stream) {
       res.status(400).json({ error: {
         message: 'streaming is not supported: a completion is dispatched to a ' +
                  'node as one unit so that a yield has a bounded worst case',
         type: 'invalid_request_error' } })
+      return
+    }
+
+    // Before any routing. A request naming a parameter this fleet cannot honour
+    // is wrong however many machines are free, and answering 503 for it would
+    // send the caller to look at capacity for a fault in their own body.
+    const sampling = readSampling(body, 'openai')
+    if (!sampling.ok) {
+      res.status(400).json({ error: {
+        message: sampling.message, type: 'invalid_request_error' } })
       return
     }
 
@@ -554,7 +565,13 @@ export function servingRoutes(db: Db, broker: Broker): Router {
     const maxTokens = Math.min(requested, policy.maxCompletionTokens)
 
     const started = Date.now()
-    const request = { messages: body.messages, max_tokens: maxTokens, model: modelHash }
+    const request = {
+      messages: body.messages, max_tokens: maxTokens, model: modelHash,
+      // Spread rather than nested, because `splitBody` copies the base into
+      // every rank's payload and a gang whose ranks sampled differently would
+      // diverge after the first token with nothing to show for it.
+      ...sampling.sampling,
+    }
     const out = gang && 'members' in gang
       ? await broker.dispatchGang(
           gang.members, 'generate', modelHash,
@@ -569,7 +586,8 @@ export function servingRoutes(db: Db, broker: Broker): Router {
     }
 
     const result = out.body as {
-      text: string; promptTokens: number; completionTokens: number; layerPlan?: unknown
+      text: string; promptTokens: number; completionTokens: number
+      layerPlan?: unknown; stopSequence?: string | null
     }
     // The gang was known at dispatch and thrown away here until now. Reporting
     // it is what turns "the catalogue says this model is split" into "these
@@ -584,7 +602,12 @@ export function servingRoutes(db: Db, broker: Broker): Router {
       choices: [{
         index: 0,
         message: { role: 'assistant', content: result.text },
-        finish_reason: result.completionTokens >= maxTokens ? 'length' : 'stop',
+        // A stop sequence is a stop, not a length. The node cut the answer
+        // short on purpose and reporting `length` would tell the caller their
+        // budget ran out - the one reading that sends somebody to raise
+        // max_tokens for a request that was never going to be longer.
+        finish_reason: result.stopSequence ? 'stop'
+          : result.completionTokens >= maxTokens ? 'length' : 'stop',
       }],
       usage: {
         prompt_tokens: result.promptTokens,
@@ -600,6 +623,8 @@ export function servingRoutes(db: Db, broker: Broker): Router {
         seconds: Math.round((Date.now() - started) / 10) / 100,
         maxTokensApplied: maxTokens,
         cappedByPolicy: maxTokens < requested,
+        sampling: samplingReport(sampling.sampling, sampling.requested),
+        ...(result.stopSequence ? { stopSequence: result.stopSequence } : {}),
         // Absent entirely on a single-machine completion, so `if (dai.split)`
         // reads correctly rather than needing a `split: false` on every answer
         // this fleet has ever served.
@@ -690,6 +715,18 @@ export function servingRoutes(db: Db, broker: Broker): Router {
       stream?: boolean
       tools?: unknown[]
       tool_choice?: { type: string; name?: string }
+    } & Record<string, unknown>
+
+    // Before the model lookup, for the same reason as on the OpenAI surface: a
+    // body naming a parameter this fleet cannot honour is wrong whatever the
+    // catalogue holds, and a 404 about the model would be the wrong complaint.
+    const sampling = readSampling(body, 'anthropic')
+    if (!sampling.ok) {
+      res.status(400).json({
+        type: 'error',
+        error: { type: 'invalid_request_error', message: sampling.message },
+      })
+      return
     }
 
     // The requested model has to exist. It was ignored entirely, so a typo or
@@ -840,6 +877,7 @@ export function servingRoutes(db: Db, broker: Broker): Router {
       // reaching the model either way.
       tools: body.tools,
       tool_choice: body.tool_choice,
+      ...sampling.sampling,
     }
     const out = gang && 'members' in gang
       ? await broker.dispatchGang(
@@ -884,6 +922,8 @@ export function servingRoutes(db: Db, broker: Broker): Router {
       cachedTokens?: number
       toolCalls?: { name: string; arguments: unknown }[]
       layerPlan?: unknown
+      /** Which of the caller's stop sequences ended it, if one did. */
+      stopSequence?: string | null
     }
     const split = splitReport(
       gang && 'members' in gang ? gang.members : null, result.layerPlan)
@@ -997,8 +1037,16 @@ export function servingRoutes(db: Db, broker: Broker): Router {
 
     // tool_use takes precedence over max_tokens: a client that sees anything
     // else will treat the calls as commentary and never execute them.
+    // A stop sequence outranks max_tokens for the same reason tool_use does:
+    // the answer ended where the caller said it should, and reporting
+    // `max_tokens` would describe a budget that was never reached.
     const stopReason = calls.length > 0 ? 'tool_use'
+      : result.stopSequence ? 'stop_sequence'
       : (result.completionTokens ?? 0) >= maxTokens ? 'max_tokens' : 'end_turn'
+    // Named, not just flagged. A caller that gave four sequences is branching on
+    // which one it was, and `stop_sequence: null` beside a `stop_sequence` stop
+    // reason is a shape no client written against this API expects.
+    const stopSequence = result.stopSequence ?? null
 
     if (body.stream) {
       // Replayed as a stream rather than streamed as it is produced.
@@ -1040,7 +1088,7 @@ export function servingRoutes(db: Db, broker: Broker): Router {
       })
       send('message_delta', {
         type: 'message_delta',
-        delta: { stop_reason: stopReason, stop_sequence: null },
+        delta: { stop_reason: stopReason, stop_sequence: stopSequence },
         usage: { output_tokens: usage.output_tokens },
       })
       send('message_stop', { type: 'message_stop' })
@@ -1055,7 +1103,7 @@ export function servingRoutes(db: Db, broker: Broker): Router {
       model: modelHash ?? residentGenerationModel(choice) ?? 'default',
       content,
       stop_reason: stopReason,
-      stop_sequence: null,
+      stop_sequence: stopSequence,
       usage,
       // The same block `/v1/chat/completions` returns, and it was missing here
       // for no better reason than that the two response shapes were written at
@@ -1074,6 +1122,7 @@ export function servingRoutes(db: Db, broker: Broker): Router {
         seconds: Math.round((Date.now() - started) / 10) / 100,
         maxTokensApplied: maxTokens,
         cappedByPolicy: maxTokens < requested,
+        sampling: samplingReport(sampling.sampling, sampling.requested),
         ...(split ? { split } : {}),
       },
     })

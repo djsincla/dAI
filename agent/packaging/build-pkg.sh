@@ -25,7 +25,14 @@
 #
 # Create the notary profile once with:
 #   xcrun notarytool store-credentials dai-notary \
-#     --apple-id you@example.com --team-id TEAMID --password APP_SPECIFIC_PASSWORD
+#     --apple-id you@example.com --team-id TEAMID
+#
+# Without --password, so it prompts and reads the app-specific password without
+# echoing it. Passing it as an argument puts a live Apple credential into shell
+# history and into the process list, where it outlives the one command that
+# needed it - and an app-specific password is not scoped to this package, it is
+# scoped to the Apple ID. The profile it writes goes to the login Keychain, and
+# every command below reads it from there by name.
 #
 set -euo pipefail
 

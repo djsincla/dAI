@@ -17,6 +17,12 @@ let command = args.count > 1 ? args[1] : "presence"
 
 func fmt(_ v: TimeInterval?) -> String { v.map { String(format: "%.1f", $0) } ?? "unreadable" }
 
+/// A log line stamped the way the worker and serving loops stamp theirs.
+@Sendable func stampedLog(_ message: String) {
+    let stamp = ISO8601DateFormatter().string(from: Date()).suffix(9).prefix(8)
+    print("[\(stamp)] \(message)")
+}
+
 /// What this machine would actually attempt, and why that is less than what the
 /// policy permits.
 ///
@@ -628,15 +634,29 @@ case "work":
             let channel = ReverseChannel(controlPlane: cp, gpu: gpu, ane: ane,
                                          status: status, promoteAfter: promote,
                                          splitIdentity: splitCredentials)
-            if let servedPolicy = try? await cp.fetchPolicy() {
-                await channel.setPolicy(mergePolicy(local: defaultPolicy, served: servedPolicy))
+            // Both asked until answered, in the background. Asked once, a
+            // control plane that was still starting when this machine booted
+            // left it harvest tier for the life of the process - see
+            // untilAnswered. Both loops start on the conservative defaults
+            // meanwhile: the local policy table, and presence gating.
+            Task {
+                let served = try await untilAnswered(
+                    "fetch the presence policy", log: stampedLog) { try await cp.fetchPolicy() }
+                let merged = mergePolicy(local: defaultPolicy, served: served)
+                await channel.setPolicy(merged)
+                await worker.setPolicy(merged)
             }
             // Both loops need to know: they share one runtime, and a loop that
             // thinks it must release the model will release it out from under
             // the other.
-            if let me = try? await cp.whoami() {
+            Task {
+                let me = try await untilAnswered(
+                    "ask which tiers this machine is in", log: stampedLog) { try await cp.whoami() }
                 await channel.setCluster(me.isCluster)
                 await worker.setCluster(me.isCluster)
+                stampedLog("tiers: \(me.tiers.joined(separator: " and "))"
+                    + (me.isCluster ? ", so presence does not gate serving"
+                                    : ", so this machine serves only when nobody is using it"))
             }
             await serving.set(channel)
             Task { await channel.run(maxSeconds: seconds) }
@@ -738,10 +758,15 @@ case "serve":
                                      promoteAfter: ProcessInfo.processInfo
                                         .environment["DAI_PROMOTE_SECONDS"]
                                         .flatMap(Double.init) ?? idlePromoteSeconds)
-        if let served = try? await cp.fetchPolicy() {
+        // Asked until answered, for the same reason as in `work`.
+        Task {
+            let served = try await untilAnswered(
+                "fetch the presence policy", log: stampedLog) { try await cp.fetchPolicy() }
             await channel.setPolicy(mergePolicy(local: defaultPolicy, served: served))
         }
-        if let me = try? await cp.whoami() {
+        Task {
+            let me = try await untilAnswered(
+                "ask which tiers this machine is in", log: stampedLog) { try await cp.whoami() }
             await channel.setCluster(me.isCluster)
             print("serving as \(me.hostname) (\(me.tiers.joined(separator: " and ")))"
                 + (me.isCluster

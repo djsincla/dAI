@@ -79,8 +79,16 @@ echo "==> building release"
 # instrumentation in a Release build, and the shipped binary then tries to write
 # default.profraw next to wherever it is running. As a daemon under a service
 # account that is a permission error on every start, for a file nobody wants.
+#
+# Only the versions Package.resolved names. Without this, a resolved file whose
+# hash this toolchain computes differently is treated as stale and re-resolved
+# to the newest release in range - and 0.8.15 was first built that way, with
+# swift-jinja 2.5.1 against a 2.4.2 pin. Jinja renders every model's chat
+# template, so that is a different agent from the one reviewed and tested, and
+# nothing said so. A drifted pin now fails the build instead.
 (cd "$ROOT" && xcodebuild build -scheme dai-agent -destination 'platform=OS X' \
    -configuration Release -derivedDataPath .xcbuild \
+   -onlyUsePackageVersionsFromResolvedFile \
    ENABLE_CODE_COVERAGE=NO CLANG_ENABLE_CODE_COVERAGE=NO SWIFT_ENABLE_CODE_COVERAGE=NO)
 
 echo "==> staging"

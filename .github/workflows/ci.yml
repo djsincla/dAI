@@ -104,16 +104,22 @@ jobs:
       # Resolves github.com/djsincla/mlx-swift-examples at the revision
       # Package.resolved names. ForkPinTests then checks that revision is the
       # one NOTICE claims, so a bumped pin with a stale notice fails here.
+      #
+      # --force-resolved-versions on every step, or SwiftPM may decide the
+      # resolved file is stale and quietly move a transitive dependency to the
+      # newest release in range. It did locally: swift-jinja went from the
+      # pinned 2.4.2 to 2.5.1, and a job that allows that is testing something
+      # other than what Package.resolved says ships.
       - name: Resolve dependencies
-        run: swift package resolve
+        run: swift package resolve --force-resolved-versions
         working-directory: agent
 
-      - run: swift build
+      - run: swift build --force-resolved-versions
         working-directory: agent
 
       # MLX tests that need compiled Metal shaders skip themselves under
       # `swift test`: SwiftPM cannot build them, and the bundle comes from
       # xcodebuild. That is a real gap in this job and is documented in
       # agent/README.md rather than hidden by it.
-      - run: swift test
+      - run: swift test --force-resolved-versions
         working-directory: agent

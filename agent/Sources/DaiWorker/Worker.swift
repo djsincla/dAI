@@ -180,6 +180,12 @@ public actor Worker {
         self.isCluster = isCluster
     }
 
+    /// The control plane's policy, when it answers after this loop has started
+    /// on the local table.
+    public func setPolicy(_ policy: [PresenceState: StatePolicy]) {
+        self.policy = policy
+    }
+
     // MARK: - Presence
 
     private func presence(maxAge: TimeInterval? = nil) -> PresenceMonitor.Reading {

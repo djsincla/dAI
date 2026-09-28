@@ -248,6 +248,31 @@ ANTHROPIC_AUTH_TOKEN=&lt;session&gt; \
 ANTHROPIC_MODEL=mlx-community/Llama-3.2-3B-Instruct-4bit \
 claude</code></pre>
 
+<h2>Recent changes <span class="dim">- September 2026</span></h2>
+<div class="scroll"><table>
+  <tr><th>Change</th><th>Why</th><th>State</th></tr>
+  <tr>
+    <td>The agent keeps asking the control plane which tier its machine is in, and for the presence policy, until it gets an answer</td>
+    <td>It asked once at startup and ignored a failure. After a reboot the agent started before the control plane, never learned its machine was cluster tier, and treated it as harvest for a week. So the machine stayed out of serving whenever someone was using it, and the gateway answered every request with 503 while every heartbeat looked healthy. Each failed attempt is now logged, and so is the tier once known.</td>
+    <td class="warn">merged; in agent 0.8.15, which is built and notarised but not yet deployed - the fleet runs 0.8.14</td>
+  </tr>
+  <tr>
+    <td>Agent builds and CI use only the dependency versions <code>Package.resolved</code> names</td>
+    <td>The first 0.8.15 build silently compiled against swift-jinja 2.5.1 against a pin of 2.4.2 - and Jinja renders every model's chat template. A version that doesn't match its pin now fails the build.</td>
+    <td class="ok">working</td>
+  </tr>
+  <tr>
+    <td><a href="https://github.com/djsincla/notebookMLX">notebookMLX</a>: ask by voice, hear the answer</td>
+    <td>Hold space in an empty Ask field, or click the mic, and the question is typed into the field as you speak. Clicking the mic to stop sends it. Answers are read back with citations and markdown stripped, and a permanent speaker button mutes them. Recognition runs on the Mac (SpeechAnalyzer, macOS 26); no audio leaves it.</td>
+    <td class="ok">working</td>
+  </tr>
+  <tr>
+    <td>notebookMLX dictation latency</td>
+    <td>Measured from the key press to the microphone opening: <span class="num">1,943 ms</span> at first, which lost a fast talker's first words, now <span class="num">75-96 ms</span>. The recogniser and audio engine are prepared before the press, and the microphone opens on the press itself rather than after deciding it is a hold.</td>
+    <td class="ok">measured</td>
+  </tr>
+</table></div>
+
 <h2>Not done</h2>
 <div class="scroll"><table>
   <tr><th>Thing</th><th>State</th></tr>

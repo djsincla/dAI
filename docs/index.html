@@ -254,7 +254,7 @@ claude</code></pre>
   <tr>
     <td>The agent keeps asking the control plane which tier its machine is in, and for the presence policy, until it gets an answer</td>
     <td>It asked once at startup and ignored a failure. After a reboot the agent started before the control plane, never learned its machine was cluster tier, and treated it as harvest for a week. So the machine stayed out of serving whenever someone was using it, and the gateway answered every request with 503 while every heartbeat looked healthy. Each failed attempt is now logged, and so is the tier once known.</td>
-    <td class="warn">merged; in agent 0.8.15, which is built and notarised but not yet deployed - the fleet runs 0.8.14</td>
+    <td class="ok">working - agent 0.8.15, deployed 28 September; logs <code>tiers: harvest and cluster</code> on start. orca, offline since 19 September, updates when it returns</td>
   </tr>
   <tr>
     <td>Agent builds and CI use only the dependency versions <code>Package.resolved</code> names</td>

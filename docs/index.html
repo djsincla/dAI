@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>dAI - distributed AI on harvested Apple Silicon</title>
+<title>dAI: distributed AI on harvested Apple Silicon</title>
 <!--
   Kept in the repository rather than written once, because it is a claims
   document: every figure here is a measurement from the spike or from a run
@@ -87,28 +87,31 @@
 <div class="wrap">
 
 <header>
-  <h1><span class="tag">dAI</span> - distributed AI on harvested Apple Silicon</h1>
+  <h1><span class="tag">dAI</span>: distributed AI on harvested Apple Silicon</h1>
   <p class="lede">
-    Studio Macs sit idle sixteen hours a day. This schedules that capacity for AI
-    work without anyone noticing, and without a byte leaving the building.
+    Most of the Mac Studios I have looked after spend sixteen hours a day doing
+    nothing in particular. dAI schedules AI work into that time, without the
+    person at the desk noticing and without a byte leaving the building.
   </p>
 </header>
 
 <h2>The argument</h2>
 <div class="panel">
   <p>
-    <b>Sovereignty and sunk cost, not price-performance.</b> Per token, harvested
-    Macs lose to both cloud APIs and rented GPUs, and that argument is
-    unwinnable. The two that hold: the marginal cost is electricity on hardware
-    already bought, and the data never leaves the premises.
+    I should say up front that this does not win on price-performance. Per
+    token, harvested Macs lose to the cloud APIs and to rented GPUs, and I have
+    stopped arguing otherwise. Two things hold up: the marginal cost is
+    electricity on hardware that has already been paid for, and the data never
+    leaves the premises.
   </p>
   <p style="margin:0">
-    The model is the second-GPU render farm, with one difference that decides the
-    whole design. That worked because of <i>physical</i> isolation - a card the
-    artist's session could not touch. Apple Silicon shares one memory pool and
-    one bandwidth budget, so isolation here is <b>policy, not hardware</b>. It is
-    a weaker guarantee, and it means the social problem is the real one: one
-    person noticing their machine got slow ends the programme.
+    The model I had in mind was the render farm, where a second GPU sat in the
+    artist's workstation and earned its keep overnight. That worked because the
+    isolation was physical: the artist's session could not touch the card. Apple
+    Silicon shares one memory pool and one bandwidth budget, so here isolation is
+    <b>policy, not hardware</b>. It is a weaker guarantee, and it makes the social
+    problem the real one. One person noticing their machine got slow is the end
+    of the programme, and they tend not to keep it to themselves&hellip;
   </p>
 </div>
 
@@ -122,31 +125,33 @@
   <tr><td>Capacity</td><td>Swells overnight</td><td>Flat and reliable</td></tr>
 </table></div>
 <p class="note">
-  Interactive serving on harvested nodes is the most common trap and is refused
-  by design: a conversation needs a model still resident a minute from now, which
-  a preemptible tier cannot promise.
+  Interactive serving on harvested nodes is the trap everybody walks into first,
+  so it is refused by design. A conversation needs the model still resident a
+  minute from now, and a preemptible tier cannot promise that. It can promise to
+  try, which is not the same thing.
 </p>
 
 <h2>What the machine will and will not do</h2>
 <p>
-  Measured, not chosen. Every configuration tested was perceptible to a user
-  present at the machine, so GPU work is confined to states where nobody is
-  there. The Neural Engine is separate silicon and measured indistinguishable
-  from no load, which is why three of the five states permit it.
+  None of this was chosen; I measured it. Every configuration I tested was
+  perceptible to somebody sitting at the machine, so GPU work only runs when
+  nobody is there. The Neural Engine is separate silicon and measured
+  indistinguishable from no load, which is why three of the five states allow it.
 </p>
 <div class="scroll"><table>
   <tr><th>State</th><th>GPU</th><th>ANE</th><th>QoS</th><th>Memory ceiling</th><th>Max completion</th></tr>
-  <tr><td>ACTIVE <span class="dim">- at the keyboard</span></td><td class="no">no</td><td class="ok">yes</td><td>background</td><td>0%</td><td>256</td></tr>
-  <tr><td>PASSIVE <span class="dim">- present, not typing</span></td><td class="no">no</td><td class="ok">yes</td><td>background</td><td>15%</td><td>256</td></tr>
+  <tr><td>ACTIVE <span class="dim">(at the keyboard)</span></td><td class="no">no</td><td class="ok">yes</td><td>background</td><td>0%</td><td>256</td></tr>
+  <tr><td>PASSIVE <span class="dim">(present, not typing)</span></td><td class="no">no</td><td class="ok">yes</td><td>background</td><td>15%</td><td>256</td></tr>
   <tr><td>IDLE</td><td class="no">no</td><td class="ok">yes</td><td>background</td><td>35%</td><td>256</td></tr>
   <tr><td>LOCKED</td><td class="ok">yes</td><td class="ok">yes</td><td>standard</td><td>70%</td><td>2048</td></tr>
-  <tr><td>ABSENT <span class="dim">- logged out</span></td><td class="ok">yes</td><td class="ok">yes</td><td>standard</td><td>85%</td><td>4096</td></tr>
+  <tr><td>ABSENT <span class="dim">(logged out)</span></td><td class="ok">yes</td><td class="ok">yes</td><td>standard</td><td>85%</td><td>4096</td></tr>
 </table></div>
 <p class="note">
-  Memory ceiling is a fraction of Metal's own recommended working set, which is
-  already about 81% of unified memory - never of installed RAM. It governs what
-  fits, not politeness: a 32 GB load disturbed a viewport <i>less</i> than an
-  8 GB one at identical duty cycle.
+  The memory ceiling is a fraction of Metal's own recommended working set, which
+  is already about 81% of unified memory, and never a fraction of installed RAM.
+  It governs what fits, not politeness: a 32 GB load disturbed a viewport
+  <i>less</i> than an 8 GB one at the same duty cycle. I did not expect that
+  either.
 </p>
 
 <h2>Measured</h2>
@@ -174,24 +179,25 @@
     <h3 style="margin-top:0">Identity in hardware</h3>
     <p style="margin:0">
       The node's key is generated inside the Secure Enclave and never exists
-      outside it. What is on disk is 284 bytes sealed to that machine: copied
-      elsewhere it is inert, so a certificate taken from a stolen laptop names a
-      key the thief cannot use.
+      outside it. What sits on disk is 284 bytes sealed to that machine. Copied
+      anywhere else it is inert, so a certificate lifted from a stolen laptop
+      names a key the thief cannot use. Small comfort, given the laptop, but
+      comfort.
     </p>
   </div>
   <div class="panel">
     <h3 style="margin-top:0">Signed, not asserted</h3>
     <p style="margin:0">
       A join token gets a machine into a queue and nothing more. An admin
-      approves it, and only then is a certificate issued - client-auth only, EC
-      P-256, short-lived, so a stolen machine stops being a fleet member on its
-      own.
+      approves it, and only then is a certificate issued: client-auth only, EC
+      P-256 and short-lived, so a stolen machine stops being a fleet member on
+      its own.
     </p>
   </div>
   <div class="panel">
     <h3 style="margin-top:0">One machine, one node</h3>
     <p style="margin:0">
-      Enrollment is tied to the hardware UUID, so a reinstalled machine replaces
+      Enrolment is tied to the hardware UUID, so a reinstalled machine replaces
       its old record instead of appearing twice and having its capacity counted
       twice.
     </p>
@@ -199,8 +205,8 @@
   <div class="panel">
     <h3 style="margin-top:0">Least privilege</h3>
     <p style="margin:0">
-      The daemon runs as a service account with no shell and no password, not as
-      root. It needs no entitlement, which is a consequence of reaching the
+      The daemon runs as a service account with no shell and no password, not
+      as root. It needs no entitlement, which is a consequence of reaching the
       Enclave through CryptoKit rather than the keychain.
     </p>
   </div>
@@ -209,17 +215,17 @@
 <h2>The person whose machine it is</h2>
 <div class="panel">
   <p>
-    Isolation here is policy, so the only hard guarantee a machine's owner has is
-    that the off switch works. It is a file, not a request: it works with the
-    control plane unreachable and needs no privilege, because requiring
-    <code>sudo</code> to stop a background process on your own machine is the
-    same as having no button.
+    Because isolation here is policy, the only hard guarantee the owner of a
+    machine gets is that the off switch works. It is a file, not a request. It
+    works with the control plane unreachable and needs no privilege, because
+    needing <code>sudo</code> to stop a background process on your own machine
+    is the same as having no button.
   </p>
   <p style="margin:0">
     <b>No administrator can lift it.</b> The fleet view shows "paused by owner"
-    and offers no control, because a button that must either lie or fail is worse
-    than a plain statement that this is not yours to lift. A menu bar app shows
-    what is running, why, and what the machine has contributed.
+    and offers no control, because a button that must either lie or fail is
+    worse than saying plainly that this one is not yours to press. A menu bar
+    app shows what is running, why, and what the machine has contributed.
   </p>
 </div>
 
@@ -237,38 +243,44 @@
   <tr><td>Render work</td><td>Third work kind</td><td class="warn">scheduled, no runtime yet</td></tr>
 </table></div>
 <p>
-  The API is described by an OpenAPI document that is the source of truth for
-  three independent implementations - the server, the Swift agent, and the tests
-  - so a mismatch surfaces between them rather than in production. Tool-call
-  dialects are data, matched on a model's chat template rather than its name, so
-  adopting a new model family is an edit rather than a release.
+  One OpenAPI document is the source of truth for three independent
+  implementations: the server, the Swift agent and the tests. A mismatch turns up
+  between them rather than in production. Tool-call dialects are data, matched on
+  a model's chat template rather than its name, so adopting a new model family is
+  an edit and not a release.
 </p>
+<p>To point Claude Code at the fleet:</p>
 <pre><code>ANTHROPIC_BASE_URL=https://control-plane:8452 \
 ANTHROPIC_AUTH_TOKEN=&lt;session&gt; \
 ANTHROPIC_MODEL=mlx-community/Llama-3.2-3B-Instruct-4bit \
 claude</code></pre>
 
-<h2>Recent changes <span class="dim">- September 2026</span></h2>
+<h2>Recent changes <span class="dim">(September 2026)</span></h2>
 <div class="scroll"><table>
-  <tr><th>Change</th><th>Why</th><th>State</th></tr>
+  <tr><th>Change</th><th>What happened</th><th>State</th></tr>
   <tr>
-    <td>The agent keeps asking the control plane which tier its machine is in, and for the presence policy, until it gets an answer</td>
-    <td>It asked once at startup and ignored a failure. After a reboot the agent started before the control plane, never learned its machine was cluster tier, and treated it as harvest for a week. So the machine stayed out of serving whenever someone was using it, and the gateway answered every request with 503 while every heartbeat looked healthy. Each failed attempt is now logged, and so is the tier once known.</td>
-    <td class="ok">working - the whole fleet runs agent 0.8.15 (rotorua from 28 September, orca from 29 September), and each logged <code>tiers: harvest and cluster</code> on start</td>
+    <td>The agent keeps asking which tier its machine is in, and for the presence policy, until the control plane answers</td>
+    <td>It used to ask once at startup and accept a failure without comment. After a reboot in September the agent came up fifteen seconds before the control plane, never found out it was on a cluster machine, and behaved as harvest for a week. Whenever I was at the keyboard it stopped serving, and the gateway returned 503 to every request while every heartbeat looked healthy. A slightly inconvenient week&hellip; Each failed attempt is now logged, and so is the tier once it is known.</td>
+    <td class="ok">working: the whole fleet runs agent 0.8.15 (rotorua from 28 September, orca from 29 September), and each logged <code>tiers: harvest and cluster</code> on start</td>
   </tr>
   <tr>
-    <td>Agent builds and CI use only the dependency versions <code>Package.resolved</code> names</td>
-    <td>The first 0.8.15 build silently compiled against swift-jinja 2.5.1 against a pin of 2.4.2 - and Jinja renders every model's chat template. A version that doesn't match its pin now fails the build.</td>
+    <td>Agent builds and CI only use the dependency versions <code>Package.resolved</code> names</td>
+    <td>The first 0.8.15 build compiled against swift-jinja 2.5.1 when the pin said 2.4.2, and nothing mentioned it. Jinja renders every model's chat template, so it is not a detail. A version that does not match its pin now fails the build.</td>
+    <td class="ok">working</td>
+  </tr>
+  <tr>
+    <td>orca names the control plane <code>rotorua.local</code></td>
+    <td>orca dropped off the fleet for ten days after a Wi-Fi change, because its agent named the control plane by an IP address the network had since given away. It looked offline, which in fairness it was. It now uses the name, and the server certificate has been reissued with the same key and CA to cover it.</td>
     <td class="ok">working</td>
   </tr>
   <tr>
     <td><a href="https://github.com/djsincla/notebookMLX">notebookMLX</a>: ask by voice, hear the answer</td>
-    <td>Hold space in an empty Ask field, or click the mic, and the question is typed into the field as you speak. Clicking the mic to stop sends it. Answers are read back with citations and markdown stripped, and a permanent speaker button mutes them. Recognition runs on the Mac (SpeechAnalyzer, macOS 26); no audio leaves it.</td>
+    <td>Hold space in an empty Ask field, or click the microphone, and the question is typed in as you speak. Click the microphone to stop and it is sent. Answers are read back with citations and markdown stripped out, and a permanent speaker button mutes them. Recognition runs on the Mac (SpeechAnalyzer, macOS 26), so no audio leaves it.</td>
     <td class="ok">working</td>
   </tr>
   <tr>
     <td>notebookMLX dictation latency</td>
-    <td>Measured from the key press to the microphone opening: <span class="num">1,943 ms</span> at first, which lost a fast talker's first words, now <span class="num">75-96 ms</span>. The recogniser and audio engine are prepared before the press, and the microphone opens on the press itself rather than after deciding it is a hold.</td>
+    <td>The first version lost the opening words if you talked at a normal pace. From key press to microphone open it took <span class="num">1,943 ms</span>, which is a long time to be talking to nobody. It is now <span class="num">75 to 96 ms</span>: the recogniser and audio engine are prepared before the press, and the microphone opens on the press itself rather than after deciding it is a hold.</td>
     <td class="ok">measured</td>
   </tr>
 </table></div>
@@ -277,20 +289,21 @@ claude</code></pre>
 <div class="scroll"><table>
   <tr><th>Thing</th><th>State</th></tr>
   <tr><td>Two-node fleet acceptance test: work redistributing on yield</td><td class="no">not run</td></tr>
-  <tr><td>A <code>.pkg</code> installed on a clean machine</td><td class="no">never - CI runs the packaging suite off this machine, but nothing runs <code>installer -pkg</code> onto a fresh Mac</td></tr>
-  <tr><td>Logged-out operation - the reason for a daemon over an agent</td><td class="no">untested</td></tr>
+  <tr><td>A <code>.pkg</code> installed on a clean machine</td><td class="no">never. CI runs the packaging suite off this machine, but nothing runs <code>installer -pkg</code> onto a fresh Mac</td></tr>
+  <tr><td>Logged-out operation, which is the reason for a daemon over an agent</td><td class="no">untested</td></tr>
   <tr><td>MDM distribution</td><td class="warn">signed and notarised; no MDM has ever delivered one</td></tr>
   <tr><td>Fleet-level throughput from a real embedding model</td><td class="warn">synthetic stand-in; single-machine embedding is real (44,000 chunks, checked against the Python client)</td></tr>
   <tr><td>tool_choice honoured by constrained decoding</td><td class="warn">refused with 400 when the model declines</td></tr>
-  <tr><td>A model large enough for agentic coding</td><td class="warn">a 4-bit 3B degrades from ~8k tokens; a 32B stays coherent but reads prompt at ~64 tokens/sec</td></tr>
+  <tr><td>A model large enough for agentic coding</td><td class="warn">a 4-bit 3B degrades from ~8k tokens; a 32B stays coherent but reads the prompt at ~64 tokens/sec</td></tr>
   <tr><td>Model catalogue with hash verification</td><td class="no">models staged by hand; the catalogue records size and shape and no digest</td></tr>
-  <tr><td>Cluster tier over Thunderbolt</td><td class="ok">built and measured - 0.85 ms, 324 MB/s; 14B, 32B and 72B split across the bridge</td></tr>
+  <tr><td>Cluster tier over Thunderbolt</td><td class="ok">built and measured: 0.85 ms, 324 MB/s; 14B, 32B and 72B split across the bridge</td></tr>
   <tr><td>Multi-instance control plane</td><td class="no">single process</td></tr>
 </table></div>
 
 <footer>
-  Figures are measurements from the validation spike or from runs against real
-  hardware, not projections. Anything unverified is listed above as unverified.
+  The figures are measurements from the validation spike or from runs against
+  real hardware, not projections. Anything I have not verified is listed above as
+  not verified.
   <br><br>
   <a href="README.html">Documentation</a> &middot;
   <a href="ARCHITECTURE.html">architecture</a> &middot;

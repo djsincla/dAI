@@ -562,8 +562,11 @@ public actor ReverseChannel {
         await publish(mayServe().state, activity: "rank \(split.rank) of a split model")
         // The link logs through this loop's own logger, so what the two halves
         // said to each other reads in order beside everything else the node was
-        // doing at the time.
-        let channel = PipelineChannel(log: { [log] in log($0) })
+        // doing at the time. The actor is captured rather than `log` itself: a
+        // method reference is a plain, non-Sendable function value, while the
+        // actor is Sendable and `log` is nonisolated, so this calls it straight
+        // from the event loop thread without hopping onto the actor.
+        let channel = PipelineChannel(log: { [self] in self.log($0) })
         // Closed however this ends, including the ways it ends badly.
         //
         // Without this the listening rank holds port 7710 for the life of the

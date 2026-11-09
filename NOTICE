@@ -10,7 +10,7 @@ This product depends on a fork of mlx-swift-examples
 Copyright (c) 2024 ml-explore, licensed under the MIT License.
 
   Fork:      https://github.com/djsincla/mlx-swift-examples (dai-pipeline)
-  Pinned at: 7d86f26988c9d48ec703ec1828906be2ad6f875c
+  Pinned at: 6090aa0791f8994d0488ec9248f33b7534ce9e5b
   Forked at: 9bff95c (mlx-swift 0.29.1)
 
 It is resolved by SwiftPM rather than checked into this repository, so the
@@ -27,6 +27,9 @@ change itself:
   Libraries/MLXLLM/Models/Qwen2.swift        modified by dAI
   Libraries/MLXLMCommon/Load.swift           modified by dAI
   Libraries/Embedders/EmbeddingModel.swift   modified by dAI
+
+The fork also adds Libraries/MLXNCM (Next-Concept Modeling inference),
+which touches no upstream file. dAI does not link it.
 
 ------------------------------------------------------------------------------
 

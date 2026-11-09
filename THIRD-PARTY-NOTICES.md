@@ -13,7 +13,7 @@ MIT.
 ## mlx-swift-examples (our fork, modified)
 
 **Our fork:** https://github.com/djsincla/mlx-swift-examples, branch
-`dai-pipeline`, pinned at revision `7d86f26988c9d48ec703ec1828906be2ad6f875c`
+`dai-pipeline`, pinned at revision `6090aa0791f8994d0488ec9248f33b7534ce9e5b`
 **Upstream:** https://github.com/ml-explore/mlx-swift-examples
 **Licence:** MIT - full text in the fork's `LICENSE`, unchanged from upstream
 **Forked from:** commit `9bff95c` (mlx-swift 0.29.1)

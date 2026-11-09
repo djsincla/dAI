@@ -32,7 +32,7 @@ let package = Package(
         // dependency when both lived in one checkout, which made agreement
         // structural; now it is a pin, and the pin has to be checked.
         .package(url: "https://github.com/djsincla/mlx-swift-examples.git",
-                 revision: "7d86f26988c9d48ec703ec1828906be2ad6f875c"),
+                 revision: "6090aa0791f8994d0488ec9248f33b7534ce9e5b"),
         // URLSession can only present a client certificate as a SecIdentity,
         // which needs the private key as a SecKey. A key held in the Secure
         // Enclave is not one, and cannot be made into one without the keychain
